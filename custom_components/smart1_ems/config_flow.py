@@ -4,12 +4,19 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .api import Smart1Api
 from .const import DOMAIN
 
 
 class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Configure a smart1 EMS installation."""
+
     VERSION = 1
 
     def __init__(self):
@@ -35,7 +42,7 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 elif len(self._plants) == 1:
                     plant = self._plants[0]
                     return self.async_create_entry(
-                        title=plant.get("DeviceName", "Smart1 CSV"),
+                        title=plant.get("DeviceName", "smart1 EMS"),
                         data={
                             "api_key": self._api_key,
                             "device_id": plant["DeviceId"],
@@ -47,7 +54,12 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({
-                vol.Required("api_key"): str,
+                vol.Required("api_key"): TextSelector(
+                    TextSelectorConfig(
+                        type=TextSelectorType.PASSWORD,
+                        autocomplete="current-password",
+                    )
+                ),
             }),
             errors=errors,
         )
@@ -61,7 +73,7 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
             return self.async_create_entry(
-                title=plant.get("DeviceName", f"Smart1 {device_id}"),
+                title=plant.get("DeviceName", f"smart1 EMS {device_id}"),
                 data={
                     "api_key": self._api_key,
                     "device_id": device_id,

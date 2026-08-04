@@ -8,7 +8,7 @@ from pathlib import Path
 MODULE_PATH = (
     Path(__file__).parents[1]
     / "custom_components"
-    / "smart1_csv"
+    / "smart1_ems"
     / "pv.py"
 )
 SPEC = importlib.util.spec_from_file_location("smart1_pv", MODULE_PATH)

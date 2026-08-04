@@ -50,14 +50,14 @@ custom_components = sys.modules.setdefault(
     types.ModuleType("custom_components"),
 )
 custom_components.__path__ = [str(ROOT / "custom_components")]
-smart1_csv = sys.modules.setdefault(
-    "custom_components.smart1_csv",
-    types.ModuleType("custom_components.smart1_csv"),
+smart1_ems = sys.modules.setdefault(
+    "custom_components.smart1_ems",
+    types.ModuleType("custom_components.smart1_ems"),
 )
-smart1_csv.__path__ = [str(ROOT / "custom_components" / "smart1_csv")]
+smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
 coordinator_module = importlib.import_module(
-    "custom_components.smart1_csv.coordinator"
+    "custom_components.smart1_ems.coordinator"
 )
 Smart1Coordinator = coordinator_module.Smart1Coordinator
 

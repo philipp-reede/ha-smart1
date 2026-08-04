@@ -3,7 +3,7 @@
 ## Working
 
 - Custom integration loads through Home Assistant
-- Config flow asks for API key
+- Config flow asks for the API key in a translated, masked password field
 - `/plants` is queried automatically
 - A single plant is selected automatically
 - Sensors and counters are discovered automatically
@@ -23,6 +23,11 @@
   by their parsed smart1 service
 - Multi-device counter calculations remain assigned to the EMS
 - Redacted diagnostics expose classification metadata without credentials or values
+- Integration name and domain are now `smart1 EMS` and `smart1_ems`
+- The latest 365 days of documented PV daily production are imported as
+  external long-term statistics in the background
+- Recent PV statistics are refreshed every six hours to capture corrections
+- Entities use Home Assistant's device-aware naming convention
 
 ## Known problems
 
@@ -30,6 +35,8 @@
 - Temperature is a property and should be assigned to its source device
 - Device-specific energy data for wallbox, heat pump, heating element, grid,
   and battery remains undocumented and must not be inferred
+- The domain change from `smart1_csv` to `smart1_ems` is intentionally
+  breaking while the integration is still under development
 
 ## Current code behavior
 

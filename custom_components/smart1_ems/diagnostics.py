@@ -1,4 +1,4 @@
-"""Diagnostics support for the smart1 CSV integration."""
+"""Diagnostics support for the smart1 EMS integration."""
 
 from __future__ import annotations
 

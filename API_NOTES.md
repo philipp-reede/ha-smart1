@@ -1,4 +1,4 @@
-# smart1 CSV Portal API notes
+# smart1 EMS portal API notes
 
 Source document: `2020_Discription_API_CSV_Portal.pdf`, version 2020_1.0.
 
@@ -74,3 +74,17 @@ semantics. The current installation returned `404 / No entries or data found`.
 The integration must therefore not generate energy entities from this
 endpoint without installation-specific evidence that the endpoint is
 available and meaningful.
+
+## Historical PV production
+
+The day-based photovoltaic cumulative endpoint is the documented source for
+exact daily production totals. Month and year requests return aggregate
+period values, not a documented daily breakdown. The integration therefore
+requests the day endpoint once per date when importing history.
+
+- The initial import covers the most recent 365 days.
+- The latest three days are refreshed every six hours so delayed portal data
+  can be corrected.
+- Missing dates remain unknown and are not converted to zero production.
+- The import runs in the background and is stored as external Home Assistant
+  long-term statistics under `smart1_ems:pv_production`.

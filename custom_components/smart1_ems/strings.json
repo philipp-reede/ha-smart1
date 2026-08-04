@@ -1,0 +1,35 @@
+{
+  "title": "smart1 EMS",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to smart1 EMS",
+        "description": "Enter your personal API key from the smart1 portal. Home Assistant stores it in the config entry and uses it only for read access.",
+        "data": {
+          "api_key": "API key"
+        },
+        "data_description": {
+          "api_key": "The API key is hidden while you type."
+        }
+      },
+      "plant": {
+        "title": "Select installation",
+        "description": "Select the smart1 installation to add to Home Assistant.",
+        "data": {
+          "device_id": "Installation"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to smart1 EMS. Check the API key and try again.",
+      "no_plants": "No smart1 installations were found for this API key."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "pv_energy_today": {
+        "name": "PV energy today"
+      }
+    }
+  }
+}

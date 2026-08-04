@@ -1,0 +1,35 @@
+{
+  "title": "smart1 EMS",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Mit smart1 EMS verbinden",
+        "description": "Gib deinen persönlichen API-Schlüssel aus dem smart1 Portal ein. Home Assistant speichert ihn im Konfigurationseintrag und verwendet ihn ausschließlich für lesende Zugriffe.",
+        "data": {
+          "api_key": "API-Schlüssel"
+        },
+        "data_description": {
+          "api_key": "Der API-Schlüssel wird bei der Eingabe verdeckt."
+        }
+      },
+      "plant": {
+        "title": "Anlage auswählen",
+        "description": "Wähle die smart1 Anlage aus, die zu Home Assistant hinzugefügt werden soll.",
+        "data": {
+          "device_id": "Anlage"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zu smart1 EMS fehlgeschlagen. Prüfe den API-Schlüssel und versuche es erneut.",
+      "no_plants": "Für diesen API-Schlüssel wurden keine smart1 Anlagen gefunden."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "pv_energy_today": {
+        "name": "PV-Energie heute"
+      }
+    }
+  }
+}

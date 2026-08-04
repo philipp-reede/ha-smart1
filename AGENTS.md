@@ -22,7 +22,7 @@ heating elements and other devices known to smart1.
 
 ## Architecture
 
-Current integration domain: `smart1_csv`.
+Current integration domain: `smart1_ems`.
 
 Current layers:
 
@@ -116,13 +116,11 @@ PV cumulative endpoint:
 
 ## Current priorities
 
-1. Correct logical device classification and grouping
-2. Detect heat pump and heating element correctly
-3. Investigate energy data for wallbox, heat pump, heating element, grid
+1. Validate the PV external-statistics history in a real Home Assistant instance
+2. Investigate energy data for wallbox, heat pump, heating element, grid
    and battery without inventing unsupported API behavior
-4. Add Options Flow
-5. Add diagnostics
-6. Prepare GitHub/HACS release
+3. Add an Options Flow for history range and enabled measurement points
+4. Prepare GitHub/HACS release
 
 ## Safety and secrets
 

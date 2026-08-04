@@ -55,6 +55,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 class Smart1Sensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator, entry_id, device, description):
         super().__init__(coordinator)
 
@@ -92,7 +94,7 @@ class Smart1Sensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = (
             f"smart1_{entry_id}_{self._linear_id}_{description.value_source}"
         )
-        self._attr_name = f"Smart1 {self._name}{description.suffix}"
+        self._attr_name = f"{self._name}{description.suffix}"
         self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
         self._attr_native_unit_of_measurement = description.native_unit_of_measurement
@@ -123,7 +125,8 @@ class Smart1PvEnergySensor(CoordinatorEntity, SensorEntity):
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_suggested_display_precision = 3
-    _attr_name = "Smart1 PV Energy Today"
+    _attr_has_entity_name = True
+    _attr_translation_key = "pv_energy_today"
 
     def __init__(self, coordinator, entry_id):
         super().__init__(coordinator)

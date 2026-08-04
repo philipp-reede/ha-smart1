@@ -28,16 +28,16 @@ custom_components = sys.modules.setdefault(
     types.ModuleType("custom_components"),
 )
 custom_components.__path__ = [str(ROOT / "custom_components")]
-smart1_csv = sys.modules.setdefault(
-    "custom_components.smart1_csv",
-    types.ModuleType("custom_components.smart1_csv"),
+smart1_ems = sys.modules.setdefault(
+    "custom_components.smart1_ems",
+    types.ModuleType("custom_components.smart1_ems"),
 )
-smart1_csv.__path__ = [str(ROOT / "custom_components" / "smart1_csv")]
+smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
-diagnostics = importlib.import_module("custom_components.smart1_csv.diagnostics")
-discovery_module = importlib.import_module("custom_components.smart1_csv.discovery")
-interface_module = importlib.import_module("custom_components.smart1_csv.interface")
-point_module = importlib.import_module("custom_components.smart1_csv.point")
+diagnostics = importlib.import_module("custom_components.smart1_ems.diagnostics")
+discovery_module = importlib.import_module("custom_components.smart1_ems.discovery")
+interface_module = importlib.import_module("custom_components.smart1_ems.interface")
+point_module = importlib.import_module("custom_components.smart1_ems.point")
 
 
 class Entry:
@@ -47,7 +47,7 @@ class Entry:
 
 class Hass:
     data = {
-        "smart1_csv": {
+        "smart1_ems": {
             "entry-1": {
                 "devices": [
                     point_module.Smart1Point(

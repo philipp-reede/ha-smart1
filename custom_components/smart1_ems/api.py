@@ -17,7 +17,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class Smart1Api:
-    """Client for the smart1 CSV Portal API."""
+    """Client for the smart1 EMS portal API."""
 
     def __init__(
         self,
@@ -29,7 +29,12 @@ class Smart1Api:
         self.api_key = api_key
         self.device_id = device_id
 
-    async def _get_csv(self, path: str) -> list[dict[str, str]]:
+    async def _get_csv(
+        self,
+        path: str,
+        *,
+        missing_ok: bool = False,
+    ) -> list[dict[str, str]]:
         """Execute a CSV request."""
 
         url = f"{BASE_URL}{path}?apikey={self.api_key}"
@@ -39,6 +44,10 @@ class Smart1Api:
 
         async with self.session.get(url, timeout=30) as response:
             text = await response.text()
+
+            if missing_ok and response.status == 404:
+                _LOGGER.debug("No smart1 data for %s", safe_url)
+                return []
 
             if response.status >= 400:
                 _LOGGER.error(
@@ -187,6 +196,8 @@ class Smart1Api:
         self,
         period: str = "day",
         target_date: date | None = None,
+        *,
+        missing_ok: bool = False,
     ) -> float | None:
         """Return cumulative PV production in kWh."""
 
@@ -196,7 +207,8 @@ class Smart1Api:
         date_string = (target_date or date.today()).strftime("%Y%m%d")
         rows = await self._get_csv(
             f"/data/csv/{self.device_id}/photovoltaics/"
-            f"{period}/cumulative/{date_string}"
+            f"{period}/cumulative/{date_string}",
+            missing_ok=missing_ok,
         )
 
         return parse_pv_cumulative_energy(rows)

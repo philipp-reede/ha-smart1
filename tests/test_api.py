@@ -20,13 +20,13 @@ custom_components = sys.modules.setdefault(
 )
 custom_components.__path__ = [str(ROOT / "custom_components")]
 
-smart1_csv = sys.modules.setdefault(
-    "custom_components.smart1_csv",
-    types.ModuleType("custom_components.smart1_csv"),
+smart1_ems = sys.modules.setdefault(
+    "custom_components.smart1_ems",
+    types.ModuleType("custom_components.smart1_ems"),
 )
-smart1_csv.__path__ = [str(ROOT / "custom_components" / "smart1_csv")]
+smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
-Smart1Api = importlib.import_module("custom_components.smart1_csv.api").Smart1Api
+Smart1Api = importlib.import_module("custom_components.smart1_ems.api").Smart1Api
 
 
 class RecordingSmart1Api(Smart1Api):
@@ -34,9 +34,16 @@ class RecordingSmart1Api(Smart1Api):
         super().__init__(None, "redacted", "42")
         self.rows = rows
         self.requested_path: str | None = None
+        self.missing_ok = False
 
-    async def _get_csv(self, path: str) -> list[dict[str, str]]:
+    async def _get_csv(
+        self,
+        path: str,
+        *,
+        missing_ok: bool = False,
+    ) -> list[dict[str, str]]:
         self.requested_path = path
+        self.missing_ok = missing_ok
         return self.rows
 
 
@@ -62,6 +69,19 @@ class Smart1ApiTest(unittest.TestCase):
             api.requested_path,
             "/data/csv/42/photovoltaics/day/cumulative/20260804",
         )
+
+    def test_historical_request_allows_missing_days(self) -> None:
+        api = RecordingSmart1Api([])
+
+        value = asyncio.run(
+            api.get_pv_cumulative_energy(
+                target_date=date(2026, 8, 3),
+                missing_ok=True,
+            )
+        )
+
+        self.assertIsNone(value)
+        self.assertTrue(api.missing_ok)
 
     def test_rejects_unsupported_period(self) -> None:
         api = RecordingSmart1Api([])
