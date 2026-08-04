@@ -45,6 +45,10 @@
   counter has no available data on the current installation
 - Diagnostics expose configured energy roles through redacted point numbers
   instead of linear IDs
+- The real battery state-of-charge point is identified from its structured
+  `SOC` signal and exposed as a Home Assistant battery percentage sensor
+- Other battery-related percentage points such as state of health and
+  EnergyCloud enablement flags are not offered as battery state of charge
 - Entities use Home Assistant's device-aware naming convention
 
 ## Known problems
@@ -56,6 +60,8 @@
   estimates derived from five-minute power samples
 - The preferred source needs confirmation where the installation exposes
   multiple measurement paths for one physical device
+- Derived energy history is currently imported as one statistic per day;
+  finer-grained Energy Dashboard graphs still need an hourly import design
 - The domain change from `smart1_csv` to `smart1_ems` is intentionally
   breaking while the integration is still under development
 
