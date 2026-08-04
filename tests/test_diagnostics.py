@@ -55,8 +55,31 @@ class Api:
             }
         ]
 
+    async def get_linear_detailed_rows(self, *args, **kwargs):
+        return [
+            {
+                "LinearId": "private-point-id",
+                "Timestamp": "2026-08-03 00:00:00",
+                "Value1": "1000",
+            },
+            {
+                "LinearId": "private-point-id",
+                "Timestamp": "2026-08-03 00:05:00",
+                "Value1": "1000",
+            },
+            {
+                "LinearId": "private-point-id",
+                "Timestamp": "2026-08-03 00:10:00",
+                "Value1": "1000",
+            },
+        ]
+
+    async def get_pv_cumulative_energy(self, *args, **kwargs):
+        return 1 / 6
+
 
 class Hass:
+    config = types.SimpleNamespace(time_zone="Europe/Berlin")
     data = {
         "smart1_ems": {
             "entry-1": {
@@ -64,18 +87,18 @@ class Hass:
                 "devices": [
                     point_module.Smart1Point(
                         id="private-point-id",
-                        name="WP Leistung",
+                        name="PV Erzeugung",
                         type="Energy",
                         source="counter",
-                        hardware="meter",
-                        interface="modbus:1_2_heatpump_3:power",
+                        hardware="pv_global",
+                        interface="pv",
                         parsed_interface=interface_module.parse_interface(
-                            "modbus:1_2_heatpump_3:power"
+                            "pv"
                         ),
                     )
                 ],
                 "discovery": discovery_module.Smart1DiscoveryResult(
-                    has_heat_pump=True
+                    has_pv=True
                 ),
             }
         }
@@ -89,7 +112,7 @@ class DiagnosticsTest(unittest.TestCase):
         )
         serialized = json.dumps(result)
 
-        self.assertEqual(result["points"][0]["current_category"], "heat_pump")
+        self.assertEqual(result["points"][0]["current_category"], "pv")
         self.assertEqual(
             result["linear_cumulative_probe"],
             {
@@ -102,11 +125,28 @@ class DiagnosticsTest(unittest.TestCase):
                 "unmatched_response_rows": 0,
             },
         )
+        self.assertEqual(
+            result["pv_power_integration_probe"],
+            {
+                "period": "previous_complete_day",
+                "point_number": 1,
+                "method": "trapezoidal_max_15_minute_gap",
+                "sample_count": 3,
+                "integrated_intervals": 2,
+                "skipped_gaps": 0,
+                "coverage_minutes": 10,
+                "result": "calibrated",
+                "relative_difference_percent": 0.0,
+                "assessment": "good",
+            },
+        )
         self.assertNotIn("secret", serialized)
         self.assertNotIn("private-device", serialized)
         self.assertNotIn("private-point-id", serialized)
         self.assertNotIn("private-timestamp", serialized)
         self.assertNotIn("private-energy-value", serialized)
+        self.assertNotIn("2026-08-03", serialized)
+        self.assertNotIn('"1000"', serialized)
         self.assertNotIn("api_key", serialized)
         self.assertNotIn("live", serialized)
 

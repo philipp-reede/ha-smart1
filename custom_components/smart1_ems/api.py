@@ -171,13 +171,7 @@ class Smart1Api:
         if not linear_ids:
             return {}
 
-        today = date.today().strftime("%Y%m%d")
-
-        ids = quote(",".join(linear_ids), safe=",")
-
-        rows = await self._get_csv(
-            f"/data/csv/{self.device_id}/linear/day/detailed/{today}/{ids}"
-        )
+        rows = await self.get_linear_detailed_rows(linear_ids)
 
         values = {linear_id: None for linear_id in linear_ids}
 
@@ -208,6 +202,29 @@ class Smart1Api:
                 )
 
         return values
+
+    async def get_linear_detailed_rows(
+        self,
+        linear_ids: list[str],
+        period: str = "day",
+        target_date: date | None = None,
+        *,
+        missing_ok: bool = False,
+    ) -> list[dict[str, str]]:
+        """Return detailed 5-minute rows for the requested linear points."""
+        if period not in {"day", "month", "year"}:
+            raise ValueError(f"Unsupported detailed period: {period}")
+
+        if not linear_ids:
+            return []
+
+        date_string = (target_date or date.today()).strftime("%Y%m%d")
+        ids = quote(",".join(linear_ids), safe=",")
+        return await self._get_csv(
+            f"/data/csv/{self.device_id}/linear/"
+            f"{period}/detailed/{date_string}/{ids}",
+            missing_ok=missing_ok,
+        )
 
     async def get_pv_cumulative_energy(
         self,

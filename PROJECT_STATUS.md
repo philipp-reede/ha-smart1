@@ -27,6 +27,8 @@
   without exporting IDs, timestamps, or measurements
 - The completed-day probe returned an API error row rather than cumulative
   measurements for the current installation
+- Diagnostics can calibrate guarded five-minute power integration against the
+  exact PV daily total without exporting power or energy values
 - Integration name and domain are now `smart1 EMS` and `smart1_ems`
 - The latest 365 days of documented PV daily production are imported as
   external long-term statistics in the background

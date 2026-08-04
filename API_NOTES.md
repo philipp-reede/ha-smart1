@@ -86,6 +86,18 @@ completed day. The portal returned an API error row with `Errorcode` and
 cumulative endpoint is therefore not currently a usable source for these
 Energy Dashboard totals.
 
+## Detailed-power calibration
+
+Before deriving non-PV energy, diagnostics compare one completed day of the
+`pv_global` five-minute power point with the exact documented PV daily total.
+Detailed W samples are integrated in UTC using the trapezoidal rule. Intervals
+longer than 15 minutes are skipped so missing data is never bridged.
+
+The diagnostic result exposes only coverage, sample and gap counts, and the
+relative percentage difference. It excludes the linear ID, timestamps, raw
+power, derived kWh and reference kWh. A difference up to 5% is classified as
+`good`, up to 10% as `marginal`, and above 10% as `poor`.
+
 ## Historical PV production
 
 The day-based photovoltaic cumulative endpoint is the documented source for

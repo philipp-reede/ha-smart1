@@ -35,6 +35,7 @@ Current layers:
 - `sensor.py`: Home Assistant entities and device registry
 - `discovery.py`: installation discovery used inside Home Assistant
 - `config_flow.py`: API-key setup and automatic plant selection
+- `power_integration.py`: guarded trapezoidal integration of detailed power data
 
 Do not introduce generic abstractions unless they directly improve this
 Home Assistant integration.
@@ -116,7 +117,7 @@ PV cumulative endpoint:
 
 ## Current priorities
 
-1. Validate the PV external-statistics history in a real Home Assistant instance
+1. Validate detailed-power integration against exact PV daily production
 2. Investigate energy data for wallbox, heat pump, heating element, grid
    and battery without inventing unsupported API behavior
 3. Add an Options Flow for history range and enabled measurement points

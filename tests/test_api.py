@@ -139,6 +139,24 @@ class Smart1ApiTest(unittest.TestCase):
         )
         self.assertTrue(api.missing_ok)
 
+    def test_linear_detailed_endpoint_uses_requested_date(self) -> None:
+        api = RecordingSmart1Api([])
+
+        rows = asyncio.run(
+            api.get_linear_detailed_rows(
+                ["pv_1"],
+                target_date=date(2026, 8, 3),
+                missing_ok=True,
+            )
+        )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            api.requested_path,
+            "/data/csv/42/linear/day/detailed/20260803/pv_1",
+        )
+        self.assertTrue(api.missing_ok)
+
     def test_embedded_not_found_is_missing_data(self) -> None:
         api = Smart1Api(
             CsvSession("Errorcode;Errormessage\n404;No entries or data found\n"),
