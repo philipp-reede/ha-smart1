@@ -56,6 +56,36 @@ def _has_hourly_resolution(
     )
 
 
+def _has_decreasing_sum(records: list[Mapping[str, Any]]) -> bool:
+    """Return whether cumulative statistics decrease between records."""
+    sums = [
+        (start, float(record["sum"]))
+        for record in records
+        if record.get("sum") is not None
+        for start in (_statistics_start(record),)
+    ]
+    ordered_sums = [value for _start, value in sorted(sums)]
+    return any(
+        current < previous - 1e-9
+        for previous, current in zip(
+            ordered_sums,
+            ordered_sums[1:],
+            strict=False,
+        )
+    )
+
+
+def needs_hourly_rebuild(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+) -> bool:
+    """Return whether derived statistics must be cleared and rebuilt."""
+    return bool(records) and (
+        not _has_hourly_resolution(records, local_tz)
+        or _has_decreasing_sum(records)
+    )
+
+
 def determine_hourly_import_window(
     records: list[Mapping[str, Any]],
     today: date,
@@ -67,7 +97,7 @@ def determine_hourly_import_window(
     statistic ID so Energy Dashboard configuration remains intact.
     """
     initial_start = today - timedelta(days=HISTORY_DAYS - 1)
-    if not records or not _has_hourly_resolution(records, local_tz):
+    if not records or needs_hourly_rebuild(records, local_tz):
         return initial_start, 0.0
 
     refresh_start = today - timedelta(days=REFRESH_DAYS - 1)
@@ -171,7 +201,7 @@ class Smart1DerivedEnergyImporter:
         start_date: date,
         end_date: date,
         local_tz: ZoneInfo,
-    ) -> dict[str, list[tuple[datetime, float]]]:
+    ) -> tuple[dict[str, list[tuple[datetime, float]]], bool]:
         """Fetch each date once and integrate selected points by UTC hour."""
         hourly_energy = {role_key: [] for role_key in self.role_points}
         linear_ids = list(
@@ -192,7 +222,7 @@ class Smart1DerivedEnergyImporter:
                     target_date,
                     err,
                 )
-                break
+                return hourly_energy, False
 
             for role_key, point in self.role_points.items():
                 integration = integrate_power_rows(rows, point.id, local_tz)
@@ -203,7 +233,7 @@ class Smart1DerivedEnergyImporter:
 
             target_date += timedelta(days=1)
 
-        return hourly_energy
+        return hourly_energy, True
 
     async def async_import(self) -> None:
         """Import initial derived history or refresh recent days."""
@@ -221,6 +251,11 @@ class Smart1DerivedEnergyImporter:
                 role_key: await self._existing_statistics(statistic_id)
                 for role_key, statistic_id in statistic_ids.items()
             }
+            rebuild_roles = {
+                role_key
+                for role_key, records in records_by_role.items()
+                if needs_hourly_rebuild(records, local_tz)
+            }
             windows = {
                 role_key: determine_hourly_import_window(
                     records,
@@ -230,11 +265,40 @@ class Smart1DerivedEnergyImporter:
                 for role_key, records in records_by_role.items()
             }
             start_date = min(window[0] for window in windows.values())
-            fetched_by_role = await self._fetch_hourly_energy(
+            fetched_by_role, fetch_completed = await self._fetch_hourly_energy(
                 start_date,
                 today,
                 local_tz,
             )
+            missing_replacements = {
+                role_key
+                for role_key in rebuild_roles
+                if not fetched_by_role[role_key]
+            }
+            if rebuild_roles and (
+                not fetch_completed or missing_replacements
+            ):
+                _LOGGER.warning(
+                    "Keeping existing smart1 energy statistics because the "
+                    "replacement history is incomplete "
+                    "(fetch completed: %s, roles without data: %d)",
+                    fetch_completed,
+                    len(missing_replacements),
+                )
+                return
+
+            recorder = get_instance(self.hass)
+            if rebuild_roles:
+                rebuild_statistic_ids = [
+                    statistic_ids[role_key]
+                    for role_key in sorted(rebuild_roles)
+                ]
+                recorder.async_clear_statistics(rebuild_statistic_ids)
+                await recorder.async_block_till_done()
+                _LOGGER.info(
+                    "Cleared %d smart1 derived energy statistics before rebuild",
+                    len(rebuild_statistic_ids),
+                )
 
             for role_key, point in self.role_points.items():
                 role_start, baseline_sum = windows[role_key]
@@ -243,13 +307,16 @@ class Smart1DerivedEnergyImporter:
                     for item in fetched_by_role[role_key]
                     if item[0].astimezone(local_tz).date() >= role_start
                 ]
-                hourly_energy = merge_hourly_energy(
-                    records_by_role[role_key],
-                    fetched_energy,
-                    role_start,
-                    today,
-                    local_tz,
-                )
+                if role_key in rebuild_roles:
+                    hourly_energy = sorted(fetched_energy)
+                else:
+                    hourly_energy = merge_hourly_energy(
+                        records_by_role[role_key],
+                        fetched_energy,
+                        role_start,
+                        today,
+                        local_tz,
+                    )
                 statistics = build_hourly_energy_statistics(
                     hourly_energy,
                     baseline_sum,
@@ -276,3 +343,6 @@ class Smart1DerivedEnergyImporter:
                     len(statistics),
                     role_key,
                 )
+
+            if rebuild_roles:
+                await recorder.async_block_till_done()

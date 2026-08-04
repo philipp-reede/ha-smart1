@@ -41,6 +41,9 @@
   with the same 365-day import and three-day refresh behavior
 - Derived power history is split into UTC-aligned hourly energy statistics;
   existing daily statistics migrate in place without changing statistic IDs
+- Daily-only or non-monotonic derived statistics are cleared only after a
+  complete replacement fetch and then rebuilt under the same statistic IDs;
+  exact PV history and statistics from other integrations are not cleared
 - Derived grid import and export statistics were accepted by the real Home
   Assistant Energy Dashboard
 - The auxiliary-heater remote counter is the preferred source because its bus

@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo
 
 
@@ -228,7 +229,7 @@ class Smart1HistoryTest(unittest.TestCase):
             },
         )
 
-        result = asyncio.run(
+        result, completed = asyncio.run(
             importer._fetch_hourly_energy(
                 date(2026, 8, 3),
                 date(2026, 8, 3),
@@ -240,6 +241,7 @@ class Smart1HistoryTest(unittest.TestCase):
             api.calls,
             [(["grid", "wallbox"], date(2026, 8, 3), True)],
         )
+        self.assertTrue(completed)
         self.assertEqual(
             result["grid_import"][0][0],
             datetime(2026, 8, 2, 22, 0, tzinfo=timezone.utc),
@@ -269,6 +271,9 @@ class Smart1HistoryTest(unittest.TestCase):
 
         self.assertEqual(start, date(2025, 8, 5))
         self.assertEqual(baseline, 0.0)
+        self.assertTrue(
+            derived_history.needs_hourly_rebuild(records, local_tz)
+        )
 
     def test_hourly_derived_history_refreshes_three_days(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
@@ -295,6 +300,159 @@ class Smart1HistoryTest(unittest.TestCase):
 
         self.assertEqual(start, date(2026, 8, 2))
         self.assertEqual(baseline, 63.0)
+        self.assertFalse(
+            derived_history.needs_hourly_rebuild(records, local_tz)
+        )
+
+    def test_decreasing_hourly_sum_triggers_full_rebuild(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        records = [
+            {
+                "start": datetime(2026, 8, 3, hour, tzinfo=local_tz).timestamp(),
+                "state": 1.0,
+                "sum": total,
+            }
+            for hour, total in ((0, 100.0), (1, 2.0), (2, 3.0))
+        ]
+
+        self.assertTrue(
+            derived_history.needs_hourly_rebuild(records, local_tz)
+        )
+        self.assertEqual(
+            derived_history.determine_hourly_import_window(
+                records,
+                date(2026, 8, 4),
+                local_tz,
+            ),
+            (date(2025, 8, 5), 0.0),
+        )
+
+    def test_rebuild_clears_only_selected_derived_statistics(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        daily_record = {
+            "start": datetime(2026, 8, 3, tzinfo=local_tz).timestamp(),
+            "state": 5.0,
+            "sum": 20.0,
+        }
+        hour_start = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                ),
+                "wallbox_consumption": types.SimpleNamespace(
+                    id="wallbox",
+                    name="ECar Laden",
+                ),
+            },
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[daily_record]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=(
+                {
+                    "grid_import": [(hour_start, 0.25)],
+                    "wallbox_consumption": [(hour_start, 0.75)],
+                },
+                True,
+            )
+        )
+        fake_recorder = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=fake_recorder,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+        ):
+            asyncio.run(importer.async_import())
+
+        expected_ids = sorted(
+            [
+                derived_history.statistic_id_for_role("grid_import", "grid"),
+                derived_history.statistic_id_for_role(
+                    "wallbox_consumption",
+                    "wallbox",
+                ),
+            ]
+        )
+        fake_recorder.async_clear_statistics.assert_called_once_with(
+            expected_ids
+        )
+        self.assertEqual(fake_recorder.async_block_till_done.await_count, 2)
+        self.assertEqual(add_statistics.call_count, 2)
+        self.assertNotIn("smart1_ems:pv_production", expected_ids)
+        for call in add_statistics.call_args_list:
+            self.assertEqual(len(call.kwargs["statistics"]), 1)
+            self.assertNotEqual(
+                call.kwargs["statistics"][0]["state"],
+                daily_record["state"],
+            )
+
+    def test_incomplete_fetch_does_not_clear_existing_statistics(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        daily_record = {
+            "start": datetime(2026, 8, 3, tzinfo=local_tz).timestamp(),
+            "state": 5.0,
+            "sum": 20.0,
+        }
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[daily_record]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=({"grid_import": []}, False)
+        )
+        fake_recorder = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=fake_recorder,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+        ):
+            asyncio.run(importer.async_import())
+
+        fake_recorder.async_clear_statistics.assert_not_called()
+        fake_recorder.async_block_till_done.assert_not_awaited()
+        add_statistics.assert_not_called()
 
     def test_hourly_merge_replaces_old_daily_midnight_record(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
