@@ -74,7 +74,7 @@ def determine_import_window(
     return min(oldest_date, refresh_start), 0.0
 
 
-def build_pv_statistics(
+def build_daily_energy_statistics(
     daily_energy: list[tuple[date, float]],
     baseline_sum: float,
     local_tz: ZoneInfo,
@@ -191,7 +191,7 @@ class Smart1PvHistoryImporter:
                 today,
                 local_tz,
             )
-            statistics = build_pv_statistics(
+            statistics = build_daily_energy_statistics(
                 daily_energy,
                 baseline_sum,
                 local_tz,

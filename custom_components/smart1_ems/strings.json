@@ -25,6 +25,26 @@
       "no_plants": "No smart1 installations were found for this API key."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure derived energy",
+        "description": "Select one power point for each energy role you want to enable. The suggested points match the detected installation. Leave a role set to — to disable it. Energy is derived from five-minute power data and imported as external statistics.",
+        "data": {
+          "grid_import": "Grid import",
+          "grid_export": "Grid export",
+          "battery_charge": "Battery charge",
+          "battery_discharge": "Battery discharge",
+          "wallbox_consumption": "Wallbox consumption",
+          "heat_pump_consumption": "Heat pump consumption",
+          "auxiliary_heater_consumption": "Auxiliary heater consumption"
+        }
+      }
+    },
+    "error": {
+      "duplicate_energy_point": "Each measurement point can be assigned to only one energy role."
+    }
+  },
   "entity": {
     "sensor": {
       "pv_energy_today": {

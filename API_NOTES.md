@@ -98,6 +98,34 @@ relative percentage difference. It excludes the linear ID, timestamps, raw
 power, derived kWh and reference kWh. A difference up to 5% is classified as
 `good`, up to 10% as `marginal`, and above 10% as `poor`.
 
+The real-installation calibration for the previous complete day contained
+288 samples and 287 integrated intervals, covering 1,435 minutes with no
+skipped gaps. The integrated result differed from the documented PV daily
+total by 0.43%, which supports using the same guarded integration for
+explicitly selected non-PV power points.
+
+## Derived non-PV energy
+
+Because the linear cumulative endpoint does not provide usable totals for the
+current installation, non-PV Energy Dashboard data is derived from detailed
+five-minute power values. This is deliberately opt-in:
+
+- The Options Flow offers eligible counter points for grid import, grid export,
+  battery charge, battery discharge, wallbox, heat pump and auxiliary heater.
+- Detected points are suggested, but the user must save the selection before
+  any derived statistic is created.
+- Each date is fetched once for all selected points and integrated with the
+  calibrated trapezoidal method.
+- Gaps longer than 15 minutes are excluded rather than estimated.
+- Statistics use kWh and a source-specific ID. Changing the selected source
+  creates a new statistic instead of combining incompatible histories.
+- The initial import covers 365 days; the latest three days are refreshed
+  every six hours.
+
+These values are estimates derived from power samples, not native smart1
+meter totals. Missing coverage can therefore make them lower than the actual
+energy consumption.
+
 ## Historical PV production
 
 The day-based photovoltaic cumulative endpoint is the documented source for

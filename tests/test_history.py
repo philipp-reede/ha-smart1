@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
 import importlib
 from pathlib import Path
@@ -84,6 +85,9 @@ smart1_ems = sys.modules.setdefault(
 smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
 history = importlib.import_module("custom_components.smart1_ems.history")
+derived_history = importlib.import_module(
+    "custom_components.smart1_ems.derived_history"
+)
 
 
 class Smart1HistoryTest(unittest.TestCase):
@@ -134,7 +138,7 @@ class Smart1HistoryTest(unittest.TestCase):
     def test_statistics_are_cumulative_and_hour_aligned(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
 
-        result = history.build_pv_statistics(
+        result = history.build_daily_energy_statistics(
             [
                 (date(2026, 3, 29), 4.25),
                 (date(2026, 3, 30), 5.75),
@@ -189,6 +193,57 @@ class Smart1HistoryTest(unittest.TestCase):
                 (date(2026, 8, 3), 4.5),
                 (date(2026, 8, 4), 2.0),
             ],
+        )
+
+    def test_derived_import_fetches_all_selected_points_together(self) -> None:
+        class FakeApi:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def get_linear_detailed_rows(
+                self,
+                linear_ids,
+                *,
+                target_date,
+                missing_ok,
+            ):
+                self.calls.append((linear_ids, target_date, missing_ok))
+                return [
+                    {
+                        "LinearId": linear_id,
+                        "Timestamp": timestamp,
+                        "Value1": "1000",
+                    }
+                    for linear_id in linear_ids
+                    for timestamp in ("2026-08-03 00:00", "2026-08-03 00:05")
+                ]
+
+        api = FakeApi()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(),
+            api,
+            {
+                "grid_import": types.SimpleNamespace(id="grid"),
+                "wallbox_consumption": types.SimpleNamespace(id="wallbox"),
+            },
+        )
+
+        result = asyncio.run(
+            importer._fetch_daily_energy(
+                date(2026, 8, 3),
+                date(2026, 8, 3),
+                ZoneInfo("Europe/Berlin"),
+            )
+        )
+
+        self.assertEqual(
+            api.calls,
+            [(["grid", "wallbox"], date(2026, 8, 3), True)],
+        )
+        self.assertAlmostEqual(result["grid_import"][0][1], 1 / 12)
+        self.assertAlmostEqual(
+            result["wallbox_consumption"][0][1],
+            1 / 12,
         )
 
 

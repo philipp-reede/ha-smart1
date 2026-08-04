@@ -25,6 +25,26 @@
       "no_plants": "Für diesen API-Schlüssel wurden keine smart1 Anlagen gefunden."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Abgeleitete Energie konfigurieren",
+        "description": "Wähle für jede gewünschte Energierolle einen Leistungsmesspunkt aus. Die vorgeschlagenen Messpunkte entsprechen der erkannten Anlage. Mit — bleibt eine Rolle deaktiviert. Die Energie wird aus den 5-Minuten-Leistungswerten berechnet und als externe Statistik importiert.",
+        "data": {
+          "grid_import": "Netzbezug",
+          "grid_export": "Netzeinspeisung",
+          "battery_charge": "Batterieladung",
+          "battery_discharge": "Batterieentladung",
+          "wallbox_consumption": "Wallbox-Verbrauch",
+          "heat_pump_consumption": "Wärmepumpen-Verbrauch",
+          "auxiliary_heater_consumption": "Zusatzheizungs-Verbrauch"
+        }
+      }
+    },
+    "error": {
+      "duplicate_energy_point": "Jeder Messpunkt kann nur einer Energierolle zugeordnet werden."
+    }
+  },
   "entity": {
     "sensor": {
       "pv_energy_today": {

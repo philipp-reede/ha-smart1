@@ -9,7 +9,9 @@ from homeassistant.helpers.event import async_track_time_interval
 from .api import Smart1Api
 from .const import DOMAIN
 from .coordinator import Smart1Coordinator
+from .derived_history import Smart1DerivedEnergyImporter
 from .discovery import Smart1Discovery
+from .energy_roles import ENERGY_ROLES_BY_KEY, energy_candidates
 from .history import Smart1PvHistoryImporter
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,17 +49,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "discovery": discovery_result,
     }
 
+    history_importers = []
     if discovery_result.has_pv:
-        history_importer = Smart1PvHistoryImporter(hass, api)
-        hass.data[DOMAIN][entry.entry_id]["history_importer"] = history_importer
+        history_importers.append(Smart1PvHistoryImporter(hass, api))
+
+    points_by_id = {point.id: point for point in devices}
+    selected_roles = entry.options.get("energy_roles", {})
+    role_points = {}
+    for role_key, point_id in selected_roles.items():
+        role = ENERGY_ROLES_BY_KEY.get(role_key)
+        point = points_by_id.get(point_id)
+        if role is None or point is None:
+            continue
+        if point.id not in {
+            candidate.id for candidate in energy_candidates(devices, role)
+        }:
+            _LOGGER.warning(
+                "Ignoring ineligible smart1 derived energy role %s",
+                role_key,
+            )
+            continue
+        role_points[role_key] = point
+    if role_points:
+        history_importers.append(
+            Smart1DerivedEnergyImporter(hass, api, role_points)
+        )
+
+    if history_importers:
+        hass.data[DOMAIN][entry.entry_id]["history_importers"] = history_importers
 
         async def _async_refresh_history(_now=None) -> None:
-            await history_importer.async_import()
+            for history_importer in history_importers:
+                await history_importer.async_import()
 
         entry.async_create_background_task(
             hass,
-            history_importer.async_import(),
-            "smart1 EMS PV history import",
+            _async_refresh_history(),
+            "smart1 EMS history import",
         )
         entry.async_on_unload(
             async_track_time_interval(
