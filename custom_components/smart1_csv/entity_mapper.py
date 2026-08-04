@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import copy
 from dataclasses import dataclass
 
 from homeassistant.components.sensor import (
@@ -78,19 +77,4 @@ def get_entity_description(point: Smart1Point) -> Smart1EntityDescription:
 
 def get_entity_descriptions(point: Smart1Point) -> list[Smart1EntityDescription]:
     """Create all Home Assistant entities for one smart1 point."""
-    descriptions: list[Smart1EntityDescription] = []
-
-    live = get_entity_description(point)
-    descriptions.append(live)
-
-    if live.device_class == SensorDeviceClass.POWER:
-        energy_today = copy(live)
-        energy_today.device_class = SensorDeviceClass.ENERGY
-        energy_today.state_class = SensorStateClass.TOTAL_INCREASING
-        energy_today.native_unit_of_measurement = "kWh"
-        energy_today.value_source = "energy_today"
-        energy_today.suffix = " Today"
-
-        descriptions.append(energy_today)
-
-    return descriptions
+    return [get_entity_description(point)]

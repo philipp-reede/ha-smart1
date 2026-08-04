@@ -1,20 +1,76 @@
+# smart1 CSV Portal API notes
 
-### `API_NOTES.md`
+Source document: `2020_Discription_API_CSV_Portal.pdf`, version 2020_1.0.
 
-Dort speicherst du die API-Dokumentation in eigener Zusammenfassung, einschließlich Beispielantworten und Besonderheiten. Den API-Key niemals übernehmen.
+## Authentication and base URL
 
-## Übergabe an Codex
+- Base URL: `https://portal.smart1.eu/export`
+- Every request uses the user-specific `apikey` query parameter.
+- Never log, store in fixtures, or commit a real API key.
 
-Öffne anschließend in Codex den Projektordner bzw. das Repository und starte mit:
+## Configuration endpoints
 
-```text
-Read AGENTS.md, PROJECT_STATUS.md and API_NOTES.md first.
+- `/plants`
+- `/plants/{deviceId}`
+- `/sensors/{deviceId}`
+- `/counters/{deviceId}`
+- `/inverters/{deviceId}`
+- `/modulfields/{deviceId}`
+- `/bus/{deviceId}`
 
-Inspect the complete current codebase before modifying anything. Compare the
-actual implementation with PROJECT_STATUS.md and identify inconsistencies.
+`SensorId` and `Counter Id` are the linear IDs used by the linear data
+endpoint. `InverterId` follows the form `Inverter_B{bus}_A{address}`.
 
-Do not make changes yet. First give me:
-1. a concise architecture summary,
-2. the current working state,
-3. concrete defects or stale experimental code,
-4. the safest next implementation step.
+## Linear live data
+
+Endpoint:
+
+`/data/csv/{deviceId}/linear/{period}/detailed/{YYYYMMDD}/{linearIds}`
+
+- Supported periods: `day`, `month`, `year`.
+- `linearIds` is an optional comma-separated list, but the documentation
+  recommends always supplying it.
+- Response fields include `DeviceId`, `LinearId`, `Timestamp`, `Value1`, and
+  `Value2`.
+- `Value1` contains the point value in the base unit indicated by its type.
+- `Value2` is reserved.
+
+## Photovoltaic detailed data
+
+Endpoint:
+
+`/data/csv/{deviceId}/photovoltaics/{period}/detailed/{YYYYMMDD}/{bus}/{address}/{stringId}`
+
+The bus, address, and string filters are optional for day and month. Bus and
+address are mandatory for year requests.
+
+- `Value1`: AC power in W
+- `Value2`: DC power in W
+- `Value3`: DC voltage in V
+- `Value4`: inverter temperature in °C
+
+## Photovoltaic cumulative data
+
+Endpoint:
+
+`/data/csv/{deviceId}/photovoltaics/{period}/cumulative/{YYYYMMDD}/{bus}/{address}/{stringId}`
+
+- Supported periods: `day`, `month`, `year`.
+- `Value1` contains PV production in Wh.
+- `Value2` through `Value4` are reserved.
+- Production is logged only on the first used string of an inverter, usually
+  string 1.
+- When requesting all strings, aggregate one production value per
+  `(Bus, Address)` to avoid double counting.
+
+## Linear cumulative data
+
+The overview lists:
+
+`/data/csv/{deviceId}/linear/{period}/cumulative/{YYYYMMDD}/{linearIds}`
+
+The document does not provide a corresponding response definition or field
+semantics. The current installation returned `404 / No entries or data found`.
+The integration must therefore not generate energy entities from this
+endpoint without installation-specific evidence that the endpoint is
+available and meaningful.

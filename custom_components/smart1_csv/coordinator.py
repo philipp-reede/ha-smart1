@@ -26,12 +26,18 @@ class Smart1Coordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         try:
             live_values = await self.api.get_latest_linear_values(self.linear_ids)
-            energy_today = await self.api.get_cumulative_values("day", self.linear_ids)
-
-            return {
-                "live": live_values,
-                "energy_today": energy_today,
-            }
-
-        except ClientError as err:
+        except (ClientError, TimeoutError) as err:
             raise UpdateFailed(str(err)) from err
+
+        try:
+            pv_energy_today = await self.api.get_pv_cumulative_energy()
+        except (ClientError, TimeoutError) as err:
+            # PV production is optional. A missing cumulative endpoint must not
+            # make otherwise valid live measurements unavailable.
+            _LOGGER.debug("Unable to update cumulative PV production: %s", err)
+            pv_energy_today = None
+
+        return {
+            "live": live_values,
+            "pv_energy_today": pv_energy_today,
+        }

@@ -3,14 +3,15 @@ from __future__ import annotations
 import csv
 import io
 import logging
-from datetime import datetime
+from datetime import date
 from urllib.parse import quote
-from .interface import parse_interface
 
 import aiohttp
 
 from .const import BASE_URL
+from .interface import parse_interface
 from .point import Smart1Point
+from .pv import parse_pv_cumulative_energy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ class Smart1Api:
         return await self._get_csv(f"/counters/{self.device_id}")
 
     def _counter_to_point(self, row: dict[str, str]) -> Smart1Point:
-        """Convert one counter row into a Smart1Device."""
+        """Convert one counter row into a Smart1Point."""
 
         return Smart1Point(
             id=(
@@ -88,7 +89,7 @@ class Smart1Api:
         )
 
     def _sensor_to_point(self, row: dict[str, str]) -> Smart1Point:
-        """Convert one sensor row into a Smart1Device."""
+        """Convert one sensor row into a Smart1Point."""
 
         return Smart1Point(
             id=row.get("SensorId", ""),
@@ -107,7 +108,7 @@ class Smart1Api:
     async def get_linear_devices(self) -> list[Smart1Point]:
         """Return all enabled sensors and counters."""
 
-        devices: list[Smart1Device] = []
+        devices: list[Smart1Point] = []
 
         counters = await self.get_counters()
 
@@ -131,26 +132,7 @@ class Smart1Api:
             if device.id:
                 devices.append(device)
 
-        _LOGGER.info("Discovered %d smart1 devices", len(devices))
-        
-        for point in devices:
-            if point.hardware in (
-                "buscounter",
-                "arithmetic",
-                "modbus",
-                "onewire",
-                "pv_global",
-                "mtec",
-                "remotesensor",
-            ):
-                _LOGGER.warning(
-                    "%s | %s | %s | %s | %s",
-                    point.hardware,
-                    point.type,
-                    point.interface,
-                    point.name,
-                    point.id,
-                )
+        _LOGGER.debug("Discovered %d smart1 linear points", len(devices))
 
         return devices
 
@@ -163,7 +145,7 @@ class Smart1Api:
         if not linear_ids:
             return {}
 
-        today = datetime.now().strftime("%Y%m%d")
+        today = date.today().strftime("%Y%m%d")
 
         ids = quote(",".join(linear_ids), safe=",")
 
@@ -201,58 +183,20 @@ class Smart1Api:
 
         return values
 
-    async def get_cumulative_values(
+    async def get_pv_cumulative_energy(
         self,
-        period: str,
-        linear_ids: list[str],
-    ) -> dict[str, float | None]:
-        """Return cumulative energy values in kWh for requested linear ids."""
+        period: str = "day",
+        target_date: date | None = None,
+    ) -> float | None:
+        """Return cumulative PV production in kWh."""
 
-        if not linear_ids:
-            return {}
+        if period not in {"day", "month", "year"}:
+            raise ValueError(f"Unsupported cumulative period: {period}")
 
-        today = datetime.now().strftime("%Y%m%d")
-        ids = quote(",".join(linear_ids), safe=",")
-
+        date_string = (target_date or date.today()).strftime("%Y%m%d")
         rows = await self._get_csv(
-            f"/data/csv/{self.device_id}/linear/{period}/cumulative/{today}/{ids}"
-        )
-        _LOGGER.warning(
-           "smart1 cumulative %s: rows=%s sample=%s",
-            period,
-            len(rows),
-            rows[:5],
+            f"/data/csv/{self.device_id}/photovoltaics/"
+            f"{period}/cumulative/{date_string}"
         )
 
-        values: dict[str, float | None] = {
-            linear_id: None for linear_id in linear_ids
-        }
-
-        for row in rows:
-            linear_id = row.get("LinearId")
-
-            raw = (
-                row.get("Value1")
-                or row.get("Value 1")
-                or row.get('"Value 1"')
-                or row.get("Value")
-            )
-
-            if linear_id not in values:
-                continue
-
-            if raw in (None, "", "No value", '"No value"'):
-                continue
-
-            try:
-                # smart1 cumulative values are Wh -> Home Assistant wants kWh
-                values[linear_id] = float(str(raw).replace(",", ".")) / 1000
-
-            except ValueError:
-                _LOGGER.warning(
-                    "Cannot parse cumulative value '%s' for %s",
-                    raw,
-                    linear_id,
-                )
-
-        return values
+        return parse_pv_cumulative_energy(rows)

@@ -13,6 +13,10 @@
 - Interface parser exists
 - Classification exists
 - Entities are grouped in Home Assistant devices
+- Device registry identifiers use valid `(DOMAIN, identifier)` pairs
+- PV production is read from the documented photovoltaics cumulative endpoint
+- PV production is aggregated once per inverter and exposed in kWh
+- A failure of optional PV cumulative data no longer blocks live values
 
 ## Known problems
 
@@ -25,13 +29,8 @@
   - generic term: `Heizstab`
 - Consumption must not be represented as a device
 - Temperature is a property and should be assigned to its source device
-- Automatically generated `Today` entities from `linear/cumulative`
-  returned unknown values
-- Current installation returned:
-  `Errorcode 404 / No entries or data found`
-  for linear cumulative data
-- PV energy must therefore be implemented through the photovoltaics
-  cumulative endpoint first
+- Device-specific energy data for wallbox, heat pump, heating element, grid,
+  and battery remains undocumented and must not be inferred
 
 ## Current code behavior
 
@@ -40,5 +39,9 @@ The coordinator currently stores approximately:
 ```python
 {
     "live": {...},
-    "energy_today": {...},
+    "pv_energy_today": 12.345,
 }
+```
+
+`pv_energy_today` is `None` when the optional PV cumulative endpoint is not
+available. Live values continue updating in that case.

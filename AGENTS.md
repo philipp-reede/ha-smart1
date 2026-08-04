@@ -118,13 +118,11 @@ PV cumulative endpoint:
 
 1. Correct logical device classification and grouping
 2. Detect heat pump and heating element correctly
-3. Remove invalid automatically generated linear cumulative entities
-4. Implement PV energy using the photovoltaics cumulative endpoint
-5. Investigate energy data for wallbox, heat pump, heating element, grid
+3. Investigate energy data for wallbox, heat pump, heating element, grid
    and battery without inventing unsupported API behavior
-6. Add Options Flow
-7. Add diagnostics
-8. Prepare GitHub/HACS release
+4. Add Options Flow
+5. Add diagnostics
+6. Prepare GitHub/HACS release
 
 ## Safety and secrets
 
