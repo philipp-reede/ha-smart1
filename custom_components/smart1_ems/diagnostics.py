@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -10,6 +10,7 @@ from aiohttp import ClientError
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .api import Smart1Api, Smart1ApiError
 from .classifier import classify_point
@@ -56,7 +57,7 @@ async def _linear_cumulative_probe(
     point_numbers_by_id = {
         point.id: number for number, point in energy_points
     }
-    target_date = date.today() - timedelta(days=1)
+    target_date = dt_util.now().date() - timedelta(days=1)
 
     try:
         rows = await api.get_linear_cumulative_rows(
@@ -124,7 +125,7 @@ async def _pv_power_integration_probe(
         }
 
     point_number, point = pv_point
-    target_date = date.today() - timedelta(days=1)
+    target_date = dt_util.now().date() - timedelta(days=1)
 
     try:
         rows = await api.get_linear_detailed_rows(

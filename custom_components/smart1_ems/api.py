@@ -16,8 +16,13 @@ from .pv import parse_pv_cumulative_energy
 _LOGGER = logging.getLogger(__name__)
 
 
+def _redact_secret(value: str, secret: str) -> str:
+    """Redact a secret from text intended for logs."""
+    return value.replace(secret, "***") if secret else value
+
+
 class Smart1ApiError(Exception):
-    """Error returned inside a smart1 CSV response."""
+    """Sanitized error returned by the smart1 API."""
 
     def __init__(self, code: str) -> None:
         self.code = code
@@ -46,7 +51,7 @@ class Smart1Api:
         """Execute a CSV request."""
 
         url = f"{BASE_URL}{path}?apikey={self.api_key}"
-        safe_url = url.replace(self.api_key, "***")
+        safe_url = _redact_secret(url, self.api_key)
 
         _LOGGER.debug("GET %s", safe_url)
 
@@ -59,12 +64,13 @@ class Smart1Api:
 
             if response.status >= 400:
                 _LOGGER.error(
-                    "HTTP %s for %s\n%s",
+                    "HTTP %s for %s",
                     response.status,
                     safe_url,
-                    text[:500],
                 )
-                response.raise_for_status()
+                # aiohttp's ClientResponseError includes the full request URL,
+                # which contains the API key. Raise only a sanitized error.
+                raise Smart1ApiError(str(response.status))
 
         if not text.strip():
             return []
@@ -165,13 +171,17 @@ class Smart1Api:
     async def get_latest_linear_values(
         self,
         linear_ids: list[str],
+        target_date: date | None = None,
     ) -> dict[str, float | None]:
         """Return latest values for all requested linear ids."""
 
         if not linear_ids:
             return {}
 
-        rows = await self.get_linear_detailed_rows(linear_ids)
+        rows = await self.get_linear_detailed_rows(
+            linear_ids,
+            target_date=target_date,
+        )
 
         values = {linear_id: None for linear_id in linear_ids}
 

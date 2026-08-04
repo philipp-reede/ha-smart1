@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, datetime, timezone
 import importlib
 import json
 from pathlib import Path
@@ -22,6 +23,15 @@ sys.modules["homeassistant.config_entries"] = config_entries
 core = types.ModuleType("homeassistant.core")
 core.HomeAssistant = object
 sys.modules["homeassistant.core"] = core
+
+util = sys.modules.setdefault(
+    "homeassistant.util",
+    types.ModuleType("homeassistant.util"),
+)
+util.__path__ = []
+dt_util = types.ModuleType("homeassistant.util.dt")
+dt_util.now = lambda: datetime(2026, 8, 4, tzinfo=timezone.utc)
+sys.modules["homeassistant.util.dt"] = dt_util
 
 custom_components = sys.modules.setdefault(
     "custom_components",
@@ -47,6 +57,7 @@ class Entry:
 
 class Api:
     async def get_linear_cumulative_rows(self, *args, **kwargs):
+        self.target_date = kwargs["target_date"]
         return [
             {
                 "LinearId": "private-point-id",
@@ -149,6 +160,10 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertNotIn('"1000"', serialized)
         self.assertNotIn("api_key", serialized)
         self.assertNotIn("live", serialized)
+        self.assertEqual(
+            Hass.data["smart1_ems"]["entry-1"]["api"].target_date,
+            date(2026, 8, 3),
+        )
 
 
 if __name__ == "__main__":

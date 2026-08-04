@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, datetime, timezone
 import importlib
 from pathlib import Path
 import sys
@@ -45,6 +46,15 @@ update_coordinator.DataUpdateCoordinator = DataUpdateCoordinator
 update_coordinator.UpdateFailed = UpdateFailed
 sys.modules["homeassistant.helpers.update_coordinator"] = update_coordinator
 
+util = sys.modules.setdefault(
+    "homeassistant.util",
+    types.ModuleType("homeassistant.util"),
+)
+util.__path__ = []
+dt_util = types.ModuleType("homeassistant.util.dt")
+dt_util.now = lambda: datetime(2026, 8, 4, tzinfo=timezone.utc)
+sys.modules["homeassistant.util.dt"] = dt_util
+
 custom_components = sys.modules.setdefault(
     "custom_components",
     types.ModuleType("custom_components"),
@@ -63,21 +73,28 @@ Smart1Coordinator = coordinator_module.Smart1Coordinator
 
 
 class LiveOnlyApi:
-    async def get_latest_linear_values(self, linear_ids):
+    def __init__(self) -> None:
+        self.target_dates = []
+
+    async def get_latest_linear_values(self, linear_ids, *, target_date=None):
+        self.target_dates.append(target_date)
         return {linear_id: 123.0 for linear_id in linear_ids}
 
-    async def get_pv_cumulative_energy(self):
+    async def get_pv_cumulative_energy(self, *, target_date=None):
+        self.target_dates.append(target_date)
         raise ClientError("No PV data")
 
 
 class Smart1CoordinatorTest(unittest.TestCase):
     def test_optional_pv_failure_keeps_live_values(self) -> None:
-        coordinator = Smart1Coordinator(None, LiveOnlyApi(), [], ["point-1"])
+        api = LiveOnlyApi()
+        coordinator = Smart1Coordinator(None, api, [], ["point-1"])
 
         data = asyncio.run(coordinator._async_update_data())
 
         self.assertEqual(data["live"], {"point-1": 123.0})
         self.assertIsNone(data["pv_energy_today"])
+        self.assertEqual(api.target_dates, [date(2026, 8, 4)] * 2)
 
 
 if __name__ == "__main__":

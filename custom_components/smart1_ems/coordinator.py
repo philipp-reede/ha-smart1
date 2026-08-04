@@ -4,6 +4,7 @@ import logging
 from aiohttp import ClientError
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import Smart1ApiError
 from .const import DOMAIN
@@ -25,13 +26,20 @@ class Smart1Coordinator(DataUpdateCoordinator):
         )
 
     async def _async_update_data(self):
+        today = dt_util.now().date()
+
         try:
-            live_values = await self.api.get_latest_linear_values(self.linear_ids)
+            live_values = await self.api.get_latest_linear_values(
+                self.linear_ids,
+                target_date=today,
+            )
         except (ClientError, Smart1ApiError, TimeoutError) as err:
             raise UpdateFailed(str(err)) from err
 
         try:
-            pv_energy_today = await self.api.get_pv_cumulative_energy()
+            pv_energy_today = await self.api.get_pv_cumulative_energy(
+                target_date=today,
+            )
         except (ClientError, Smart1ApiError, TimeoutError) as err:
             # PV production is optional. A missing cumulative endpoint must not
             # make otherwise valid live measurements unavailable.

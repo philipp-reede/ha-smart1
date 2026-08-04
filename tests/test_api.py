@@ -32,10 +32,9 @@ Smart1ApiError = api_module.Smart1ApiError
 
 
 class CsvResponse:
-    status = 200
-
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, status: int) -> None:
         self._text = text
+        self.status = status
 
     async def __aenter__(self):
         return self
@@ -46,16 +45,13 @@ class CsvResponse:
     async def text(self) -> str:
         return self._text
 
-    def raise_for_status(self) -> None:
-        return None
-
-
 class CsvSession:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, status: int = 200) -> None:
         self._text = text
+        self._status = status
 
     def get(self, *args, **kwargs) -> CsvResponse:
-        return CsvResponse(self._text)
+        return CsvResponse(self._text, self._status)
 
 
 class RecordingSmart1Api(Smart1Api):
@@ -111,6 +107,22 @@ class Smart1ApiTest(unittest.TestCase):
 
         self.assertIsNone(value)
         self.assertTrue(api.missing_ok)
+
+    def test_linear_live_endpoint_uses_requested_date(self) -> None:
+        api = RecordingSmart1Api([])
+
+        values = asyncio.run(
+            api.get_latest_linear_values(
+                ["counter_1"],
+                target_date=date(2026, 8, 4),
+            )
+        )
+
+        self.assertEqual(values, {"counter_1": None})
+        self.assertEqual(
+            api.requested_path,
+            "/data/csv/42/linear/day/detailed/20260804/counter_1",
+        )
 
     def test_rejects_unsupported_period(self) -> None:
         api = RecordingSmart1Api([])
@@ -177,6 +189,22 @@ class Smart1ApiTest(unittest.TestCase):
 
         with self.assertRaisesRegex(Smart1ApiError, "smart1 API error 500"):
             asyncio.run(api._get_csv("/test"))
+
+    def test_http_error_does_not_expose_api_key(self) -> None:
+        api_key = "private-api-key"
+        api = Smart1Api(
+            CsvSession(f"Portal rejected {api_key}", status=401),
+            api_key,
+            "42",
+        )
+
+        with self.assertLogs(api_module._LOGGER, level="ERROR") as captured:
+            with self.assertRaises(Smart1ApiError) as raised:
+                asyncio.run(api._get_csv("/test"))
+
+        self.assertEqual(str(raised.exception), "smart1 API error 401")
+        self.assertNotIn(api_key, str(raised.exception))
+        self.assertNotIn(api_key, "\n".join(captured.output))
 
 
 if __name__ == "__main__":
