@@ -25,6 +25,8 @@
 - Redacted diagnostics expose classification metadata without credentials or values
 - Diagnostics probe the previous complete day for linear cumulative support
   without exporting IDs, timestamps, or measurements
+- The completed-day probe returned an API error row rather than cumulative
+  measurements for the current installation
 - Integration name and domain are now `smart1 EMS` and `smart1_ems`
 - The latest 365 days of documented PV daily production are imported as
   external long-term statistics in the background

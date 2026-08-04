@@ -16,6 +16,14 @@ from .pv import parse_pv_cumulative_energy
 _LOGGER = logging.getLogger(__name__)
 
 
+class Smart1ApiError(Exception):
+    """Error returned inside a smart1 CSV response."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f"smart1 API error {code}")
+
+
 class Smart1Api:
     """Client for the smart1 EMS portal API."""
 
@@ -61,7 +69,16 @@ class Smart1Api:
         if not text.strip():
             return []
 
-        return list(csv.DictReader(io.StringIO(text), delimiter=";"))
+        rows = list(csv.DictReader(io.StringIO(text), delimiter=";"))
+
+        if rows and "Errorcode" in rows[0]:
+            error_code = str(rows[0].get("Errorcode") or "unknown").strip()
+            if missing_ok and error_code.startswith("404"):
+                _LOGGER.debug("No smart1 data for %s", safe_url)
+                return []
+            raise Smart1ApiError(error_code)
+
+        return rows
 
     async def get_plants(self) -> list[dict[str, str]]:
         """Return all plants."""

@@ -80,6 +80,12 @@ for the previous complete day. It reports only the response shape and the
 point numbers for which rows exist. API keys, linear IDs, timestamps and
 measurements are excluded.
 
+The real-installation probe requested all 38 energy-typed counters for a
+completed day. The portal returned an API error row with `Errorcode` and
+`Errormessage` columns instead of cumulative measurements. The linear
+cumulative endpoint is therefore not currently a usable source for these
+Energy Dashboard totals.
+
 ## Historical PV production
 
 The day-based photovoltaic cumulative endpoint is the documented source for

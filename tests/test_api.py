@@ -26,7 +26,36 @@ smart1_ems = sys.modules.setdefault(
 )
 smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
-Smart1Api = importlib.import_module("custom_components.smart1_ems.api").Smart1Api
+api_module = importlib.import_module("custom_components.smart1_ems.api")
+Smart1Api = api_module.Smart1Api
+Smart1ApiError = api_module.Smart1ApiError
+
+
+class CsvResponse:
+    status = 200
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def text(self) -> str:
+        return self._text
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class CsvSession:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def get(self, *args, **kwargs) -> CsvResponse:
+        return CsvResponse(self._text)
 
 
 class RecordingSmart1Api(Smart1Api):
@@ -109,6 +138,27 @@ class Smart1ApiTest(unittest.TestCase):
             "counter_1,counter_2",
         )
         self.assertTrue(api.missing_ok)
+
+    def test_embedded_not_found_is_missing_data(self) -> None:
+        api = Smart1Api(
+            CsvSession("Errorcode;Errormessage\n404;No entries or data found\n"),
+            "redacted",
+            "42",
+        )
+
+        rows = asyncio.run(api._get_csv("/test", missing_ok=True))
+
+        self.assertEqual(rows, [])
+
+    def test_embedded_api_error_is_raised_without_message(self) -> None:
+        api = Smart1Api(
+            CsvSession("Errorcode;Errormessage\n500;private portal details\n"),
+            "redacted",
+            "42",
+        )
+
+        with self.assertRaisesRegex(Smart1ApiError, "smart1 API error 500"):
+            asyncio.run(api._get_csv("/test"))
 
 
 if __name__ == "__main__":

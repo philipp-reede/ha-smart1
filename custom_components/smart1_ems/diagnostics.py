@@ -10,7 +10,7 @@ from aiohttp import ClientError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .api import Smart1Api
+from .api import Smart1Api, Smart1ApiError
 from .classifier import classify_point
 from .const import DOMAIN
 from .point import Smart1Point
@@ -62,6 +62,13 @@ async def _linear_cumulative_probe(
             target_date=target_date,
             missing_ok=True,
         )
+    except Smart1ApiError as err:
+        return {
+            "period": "previous_complete_day",
+            "requested_points": len(energy_points),
+            "result": "api_error",
+            "error_code": err.code,
+        }
     except (ClientError, TimeoutError) as err:
         return {
             "period": "previous_complete_day",

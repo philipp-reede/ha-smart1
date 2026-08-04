@@ -25,7 +25,7 @@ from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .api import Smart1Api
+from .api import Smart1Api, Smart1ApiError
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ class Smart1PvHistoryImporter:
                     target_date=target_date,
                     missing_ok=True,
                 )
-            except (ClientError, TimeoutError) as err:
+            except (ClientError, Smart1ApiError, TimeoutError) as err:
                 _LOGGER.warning(
                     "Unable to import smart1 PV history from %s: %s",
                     target_date,
