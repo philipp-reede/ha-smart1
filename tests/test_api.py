@@ -91,6 +91,25 @@ class Smart1ApiTest(unittest.TestCase):
                 api.get_pv_cumulative_energy("week", date(2026, 8, 4))
             )
 
+    def test_linear_cumulative_probe_uses_requested_points(self) -> None:
+        api = RecordingSmart1Api([])
+
+        rows = asyncio.run(
+            api.get_linear_cumulative_rows(
+                ["counter_1", "counter_2"],
+                target_date=date(2026, 8, 3),
+                missing_ok=True,
+            )
+        )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            api.requested_path,
+            "/data/csv/42/linear/day/cumulative/20260803/"
+            "counter_1,counter_2",
+        )
+        self.assertTrue(api.missing_ok)
+
 
 if __name__ == "__main__":
     unittest.main()

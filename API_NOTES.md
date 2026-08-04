@@ -75,6 +75,11 @@ The integration must therefore not generate energy entities from this
 endpoint without installation-specific evidence that the endpoint is
 available and meaningful.
 
+The diagnostics export performs one read-only, value-free capability probe
+for the previous complete day. It reports only the response shape and the
+point numbers for which rows exist. API keys, linear IDs, timestamps and
+measurements are excluded.
+
 ## Historical PV production
 
 The day-based photovoltaic cumulative endpoint is the documented source for

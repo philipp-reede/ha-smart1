@@ -45,16 +45,28 @@ class Entry:
     data = {"api_key": "secret", "device_id": "private-device"}
 
 
+class Api:
+    async def get_linear_cumulative_rows(self, *args, **kwargs):
+        return [
+            {
+                "LinearId": "private-point-id",
+                "Timestamp": "private-timestamp",
+                "Value1": "private-energy-value",
+            }
+        ]
+
+
 class Hass:
     data = {
         "smart1_ems": {
             "entry-1": {
+                "api": Api(),
                 "devices": [
                     point_module.Smart1Point(
                         id="private-point-id",
                         name="WP Leistung",
-                        type="power",
-                        source="sensor",
+                        type="Energy",
+                        source="counter",
                         hardware="meter",
                         interface="modbus:1_2_heatpump_3:power",
                         parsed_interface=interface_module.parse_interface(
@@ -78,9 +90,23 @@ class DiagnosticsTest(unittest.TestCase):
         serialized = json.dumps(result)
 
         self.assertEqual(result["points"][0]["current_category"], "heat_pump")
+        self.assertEqual(
+            result["linear_cumulative_probe"],
+            {
+                "period": "previous_complete_day",
+                "requested_points": 1,
+                "result": "data_returned",
+                "response_rows": 1,
+                "response_columns": ["LinearId", "Timestamp", "Value1"],
+                "point_numbers_with_rows": [1],
+                "unmatched_response_rows": 0,
+            },
+        )
         self.assertNotIn("secret", serialized)
         self.assertNotIn("private-device", serialized)
         self.assertNotIn("private-point-id", serialized)
+        self.assertNotIn("private-timestamp", serialized)
+        self.assertNotIn("private-energy-value", serialized)
         self.assertNotIn("api_key", serialized)
         self.assertNotIn("live", serialized)
 

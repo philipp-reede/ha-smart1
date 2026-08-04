@@ -212,3 +212,26 @@ class Smart1Api:
         )
 
         return parse_pv_cumulative_energy(rows)
+
+    async def get_linear_cumulative_rows(
+        self,
+        linear_ids: list[str],
+        period: str = "day",
+        target_date: date | None = None,
+        *,
+        missing_ok: bool = False,
+    ) -> list[dict[str, str]]:
+        """Return unmodified rows from the undocumented cumulative response."""
+        if period not in {"day", "month", "year"}:
+            raise ValueError(f"Unsupported cumulative period: {period}")
+
+        if not linear_ids:
+            return []
+
+        date_string = (target_date or date.today()).strftime("%Y%m%d")
+        ids = quote(",".join(linear_ids), safe=",")
+        return await self._get_csv(
+            f"/data/csv/{self.device_id}/linear/"
+            f"{period}/cumulative/{date_string}/{ids}",
+            missing_ok=missing_ok,
+        )
