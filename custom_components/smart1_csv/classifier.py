@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+import re
 
 from .point import Smart1Point
 
@@ -13,6 +14,7 @@ class Smart1Category(StrEnum):
     BATTERY = "battery"
     WALLBOX = "wallbox"
     HEAT_PUMP = "heat_pump"
+    ENERGY_HEATER = "energy_heater"
     CONSUMPTION = "consumption"
     TEMPERATURE = "temperature"
     WEATHER = "weather"
@@ -27,14 +29,19 @@ def classify_point(point: Smart1Point) -> Smart1Category:
 
     # 1. Structured interface parsing: strongest signal
     if parsed:
-        if parsed.object_type == "wallbox":
+        object_type = (parsed.object_type or "").lower()
+
+        if object_type == "wallbox":
             return Smart1Category.WALLBOX
 
-        if parsed.object_type == "energytrader":
+        if object_type == "energytrader":
             return Smart1Category.BATTERY
 
-        if parsed.object_type == "generic":
-            return Smart1Category.OTHER
+        if object_type in {"heatpump", "heat_pump"}:
+            return Smart1Category.HEAT_PUMP
+
+        if object_type in {"energyheater", "energy_heater", "heater"}:
+            return Smart1Category.ENERGY_HEATER
 
     # 2. Stable metadata
     name = point.name.lower()
@@ -51,12 +58,24 @@ def classify_point(point: Smart1Point) -> Smart1Category:
     if "energytrader" in interface:
         return Smart1Category.BATTERY
 
+    if "heatpump" in interface or "heat_pump" in interface:
+        return Smart1Category.HEAT_PUMP
+
+    if any(token in interface for token in ("energyheater", "energy_heater")):
+        return Smart1Category.ENERGY_HEATER
+
     # 3. Name fallback
     if any(token in name for token in ("wallbox", "ladepunkt", "ladestation", "e-car", "ecar")):
         return Smart1Category.WALLBOX
 
-    if any(token in name for token in ("wärmepumpe", "waermepumpe", "heat pump")):
+    if (
+        any(token in name for token in ("wärmepumpe", "waermepumpe", "heat pump"))
+        or re.search(r"(?<!\w)wp(?!\w)", name)
+    ):
         return Smart1Category.HEAT_PUMP
+
+    if any(token in name for token in ("energy heater", "energyheater", "heizstab")):
+        return Smart1Category.ENERGY_HEATER
 
     if any(token in name for token in ("batterie", "battery", "soc", "speicher")):
         return Smart1Category.BATTERY

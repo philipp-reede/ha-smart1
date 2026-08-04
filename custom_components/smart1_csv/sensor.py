@@ -13,12 +13,26 @@ from .entity_mapper import get_entity_descriptions
 PV_DEVICE_NAME = "Smart1 Photovoltaik"
 
 
+def _device_category(category: Smart1Category) -> Smart1Category:
+    """Map measurement roles to the logical EMS device."""
+    if category in {
+        Smart1Category.CONSUMPTION,
+        Smart1Category.TEMPERATURE,
+        Smart1Category.WEATHER,
+        Smart1Category.DIAGNOSTIC,
+    }:
+        return Smart1Category.OTHER
+
+    return category
+
+
 def _device_identifier(
     entry_id: str,
     category: Smart1Category,
 ) -> tuple[str, str]:
     """Return a stable Home Assistant device identifier."""
-    return (DOMAIN, f"{entry_id}:{category.value}")
+    device_category = _device_category(category)
+    return (DOMAIN, f"{entry_id}:{device_category.value}")
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -58,6 +72,7 @@ class Smart1Sensor(CoordinatorEntity, SensorEntity):
             Smart1Category.BATTERY: "Smart1 Batterie",
             Smart1Category.WALLBOX: "Smart1 Wallbox",
             Smart1Category.HEAT_PUMP: "Smart1 Wärmepumpe",
+            Smart1Category.ENERGY_HEATER: "Smart1 Zusatzheizung",
             Smart1Category.CONSUMPTION: "Smart1 EMS",
             Smart1Category.TEMPERATURE: "Smart1 EMS",
             Smart1Category.WEATHER: "Smart1 EMS",
@@ -65,9 +80,11 @@ class Smart1Sensor(CoordinatorEntity, SensorEntity):
             Smart1Category.OTHER: "Smart1 EMS",
         }
 
+        device_category = _device_category(category)
+
         self._attr_device_info = {
             "identifiers": {_device_identifier(entry_id, category)},
-            "name": device_names.get(category, "Smart1 EMS"),
+            "name": device_names.get(device_category, "Smart1 EMS"),
             "manufacturer": "smart1",
             "model": "Smart1 EMS",
         }

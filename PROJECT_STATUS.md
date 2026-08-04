@@ -17,17 +17,13 @@
 - PV production is read from the documented photovoltaics cumulative endpoint
 - PV production is aggregated once per inverter and exposed in kWh
 - A failure of optional PV cumulative data no longer blocks live values
+- Measurement roles now share one logical Smart1 EMS device
+- Heat pumps and heating elements have dedicated classification rules
+- Redacted diagnostics expose classification metadata without credentials or values
 
 ## Known problems
 
-- Device assignment is still too coarse
-- Heat pump detection needs:
-  - `heatpump` in interface
-  - `WP` in point name
-- Heating element needs its own logical device
-  - M-TEC product name: `Energy Heater`
-  - generic term: `Heizstab`
-- Consumption must not be represented as a device
+- Device assignment needs validation against real installation metadata
 - Temperature is a property and should be assigned to its source device
 - Device-specific energy data for wallbox, heat pump, heating element, grid,
   and battery remains undocumented and must not be inferred
