@@ -68,6 +68,8 @@ Known classifications:
 - Name containing standalone `WP` may indicate heat pump
 - `Energy Heater` is M-TEC's product name for an electric heating element
 - `Heizstab` is the generic German description
+- On the current installation the auxiliary-heater `buscounter` has no
+  available data; the `remoteio` `POWER_METER` counter is the validated source
 - `energytrader` currently appears to indicate battery-related EnergyCloud
   points, but this should remain treated as an inference until verified
 - Temperatures must belong to their actual logical device where possible;

@@ -39,6 +39,12 @@
   pump and auxiliary-heater power points to derived energy roles
 - Selected roles are integrated into source-specific external kWh statistics
   with the same 365-day import and three-day refresh behavior
+- Derived grid import and export statistics were accepted by the real Home
+  Assistant Energy Dashboard
+- The auxiliary-heater remote counter is the preferred source because its bus
+  counter has no available data on the current installation
+- Diagnostics expose configured energy roles through redacted point numbers
+  instead of linear IDs
 - Entities use Home Assistant's device-aware naming convention
 
 ## Known problems

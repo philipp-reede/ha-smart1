@@ -15,6 +15,7 @@ from homeassistant.util import dt as dt_util
 from .api import Smart1Api, Smart1ApiError
 from .classifier import classify_point
 from .const import DOMAIN
+from .energy_roles import ENERGY_ROLES_BY_KEY
 from .point import Smart1Point
 from .power_integration import integrate_power_rows
 
@@ -41,6 +42,22 @@ def _point_diagnostics(number: int, point: Smart1Point) -> dict[str, Any]:
             "signal": parsed.signal if parsed else None,
         },
         "current_category": classify_point(point).value,
+    }
+
+
+def _configured_energy_roles(
+    entry: ConfigEntry,
+    numbered_points: list[tuple[int, Smart1Point]],
+) -> dict[str, int | None]:
+    """Map configured roles to redacted point numbers instead of linear IDs."""
+    point_numbers_by_id = {
+        point.id: number for number, point in numbered_points
+    }
+    selected_roles = entry.options.get("energy_roles", {})
+    return {
+        role_key: point_numbers_by_id.get(point_id)
+        for role_key, point_id in selected_roles.items()
+        if role_key in ENERGY_ROLES_BY_KEY
     }
 
 
@@ -203,6 +220,10 @@ async def async_get_config_entry_diagnostics(
 
     return {
         "integration": DOMAIN,
+        "configured_energy_roles": _configured_energy_roles(
+            entry,
+            numbered_points,
+        ),
         "discovery": runtime_data["discovery"].to_dict(),
         "linear_cumulative_probe": await _linear_cumulative_probe(
             runtime_data["api"],

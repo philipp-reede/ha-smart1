@@ -53,6 +53,9 @@ point_module = importlib.import_module("custom_components.smart1_ems.point")
 class Entry:
     entry_id = "entry-1"
     data = {"api_key": "secret", "device_id": "private-device"}
+    options = {
+        "energy_roles": {"grid_import": "private-point-id"},
+    }
 
 
 class Api:
@@ -124,6 +127,10 @@ class DiagnosticsTest(unittest.TestCase):
         serialized = json.dumps(result)
 
         self.assertEqual(result["points"][0]["current_category"], "pv")
+        self.assertEqual(
+            result["configured_energy_roles"],
+            {"grid_import": 1},
+        )
         self.assertEqual(
             result["linear_cumulative_probe"],
             {

@@ -111,6 +111,8 @@ def recommend_energy_roles(points: list[Smart1Point]) -> dict[str, str]:
         role_key: str,
         predicate: Callable[[Smart1Point], bool],
     ) -> None:
+        if role_key in recommendations:
+            return
         role = ENERGY_ROLES_BY_KEY[role_key]
         if point := next(
             (point for point in energy_candidates(points, role) if predicate(point)),
@@ -133,6 +135,11 @@ def recommend_energy_roles(points: list[Smart1Point]) -> dict[str, str]:
     first_matching(
         "heat_pump_consumption",
         lambda point: "bezug gesamt" in point.name.lower(),
+    )
+    first_matching(
+        "auxiliary_heater_consumption",
+        lambda point: point.hardware.lower() == "remotecounter"
+        and _signal(point) == "power_meter",
     )
     first_matching(
         "auxiliary_heater_consumption",

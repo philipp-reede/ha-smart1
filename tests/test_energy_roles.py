@@ -82,6 +82,7 @@ class EnergyRolesTest(unittest.TestCase):
             make_point(
                 "heater-remote",
                 "Heizstab Bezug",
+                "rio:remoteio_4:POWER_METER",
                 hardware="RemoteCounter",
             ),
             make_point(
@@ -100,8 +101,20 @@ class EnergyRolesTest(unittest.TestCase):
                 "battery_discharge": "battery-discharge",
                 "wallbox_consumption": "wallbox",
                 "heat_pump_consumption": "heat-pump",
-                "auxiliary_heater_consumption": "heater-bus",
+                "auxiliary_heater_consumption": "heater-remote",
             },
+        )
+
+    def test_heater_bus_counter_is_fallback_without_remote_data(self) -> None:
+        bus_counter = make_point(
+            "heater-bus",
+            "Heizstab Bezug",
+            hardware="BusCounter",
+        )
+
+        self.assertEqual(
+            energy_roles.recommend_energy_roles([bus_counter]),
+            {"auxiliary_heater_consumption": "heater-bus"},
         )
 
     def test_candidates_require_energy_counter_and_matching_category(self) -> None:
