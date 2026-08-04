@@ -30,12 +30,17 @@ parse_interface = interface.parse_interface
 Smart1Point = point_module.Smart1Point
 
 
-def make_point(name: str, interface_value: str = "") -> Smart1Point:
+def make_point(
+    name: str,
+    interface_value: str = "",
+    hardware: str = "",
+) -> Smart1Point:
     return Smart1Point(
         id="test",
         name=name,
         type="power",
         source="sensor",
+        hardware=hardware,
         interface=interface_value,
         parsed_interface=parse_interface(interface_value),
     )
@@ -64,6 +69,38 @@ class ClassifyPointTest(unittest.TestCase):
             classify_point(make_point("Energy Heater Leistung")),
             Smart1Category.ENERGY_HEATER,
         )
+
+    def test_battery_from_direct_rio_service(self) -> None:
+        point = make_point(
+            "BATT A",
+            "rio:battery_1526468329:BATTERY_CURRENT",
+        )
+
+        self.assertEqual(classify_point(point), Smart1Category.BATTERY)
+
+    def test_grid_from_riometer_service(self) -> None:
+        point = make_point(
+            "L1 Power",
+            "rio:riometer_1520600600:L1_P",
+        )
+
+        self.assertEqual(classify_point(point), Smart1Category.GRID)
+
+    def test_ecar_service_is_wallbox(self) -> None:
+        point = make_point(
+            "Minimum current",
+            "rio:ecar_1526467313:MinChargeCurrent",
+        )
+
+        self.assertEqual(classify_point(point), Smart1Category.WALLBOX)
+
+    def test_multi_device_calculation_stays_on_ems(self) -> None:
+        point = make_point(
+            "Verbrauch ohne WP ECAR HZ",
+            hardware="CounterCalculation",
+        )
+
+        self.assertEqual(classify_point(point), Smart1Category.OTHER)
 
     def test_heating_element_from_german_name(self) -> None:
         self.assertEqual(

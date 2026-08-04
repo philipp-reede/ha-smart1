@@ -29,6 +29,7 @@ def classify_point(point: Smart1Point) -> Smart1Category:
 
     # 1. Structured interface parsing: strongest signal
     if parsed:
+        service = (parsed.service or "").lower()
         object_type = (parsed.object_type or "").lower()
 
         if object_type == "wallbox":
@@ -43,11 +44,32 @@ def classify_point(point: Smart1Point) -> Smart1Category:
         if object_type in {"energyheater", "energy_heater", "heater"}:
             return Smart1Category.ENERGY_HEATER
 
+        if service == "battery":
+            return Smart1Category.BATTERY
+
+        if service in {"ecar", "wallbox"}:
+            return Smart1Category.WALLBOX
+
+        if service in {"heatpump", "heat_pump"}:
+            return Smart1Category.HEAT_PUMP
+
+        if service == "riometer":
+            return Smart1Category.GRID
+
     # 2. Stable metadata
     name = point.name.lower()
     smart1_type = point.type.lower()
     hardware = point.hardware.lower()
     interface = point.interface.lower()
+
+    # Calculations containing several device names are EMS-level measurement
+    # roles, not properties of the one device whose name happens to match.
+    if (
+        hardware in {"arithmetic", "countercalculation"}
+        and any(token in name for token in ("ecar", "e-car"))
+        and ("+" in name or "-" in name or "ohne" in name)
+    ):
+        return Smart1Category.OTHER
 
     if hardware == "pv_global":
         return Smart1Category.PV

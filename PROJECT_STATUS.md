@@ -19,6 +19,9 @@
 - A failure of optional PV cumulative data no longer blocks live values
 - Measurement roles now share one logical Smart1 EMS device
 - Heat pumps and heating elements have dedicated classification rules
+- Direct battery, e-car, heat-pump, and grid-meter interfaces are classified
+  by their parsed smart1 service
+- Multi-device counter calculations remain assigned to the EMS
 - Redacted diagnostics expose classification metadata without credentials or values
 
 ## Known problems
