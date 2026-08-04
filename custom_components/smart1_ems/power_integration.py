@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ class PowerIntegrationResult:
     """Summary of trapezoidal power integration."""
 
     energy_kwh: float
+    hourly_energy_kwh: tuple[tuple[datetime, float], ...]
     sample_count: int
     integrated_intervals: int
     skipped_gaps: int
@@ -80,6 +82,7 @@ def integrate_power_rows(
 
     ordered_samples = sorted(samples.items())
     energy_kwh = 0.0
+    hourly_energy_kwh: defaultdict[datetime, float] = defaultdict(float)
     integrated_intervals = 0
     skipped_gaps = 0
     covered_seconds = 0.0
@@ -97,12 +100,45 @@ def integrate_power_rows(
             continue
 
         average_power_w = (previous_value + current_value) / 2
-        energy_kwh += average_power_w * interval_seconds / 3_600_000
+        interval_energy_kwh = average_power_w * interval_seconds / 3_600_000
+        energy_kwh += interval_energy_kwh
         integrated_intervals += 1
         covered_seconds += interval_seconds
 
+        segment_start = previous_time
+        while segment_start < current_time:
+            hour_start = segment_start.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            segment_end = min(current_time, hour_start + timedelta(hours=1))
+            start_fraction = (
+                (segment_start - previous_time).total_seconds()
+                / interval_seconds
+            )
+            end_fraction = (
+                (segment_end - previous_time).total_seconds()
+                / interval_seconds
+            )
+            segment_start_power = previous_value + (
+                current_value - previous_value
+            ) * start_fraction
+            segment_end_power = previous_value + (
+                current_value - previous_value
+            ) * end_fraction
+            segment_seconds = (segment_end - segment_start).total_seconds()
+            hourly_energy_kwh[hour_start] += (
+                (segment_start_power + segment_end_power)
+                / 2
+                * segment_seconds
+                / 3_600_000
+            )
+            segment_start = segment_end
+
     return PowerIntegrationResult(
         energy_kwh=energy_kwh,
+        hourly_energy_kwh=tuple(sorted(hourly_energy_kwh.items())),
         sample_count=len(ordered_samples),
         integrated_intervals=integrated_intervals,
         skipped_gaps=skipped_gaps,

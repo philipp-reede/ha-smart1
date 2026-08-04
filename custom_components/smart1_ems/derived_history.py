@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import logging
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,6 +13,7 @@ from aiohttp import ClientError
 
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import (
+    StatisticData,
     StatisticMeanType,
     StatisticMetaData,
 )
@@ -27,17 +28,113 @@ from homeassistant.util.unit_conversion import EnergyConverter
 from .api import Smart1Api, Smart1ApiError
 from .const import DOMAIN
 from .energy_roles import ENERGY_ROLES_BY_KEY, statistic_id_for_role
-from .history import (
-    HISTORY_DAYS,
-    REFRESH_DAYS,
-    build_daily_energy_statistics,
-    determine_import_window,
-    merge_daily_energy,
-)
+from .history import HISTORY_DAYS, REFRESH_DAYS
 from .point import Smart1Point
 from .power_integration import integrate_power_rows
 
 _LOGGER = logging.getLogger(__name__)
+
+STATISTICS_LOOKBACK = HISTORY_DAYS + REFRESH_DAYS + 7
+
+
+def _statistics_start(record: Mapping[str, Any]) -> datetime:
+    """Return a statistics record start as an aware UTC datetime."""
+    start = record["start"]
+    if isinstance(start, datetime):
+        return start.astimezone(timezone.utc)
+    return datetime.fromtimestamp(float(start), timezone.utc)
+
+
+def _has_hourly_resolution(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+) -> bool:
+    """Return whether records contain at least one sub-daily timestamp."""
+    return any(
+        _statistics_start(record).astimezone(local_tz).hour != 0
+        for record in records
+    )
+
+
+def determine_hourly_import_window(
+    records: list[Mapping[str, Any]],
+    today: date,
+    local_tz: ZoneInfo,
+) -> tuple[date, float]:
+    """Return the hourly refresh start and preceding cumulative sum.
+
+    Existing daily-only statistics trigger a full import under the same
+    statistic ID so Energy Dashboard configuration remains intact.
+    """
+    initial_start = today - timedelta(days=HISTORY_DAYS - 1)
+    if not records or not _has_hourly_resolution(records, local_tz):
+        return initial_start, 0.0
+
+    refresh_start = today - timedelta(days=REFRESH_DAYS - 1)
+    preceding = [
+        record
+        for record in records
+        if record.get("sum") is not None
+        and _statistics_start(record).astimezone(local_tz).date()
+        < refresh_start
+    ]
+    if preceding:
+        baseline = max(preceding, key=_statistics_start)
+        return refresh_start, float(baseline["sum"])
+
+    oldest_date = min(
+        _statistics_start(record).astimezone(local_tz).date()
+        for record in records
+    )
+    return min(oldest_date, refresh_start), 0.0
+
+
+def merge_hourly_energy(
+    records: list[Mapping[str, Any]],
+    fetched_energy: list[tuple[datetime, float]],
+    start_date: date,
+    end_date: date,
+    local_tz: ZoneInfo,
+) -> list[tuple[datetime, float]]:
+    """Merge refreshed hourly values with existing statistics as fallback."""
+    energy_by_hour: dict[datetime, float] = {}
+
+    for record in records:
+        energy_kwh = record.get("state")
+        if energy_kwh is None:
+            continue
+
+        start = _statistics_start(record)
+        target_date = start.astimezone(local_tz).date()
+        if start_date <= target_date <= end_date:
+            energy_by_hour[start] = float(energy_kwh)
+
+    energy_by_hour.update(
+        (start.astimezone(timezone.utc), energy_kwh)
+        for start, energy_kwh in fetched_energy
+    )
+    return sorted(energy_by_hour.items())
+
+
+def build_hourly_energy_statistics(
+    hourly_energy: list[tuple[datetime, float]],
+    baseline_sum: float,
+) -> list[StatisticData]:
+    """Build cumulative Home Assistant statistics from hourly kWh values."""
+    statistics: list[StatisticData] = []
+    cumulative_sum = baseline_sum
+
+    for start, energy_kwh in sorted(hourly_energy):
+        cumulative_sum += energy_kwh
+        statistics.append(
+            StatisticData(
+                start=start,
+                state=energy_kwh,
+                sum=cumulative_sum,
+            )
+        )
+
+    return statistics
 
 
 class Smart1DerivedEnergyImporter:
@@ -62,21 +159,21 @@ class Smart1DerivedEnergyImporter:
         result = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics,
             self.hass,
-            HISTORY_DAYS + REFRESH_DAYS + 7,
+            STATISTICS_LOOKBACK,
             statistic_id,
             True,
             {"state", "sum"},
         )
         return result.get(statistic_id, [])
 
-    async def _fetch_daily_energy(
+    async def _fetch_hourly_energy(
         self,
         start_date: date,
         end_date: date,
         local_tz: ZoneInfo,
-    ) -> dict[str, list[tuple[date, float]]]:
-        """Fetch each date once and integrate all selected points."""
-        daily_energy = {role_key: [] for role_key in self.role_points}
+    ) -> dict[str, list[tuple[datetime, float]]]:
+        """Fetch each date once and integrate selected points by UTC hour."""
+        hourly_energy = {role_key: [] for role_key in self.role_points}
         linear_ids = list(
             dict.fromkeys(point.id for point in self.role_points.values())
         )
@@ -100,13 +197,13 @@ class Smart1DerivedEnergyImporter:
             for role_key, point in self.role_points.items():
                 integration = integrate_power_rows(rows, point.id, local_tz)
                 if integration.integrated_intervals:
-                    daily_energy[role_key].append(
-                        (target_date, integration.energy_kwh)
+                    hourly_energy[role_key].extend(
+                        integration.hourly_energy_kwh
                     )
 
             target_date += timedelta(days=1)
 
-        return daily_energy
+        return hourly_energy
 
     async def async_import(self) -> None:
         """Import initial derived history or refresh recent days."""
@@ -125,11 +222,15 @@ class Smart1DerivedEnergyImporter:
                 for role_key, statistic_id in statistic_ids.items()
             }
             windows = {
-                role_key: determine_import_window(records, today, local_tz)
+                role_key: determine_hourly_import_window(
+                    records,
+                    today,
+                    local_tz,
+                )
                 for role_key, records in records_by_role.items()
             }
             start_date = min(window[0] for window in windows.values())
-            fetched_by_role = await self._fetch_daily_energy(
+            fetched_by_role = await self._fetch_hourly_energy(
                 start_date,
                 today,
                 local_tz,
@@ -140,19 +241,18 @@ class Smart1DerivedEnergyImporter:
                 fetched_energy = [
                     item
                     for item in fetched_by_role[role_key]
-                    if item[0] >= role_start
+                    if item[0].astimezone(local_tz).date() >= role_start
                 ]
-                daily_energy = merge_daily_energy(
+                hourly_energy = merge_hourly_energy(
                     records_by_role[role_key],
                     fetched_energy,
                     role_start,
                     today,
                     local_tz,
                 )
-                statistics = build_daily_energy_statistics(
-                    daily_energy,
+                statistics = build_hourly_energy_statistics(
+                    hourly_energy,
                     baseline_sum,
-                    local_tz,
                 )
                 if not statistics:
                     continue
@@ -172,7 +272,7 @@ class Smart1DerivedEnergyImporter:
                     statistics=statistics,
                 )
                 _LOGGER.info(
-                    "Imported %d days for smart1 derived energy role %s",
+                    "Imported %d hourly records for smart1 derived energy role %s",
                     len(statistics),
                     role_key,
                 )

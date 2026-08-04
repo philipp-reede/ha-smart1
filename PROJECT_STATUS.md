@@ -39,6 +39,8 @@
   pump and auxiliary-heater power points to derived energy roles
 - Selected roles are integrated into source-specific external kWh statistics
   with the same 365-day import and three-day refresh behavior
+- Derived power history is split into UTC-aligned hourly energy statistics;
+  existing daily statistics migrate in place without changing statistic IDs
 - Derived grid import and export statistics were accepted by the real Home
   Assistant Energy Dashboard
 - The auxiliary-heater remote counter is the preferred source because its bus
@@ -60,8 +62,6 @@
   estimates derived from five-minute power samples
 - The preferred source needs confirmation where the installation exposes
   multiple measurement paths for one physical device
-- Derived energy history is currently imported as one statistic per day;
-  finer-grained Energy Dashboard graphs still need an hourly import design
 - The domain change from `smart1_csv` to `smart1_ems` is intentionally
   breaking while the integration is still under development
 

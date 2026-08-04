@@ -229,7 +229,7 @@ class Smart1HistoryTest(unittest.TestCase):
         )
 
         result = asyncio.run(
-            importer._fetch_daily_energy(
+            importer._fetch_hourly_energy(
                 date(2026, 8, 3),
                 date(2026, 8, 3),
                 ZoneInfo("Europe/Berlin"),
@@ -240,11 +240,95 @@ class Smart1HistoryTest(unittest.TestCase):
             api.calls,
             [(["grid", "wallbox"], date(2026, 8, 3), True)],
         )
+        self.assertEqual(
+            result["grid_import"][0][0],
+            datetime(2026, 8, 2, 22, 0, tzinfo=timezone.utc),
+        )
         self.assertAlmostEqual(result["grid_import"][0][1], 1 / 12)
         self.assertAlmostEqual(
             result["wallbox_consumption"][0][1],
             1 / 12,
         )
+
+    def test_daily_derived_history_triggers_full_hourly_migration(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        records = [
+            {
+                "start": datetime(2026, 8, day, tzinfo=local_tz).timestamp(),
+                "state": float(day),
+                "sum": float(day * 10),
+            }
+            for day in (1, 2, 3)
+        ]
+
+        start, baseline = derived_history.determine_hourly_import_window(
+            records,
+            date(2026, 8, 4),
+            local_tz,
+        )
+
+        self.assertEqual(start, date(2025, 8, 5))
+        self.assertEqual(baseline, 0.0)
+
+    def test_hourly_derived_history_refreshes_three_days(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        records = [
+            {
+                "start": datetime(
+                    2026,
+                    8,
+                    1,
+                    hour,
+                    tzinfo=local_tz,
+                ).timestamp(),
+                "state": 1.0,
+                "sum": 40.0 + hour,
+            }
+            for hour in (22, 23)
+        ]
+
+        start, baseline = derived_history.determine_hourly_import_window(
+            records,
+            date(2026, 8, 4),
+            local_tz,
+        )
+
+        self.assertEqual(start, date(2026, 8, 2))
+        self.assertEqual(baseline, 63.0)
+
+    def test_hourly_merge_replaces_old_daily_midnight_record(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        midnight = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        one_am = datetime(2026, 8, 3, 1, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+
+        result = derived_history.merge_hourly_energy(
+            [{"start": midnight.timestamp(), "state": 5.0, "sum": 20.0}],
+            [(midnight, 0.25), (one_am, 0.75)],
+            date(2026, 8, 3),
+            date(2026, 8, 3),
+            local_tz,
+        )
+
+        self.assertEqual(result, [(midnight, 0.25), (one_am, 0.75)])
+
+    def test_hourly_statistics_keep_cumulative_sum(self) -> None:
+        starts = [
+            datetime(2026, 8, 3, hour, tzinfo=timezone.utc)
+            for hour in (0, 1)
+        ]
+
+        result = derived_history.build_hourly_energy_statistics(
+            [(starts[0], 0.25), (starts[1], 0.75)],
+            10.0,
+        )
+
+        self.assertEqual([record["start"] for record in result], starts)
+        self.assertEqual([record["state"] for record in result], [0.25, 0.75])
+        self.assertEqual([record["sum"] for record in result], [10.25, 11.0])
 
 
 if __name__ == "__main__":
