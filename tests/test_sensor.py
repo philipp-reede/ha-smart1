@@ -73,6 +73,23 @@ class CoordinatorEntity:
 
 update_coordinator.CoordinatorEntity = CoordinatorEntity
 
+
+class FakeEntityRegistry:
+    def __init__(self) -> None:
+        self.entities = {}
+        self.removed = []
+
+    def async_get_entity_id(self, domain, platform, unique_id):
+        return self.entities.get((domain, platform, unique_id))
+
+    def async_remove(self, entity_id) -> None:
+        self.removed.append(entity_id)
+
+
+entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
+entity_registry.async_get = lambda hass: hass.entity_registry
+sys.modules["homeassistant.helpers.entity_registry"] = entity_registry
+
 custom_components = sys.modules.setdefault(
     "custom_components",
     types.ModuleType("custom_components"),
@@ -125,6 +142,7 @@ class InverterSensorTest(unittest.TestCase):
             ),
         }
         self.coordinator = types.SimpleNamespace(data={"pv_strings": self.samples})
+        self.entity_registry = FakeEntityRegistry()
 
     def test_string_sensor_uses_physical_inverter_device(self) -> None:
         entity = sensor_module.Smart1InverterStringSensor(
@@ -166,6 +184,7 @@ class InverterSensorTest(unittest.TestCase):
 
     def test_setup_adds_three_metrics_per_string_and_temperature(self) -> None:
         hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
             data={
                 "smart1_ems": {
                     "entry-1": {
@@ -205,6 +224,60 @@ class InverterSensorTest(unittest.TestCase):
         self.assertIsInstance(
             added[-1],
             sensor_module.Smart1InverterTemperatureSensor,
+        )
+
+    def test_setup_removes_unused_configured_strings(self) -> None:
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler",
+            string_count=4,
+            string_capacities_w=(5000.0, 6000.0, 0.0, None),
+            string_module_fields=("East", "West", "0", ""),
+        )
+        inactive_entity_ids = []
+        for string_id in (3, 4):
+            for metric in sensor_module.INVERTER_STRING_METRICS:
+                unique_id = sensor_module._inverter_string_unique_id(
+                    "entry-1",
+                    inverter,
+                    string_id,
+                    metric,
+                )
+                entity_id = f"sensor.unused_{string_id}_{metric.key}"
+                self.entity_registry.entities[
+                    ("sensor", "smart1_ems", unique_id)
+                ] = entity_id
+                inactive_entity_ids.append(entity_id)
+
+        hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": self.coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                added.extend,
+            )
+        )
+
+        self.assertEqual(len(added), 7)
+        self.assertEqual(
+            set(self.entity_registry.removed),
+            set(inactive_entity_ids),
         )
 
 

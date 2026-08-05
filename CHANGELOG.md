@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.1] - 2026-08-05
+
+### Fixed
+
+- Create PV-string entities only for strings with an active configuration or
+  actual measurements
+- Remove previously registered diagnostic entities for unused inverter strings
+
 ## [0.4.0] - 2026-08-05
 
 ### Added

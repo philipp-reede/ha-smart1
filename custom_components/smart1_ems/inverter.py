@@ -77,6 +77,29 @@ class Smart1Inverter:
         """Return configured one-based string identifiers."""
         return tuple(range(1, self.string_count + 1))
 
+    @property
+    def active_string_ids(self) -> tuple[int, ...]:
+        """Return strings with a configured capacity or module field."""
+        active_ids = []
+        for index in range(self.string_count):
+            capacity = (
+                self.string_capacities_w[index]
+                if index < len(self.string_capacities_w)
+                else None
+            )
+            module_field = (
+                self.string_module_fields[index]
+                if index < len(self.string_module_fields)
+                else ""
+            )
+            if capacity is not None:
+                is_active = capacity > 0
+            else:
+                is_active = module_field not in {"", "0", "-1"}
+            if is_active:
+                active_ids.append(index + 1)
+        return tuple(active_ids)
+
 
 @dataclass(frozen=True, slots=True)
 class Smart1PvStringSample:
@@ -95,6 +118,19 @@ class Smart1PvStringSample:
     def key(self) -> tuple[int, int, int]:
         """Return the stable lookup key for this string."""
         return (self.bus, self.address, self.string_id)
+
+    @property
+    def has_measurement(self) -> bool:
+        """Return whether at least one documented measurement is available."""
+        return any(
+            value is not None
+            for value in (
+                self.ac_power_w,
+                self.dc_power_w,
+                self.dc_voltage_v,
+                self.inverter_temperature_c,
+            )
+        )
 
 
 def parse_inverters(rows: list[dict[str, str]]) -> list[Smart1Inverter]:

@@ -54,8 +54,14 @@ The integration first discovers the physical inverter layout through
 response every five minutes. The newest row for each `(Bus, Address, StringId)`
 is exposed as diagnostic entities on a separate physical inverter device:
 
-- AC power, DC power and DC voltage per configured string
+- AC power, DC power and DC voltage per active string
 - One inverter temperature using the newest temperature reported by its strings
+
+A string is active when its metadata contains a positive configured capacity or
+a meaningful module-field assignment, or when the detailed endpoint returns an
+actual measurement for it. Declared but unused inverter inputs do not create
+unavailable Home Assistant entities. Registry entries created by earlier
+versions for such inputs are removed when the integration is reloaded.
 
 The inverter name, manufacturer, model and serial number populate the Home
 Assistant device registry. The API key, plant ID, inverter ID, serial number,

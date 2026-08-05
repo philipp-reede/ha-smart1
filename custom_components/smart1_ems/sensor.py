@@ -12,6 +12,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTemperature,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .classifier import Smart1Category
@@ -58,6 +59,19 @@ INVERTER_STRING_METRICS = (
 )
 
 
+def _inverter_string_unique_id(
+    entry_id: str,
+    inverter: Smart1Inverter,
+    string_id: int,
+    metric: Smart1InverterMetric,
+) -> str:
+    """Return the stable unique ID for one inverter-string metric."""
+    return (
+        f"smart1_{entry_id}_inverter_{inverter.bus}_{inverter.address}_"
+        f"string_{string_id}_{metric.key}"
+    )
+
+
 def _device_category(category: Smart1Category) -> Smart1Category:
     """Map measurement roles to the logical EMS device."""
     if category in {
@@ -98,13 +112,31 @@ async def async_setup_entry(hass, entry, async_add_entities):
         entities.append(Smart1PvEnergySensor(coordinator, entry.entry_id))
 
     pv_strings = coordinator.data.get("pv_strings", {})
+    entity_registry = er.async_get(hass)
     for inverter in inverters:
-        string_ids = set(inverter.string_ids)
+        string_ids = set(inverter.active_string_ids)
         string_ids.update(
             string_id
-            for bus, address, string_id in pv_strings
-            if (bus, address) == inverter.key and string_id > 0
+            for (bus, address, string_id), sample in pv_strings.items()
+            if (bus, address) == inverter.key
+            and string_id > 0
+            and sample.has_measurement
         )
+        for string_id in set(inverter.string_ids) - string_ids:
+            for metric in INVERTER_STRING_METRICS:
+                entity_id = entity_registry.async_get_entity_id(
+                    "sensor",
+                    DOMAIN,
+                    _inverter_string_unique_id(
+                        entry.entry_id,
+                        inverter,
+                        string_id,
+                        metric,
+                    ),
+                )
+                if entity_id is not None:
+                    entity_registry.async_remove(entity_id)
+
         for string_id in sorted(string_ids):
             for metric in INVERTER_STRING_METRICS:
                 entities.append(
@@ -261,9 +293,11 @@ class Smart1InverterStringSensor(CoordinatorEntity, SensorEntity):
         self._inverter = inverter
         self._string_id = string_id
         self._metric = metric
-        self._attr_unique_id = (
-            f"smart1_{entry_id}_inverter_{inverter.bus}_{inverter.address}_"
-            f"string_{string_id}_{metric.key}"
+        self._attr_unique_id = _inverter_string_unique_id(
+            entry_id,
+            inverter,
+            string_id,
+            metric,
         )
         self._attr_device_info = _inverter_device_info(entry_id, inverter)
         self._attr_translation_key = metric.translation_key
