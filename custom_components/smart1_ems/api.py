@@ -9,7 +9,11 @@ from urllib.parse import quote
 
 import aiohttp
 
-from .bus import Smart1BusSystem, parse_bus_systems
+from .bus import (
+    Smart1BusSystem,
+    bus_response_diagnostics,
+    parse_bus_systems,
+)
 from .const import BASE_URL
 from .inverter import (
     Smart1Inverter,
@@ -209,7 +213,9 @@ class Smart1Api:
             f"/bus/{self.device_id}",
             missing_ok=missing_ok,
         )
-        return parse_bus_systems(result.rows), result.diagnostics()
+        probe = result.diagnostics()
+        probe.update(bus_response_diagnostics(result.rows))
+        return parse_bus_systems(result.rows), probe
 
     def _counter_to_point(self, row: dict[str, str]) -> Smart1Point:
         """Convert one counter row into a Smart1Point."""
