@@ -44,6 +44,12 @@
 - Daily-only or non-monotonic derived statistics are cleared only after a
   complete replacement fetch and then rebuilt under the same statistic IDs;
   exact PV history and statistics from other integrations are not cleared
+- A role without replacement data no longer blocks repairs for other roles;
+  transient detailed-history requests are retried before a repair is deferred
+- Current-day PV and derived statistics refresh every 15 minutes while the
+  wider historical window continues to refresh every six hours
+- Redacted diagnostics expose the history import result and repair state
+  without statistic source IDs or measurement values
 - Derived grid import and export statistics were accepted by the real Home
   Assistant Energy Dashboard
 - The auxiliary-heater remote counter is the preferred source because its bus

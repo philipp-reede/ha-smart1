@@ -114,19 +114,38 @@ class Hass:
                 "discovery": discovery_module.Smart1DiscoveryResult(
                     has_pv=True
                 ),
+                "history_importers": [
+                    types.SimpleNamespace(
+                        diagnostic_status={
+                            "type": "derived_energy_history",
+                            "last_result": "completed",
+                        }
+                    )
+                ],
             }
         }
     }
 
 
 class DiagnosticsTest(unittest.TestCase):
-    def test_returns_classification_metadata_without_credentials_or_values(self) -> None:
+    def test_returns_classification_metadata_without_credentials_or_values(
+        self,
+    ) -> None:
         result = asyncio.run(
             diagnostics.async_get_config_entry_diagnostics(Hass(), Entry())
         )
         serialized = json.dumps(result)
 
         self.assertEqual(result["points"][0]["current_category"], "pv")
+        self.assertEqual(
+            result["history_imports"],
+            [
+                {
+                    "type": "derived_energy_history",
+                    "last_result": "completed",
+                }
+            ],
+        )
         self.assertEqual(
             result["configured_energy_roles"],
             {"grid_import": 1},

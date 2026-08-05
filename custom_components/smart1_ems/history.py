@@ -50,12 +50,13 @@ def determine_import_window(
     records: list[Mapping[str, Any]],
     today: date,
     local_tz: ZoneInfo,
+    refresh_days: int = REFRESH_DAYS,
 ) -> tuple[date, float]:
     """Return the first date to refresh and its preceding cumulative sum."""
     if not records:
         return today - timedelta(days=HISTORY_DAYS - 1), 0.0
 
-    refresh_start = today - timedelta(days=REFRESH_DAYS - 1)
+    refresh_start = today - timedelta(days=refresh_days - 1)
     preceding = [
         record
         for record in records
@@ -126,6 +127,19 @@ class Smart1PvHistoryImporter:
         self.hass = hass
         self.api = api
         self._lock = asyncio.Lock()
+        self._last_result = "not_started"
+        self._last_refresh_days: int | None = None
+        self._last_fetched_days = 0
+
+    @property
+    def diagnostic_status(self) -> dict[str, Any]:
+        """Return value-free runtime status for diagnostics."""
+        return {
+            "type": "pv_history",
+            "last_result": self._last_result,
+            "last_refresh_days": self._last_refresh_days,
+            "last_fetched_days": self._last_fetched_days,
+        }
 
     async def _existing_statistics(self) -> list[Mapping[str, Any]]:
         """Return enough recent records to establish a refresh baseline."""
@@ -169,12 +183,14 @@ class Smart1PvHistoryImporter:
 
         return daily_energy
 
-    async def async_import(self) -> None:
+    async def async_import(self, refresh_days: int = REFRESH_DAYS) -> None:
         """Import initial history or refresh the most recent days."""
         if self._lock.locked():
             return
 
         async with self._lock:
+            self._last_result = "running"
+            self._last_refresh_days = refresh_days
             local_tz = ZoneInfo(self.hass.config.time_zone)
             today = datetime.now(local_tz).date()
             records = await self._existing_statistics()
@@ -182,8 +198,10 @@ class Smart1PvHistoryImporter:
                 records,
                 today,
                 local_tz,
+                refresh_days,
             )
             fetched_energy = await self._fetch_daily_energy(start_date, today)
+            self._last_fetched_days = len(fetched_energy)
             daily_energy = merge_daily_energy(
                 records,
                 fetched_energy,
@@ -199,6 +217,7 @@ class Smart1PvHistoryImporter:
 
             if not statistics:
                 _LOGGER.debug("No smart1 PV history available for import")
+                self._last_result = "no_data"
                 return
 
             async_add_external_statistics(
@@ -218,3 +237,4 @@ class Smart1PvHistoryImporter:
                 "Imported %d days of smart1 PV history",
                 len(statistics),
             )
+            self._last_result = "completed"

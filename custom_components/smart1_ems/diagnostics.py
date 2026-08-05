@@ -220,6 +220,10 @@ async def async_get_config_entry_diagnostics(
 
     return {
         "integration": DOMAIN,
+        "history_imports": [
+            history_importer.diagnostic_status
+            for history_importer in runtime_data.get("history_importers", [])
+        ],
         "configured_energy_roles": _configured_energy_roles(
             entry,
             numbered_points,

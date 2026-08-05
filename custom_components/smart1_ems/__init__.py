@@ -18,6 +18,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
 HISTORY_UPDATE_INTERVAL = timedelta(hours=6)
+CURRENT_DAY_UPDATE_INTERVAL = timedelta(minutes=15)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -82,6 +83,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             for history_importer in history_importers:
                 await history_importer.async_import()
 
+        async def _async_refresh_current_day(_now=None) -> None:
+            for history_importer in history_importers:
+                if isinstance(history_importer, Smart1DerivedEnergyImporter):
+                    await history_importer.async_import(1, repair=False)
+                else:
+                    await history_importer.async_import(1)
+
         entry.async_create_background_task(
             hass,
             _async_refresh_history(),
@@ -92,6 +100,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass,
                 _async_refresh_history,
                 HISTORY_UPDATE_INTERVAL,
+            )
+        )
+        entry.async_on_unload(
+            async_track_time_interval(
+                hass,
+                _async_refresh_current_day,
+                CURRENT_DAY_UPDATE_INTERVAL,
             )
         )
 
