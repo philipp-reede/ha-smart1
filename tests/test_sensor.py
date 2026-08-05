@@ -45,6 +45,7 @@ sys.modules["homeassistant.components.sensor"] = sensor
 
 const = types.ModuleType("homeassistant.const")
 const.EntityCategory = types.SimpleNamespace(DIAGNOSTIC="diagnostic")
+const.UnitOfAngle = types.SimpleNamespace(DEGREES="°")
 const.UnitOfElectricPotential = types.SimpleNamespace(VOLT="V")
 const.UnitOfEnergy = types.SimpleNamespace(KILO_WATT_HOUR="kWh")
 const.UnitOfPower = types.SimpleNamespace(WATT="W")
@@ -102,6 +103,9 @@ smart1_ems = sys.modules.setdefault(
 smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
 inverter_module = importlib.import_module("custom_components.smart1_ems.inverter")
+module_field_module = importlib.import_module(
+    "custom_components.smart1_ems.module_field"
+)
 sensor_module = importlib.import_module("custom_components.smart1_ems.sensor")
 
 
@@ -181,6 +185,83 @@ class InverterSensorTest(unittest.TestCase):
 
         self.assertEqual(entity.native_value, 42.0)
         self.assertTrue(entity.available)
+
+    def test_setup_adds_static_module_field_configuration(self) -> None:
+        module_field = module_field_module.Smart1ModuleField(
+            id="Modulfield_1",
+            reference="1",
+            name="West",
+            tilt_degrees=23.0,
+            azimuth_degrees=65.0,
+            shadow_from="11:00:00",
+            shadow_until="13:00:00",
+            monitoring="on",
+            configured="ok",
+        )
+        module_inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            string_count=2,
+            string_capacities_w=(5000.0, 6000.0),
+            string_module_fields=("1", "2"),
+        )
+        hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": self.coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [module_inverter],
+                        "module_fields": [module_field],
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                added.extend,
+            )
+        )
+
+        module_entities = [
+            entity
+            for entity in added
+            if isinstance(entity, sensor_module.Smart1ModuleFieldSensor)
+        ]
+        self.assertEqual(len(module_entities), 3)
+        values = {
+            entity._attr_translation_key: entity._attr_native_value
+            for entity in module_entities
+        }
+        self.assertEqual(
+            values,
+            {
+                "module_field_installed_capacity": 5000.0,
+                "module_field_azimuth": 65.0,
+                "module_field_tilt": 23.0,
+            },
+        )
+        self.assertEqual(
+            module_entities[0]._attr_device_info["identifiers"],
+            {("smart1_ems", "entry-1:pv")},
+        )
+        self.assertEqual(
+            module_entities[0].extra_state_attributes,
+            {
+                "module_field_reference": "1",
+                "shadow_from": "11:00:00",
+                "shadow_until": "13:00:00",
+                "monitoring": "on",
+                "configured": "ok",
+            },
+        )
 
     def test_setup_adds_three_metrics_per_string_and_temperature(self) -> None:
         hass = types.SimpleNamespace(

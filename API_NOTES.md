@@ -71,6 +71,35 @@ timestamps and measurements remain excluded from integration diagnostics.
 Both endpoints are optional: a missing or failed inverter request does not make
 the existing linear entities or Energy Dashboard statistics unavailable.
 
+## Photovoltaic module-field configuration
+
+Endpoint:
+
+`/modulfields/{deviceId}`
+
+The documented response identifies every module field as `Modulfield_{id}`.
+Inverter string metadata refers to the same numeric ID. Available fields are:
+
+- `Name`
+- `Bias`: module tilt in degrees
+- `Direction`: azimuth in degrees
+- `ShadowFrom` and `ShadowTill`: configured shadow interval
+- `Reward` and `Variation`: documented configuration values without stated
+  units
+- `Monitoring` and `Configured`: configuration status
+
+The integration exposes tilt and azimuth as static diagnostic entities on the
+existing photovoltaic device. Installed module-field capacity is derived by
+summing the documented capacities of inverter strings assigned to that module
+field. Shadow intervals and status values are attributes. `Reward` and
+`Variation` are parsed but not exposed because the API document does not define
+their units or Home Assistant semantics.
+
+The module-field endpoint is optional. Failure or absence does not affect live
+measurements, inverter diagnostics, historical imports or Energy Dashboard
+statistics. Integration diagnostics report only capability counts, not module-
+field names, IDs, angles or other configuration values.
+
 ## Photovoltaic cumulative data
 
 Endpoint:
@@ -173,8 +202,6 @@ requests the day endpoint once per date when importing history.
 The 2020 API document contains no control or write endpoints. Additional
 read-only features could be built from these documented calls:
 
-- `/modulfields/{deviceId}` exposes module-field configuration such as azimuth,
-  tilt and configured shadow intervals.
 - `/bus/{deviceId}` exposes configured inverter bus systems and manufacturers.
 - Month and year periods are documented for detailed and cumulative calls.
   Cumulative month/year replies are aggregate period totals, so they cannot

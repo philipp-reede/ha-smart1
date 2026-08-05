@@ -12,6 +12,10 @@ import unittest
 
 ROOT = Path(__file__).parents[1]
 
+aiohttp = sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
+if not hasattr(aiohttp, "ClientError"):
+    aiohttp.ClientError = type("ClientError", (Exception,), {})
+
 homeassistant = sys.modules.setdefault(
     "homeassistant",
     types.ModuleType("homeassistant"),
@@ -48,6 +52,9 @@ diagnostics = importlib.import_module("custom_components.smart1_ems.diagnostics"
 discovery_module = importlib.import_module("custom_components.smart1_ems.discovery")
 interface_module = importlib.import_module("custom_components.smart1_ems.interface")
 inverter_module = importlib.import_module("custom_components.smart1_ems.inverter")
+module_field_module = importlib.import_module(
+    "custom_components.smart1_ems.module_field"
+)
 point_module = importlib.import_module("custom_components.smart1_ems.point")
 
 
@@ -142,8 +149,21 @@ class Hass:
                         model="E-SMART",
                         serial_number="private-serial-number",
                         string_count=1,
+                        string_capacities_w=(5000.0,),
+                        string_module_fields=("1",),
                         monitoring="on",
                         configured="ok",
+                    )
+                ],
+                "module_fields": [
+                    module_field_module.Smart1ModuleField(
+                        id="private-module-field-id",
+                        reference="1",
+                        name="private-module-field-name",
+                        tilt_degrees=23.0,
+                        azimuth_degrees=65.0,
+                        shadow_from="11:00:00",
+                        shadow_until="13:00:00",
                     )
                 ],
                 "history_importers": [
@@ -209,6 +229,16 @@ class DiagnosticsTest(unittest.TestCase):
             },
         )
         self.assertEqual(
+            result["module_field_diagnostics"],
+            {
+                "module_field_count": 1,
+                "with_installed_capacity": 1,
+                "with_azimuth": 1,
+                "with_tilt": 1,
+                "with_shadow_interval": 1,
+            },
+        )
+        self.assertEqual(
             result["linear_cumulative_probe"],
             {
                 "period": "previous_complete_day",
@@ -243,6 +273,8 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertNotIn("private-inverter-id", serialized)
         self.assertNotIn("private-serial-number", serialized)
         self.assertNotIn("private-inverter-timestamp", serialized)
+        self.assertNotIn("private-module-field-id", serialized)
+        self.assertNotIn("private-module-field-name", serialized)
         self.assertNotIn("2026-08-03", serialized)
         self.assertNotIn('"1000"', serialized)
         self.assertNotIn("api_key", serialized)

@@ -126,6 +126,26 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertEqual(api.requested_path, "/inverters/42")
         self.assertTrue(api.missing_ok)
 
+    def test_module_field_endpoint_is_optional(self) -> None:
+        api = RecordingSmart1Api(
+            [
+                {
+                    "ModulfieldId": "Modulfield_1",
+                    "Name": "West",
+                    "Bias": "23",
+                    "Direction": "65",
+                }
+            ]
+        )
+
+        module_fields = asyncio.run(api.get_module_fields(missing_ok=True))
+
+        self.assertEqual(module_fields[0].reference, "1")
+        self.assertEqual(module_fields[0].tilt_degrees, 23.0)
+        self.assertEqual(module_fields[0].azimuth_degrees, 65.0)
+        self.assertEqual(api.requested_path, "/modulfields/42")
+        self.assertTrue(api.missing_ok)
+
     def test_pv_detailed_endpoint_accepts_string_filter(self) -> None:
         api = RecordingSmart1Api([])
 

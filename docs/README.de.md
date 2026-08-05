@@ -19,6 +19,10 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 > Implementierung basiert auf der
 > [offiziellen Dokumentation der smart1 CSV-Portal-API](https://data.smart1.eu/s/W3M4E8EkqMAPWqL?dir=/01%20SOFTWARE%20%26%20FIRMWARE/02%20PORTAL&editing=false&openfile=true).
 
+> **Entwicklungshinweis:** Die gesamte Integration wurde in einem
+> KI-gestützten Vibe-Coding-Prozess mit OpenAI Codex erstellt. Änderungen werden
+> durch automatisierte Tests und an einer realen smart1 Anlage geprüft.
+
 > Das Projekt ist eine frühe öffentliche Beta-Version. Es wurde mit einer realen
 > smart1 Anlage und Home Assistant 2026.7.4 geprüft.
 
@@ -47,6 +51,8 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 - Optionale physische Wechselrichter-Geräte aus dem dokumentierten
   Wechselrichter-Endpunkt mit AC-/DC-Leistung und DC-Spannung je PV-String sowie
   Wechselrichtertemperatur als Diagnosesensoren
+- Optionale Modulfeld-Diagnosen für installierte Leistung, Ausrichtung, Neigung
+  und konfigurierte Verschattungszeiträume
 - Ladezustand der Batterie aus dem strukturierten smart1 `SOC`-Signal
 - Exakte PV-Produktion aus dem dokumentierten kumulativen PV-Endpunkt
 - Energy-Dashboard-Statistiken für Netz, Batterie, Wallbox, Wärmepumpe und
@@ -168,6 +174,8 @@ die Datei dennoch geprüft werden.
 - Wechselrichterdiagnosen benötigen die optionalen Endpunkte für
   Wechselrichter-Metadaten und detaillierte Photovoltaikdaten. Stellt ein Portal
   diese nicht bereit, funktionieren alle übrigen Geräte und Sensoren weiter.
+- Die Modulfeld-Konfiguration benötigt den optionalen dokumentierten
+  Modulfeld-Endpunkt und wird ausgelassen, wenn das Portal ihn nicht bereitstellt.
 - Historische Energiewerte außerhalb der PV-Anlage werden aus
   5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
   verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
@@ -182,6 +190,8 @@ die Datei dennoch geprüft werden.
   Hardwarekombinationen validieren
 - Die neuen Wechselrichter- und PV-String-Diagnosen mit weiteren
   Wechselrichtermodellen und Anlagen mit mehreren Wechselrichtern prüfen
+- Modulfeld-Zuordnungen und Ausrichtungsdaten mit weiteren Dachaufteilungen
+  prüfen
 - Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
 - Nach breiterer Praxiserprobung die Aufnahme in den HACS-Standardkatalog
   beantragen

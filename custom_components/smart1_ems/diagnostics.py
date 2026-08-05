@@ -17,6 +17,7 @@ from .classifier import classify_point
 from .const import DOMAIN
 from .energy_roles import ENERGY_ROLES_BY_KEY
 from .inverter import Smart1Inverter, Smart1PvStringSample
+from .module_field import Smart1ModuleField
 from .point import Smart1Point
 from .power_integration import integrate_power_rows
 
@@ -106,6 +107,32 @@ def _inverter_diagnostics(
         "inverter_count": len(inverters),
         "strings_with_data": len(samples),
         "inverters": inverter_rows,
+    }
+
+
+def _module_field_diagnostics(
+    module_fields: list[Smart1ModuleField],
+    inverters: list[Smart1Inverter],
+) -> dict[str, int]:
+    """Describe module-field support without names or configuration values."""
+    return {
+        "module_field_count": len(module_fields),
+        "with_installed_capacity": sum(
+            module_field.installed_capacity_w(inverters) is not None
+            for module_field in module_fields
+        ),
+        "with_azimuth": sum(
+            module_field.azimuth_degrees is not None
+            for module_field in module_fields
+        ),
+        "with_tilt": sum(
+            module_field.tilt_degrees is not None
+            for module_field in module_fields
+        ),
+        "with_shadow_interval": sum(
+            bool(module_field.shadow_from and module_field.shadow_until)
+            for module_field in module_fields
+        ),
     }
 
 
@@ -281,6 +308,10 @@ async def async_get_config_entry_diagnostics(
         "inverter_diagnostics": _inverter_diagnostics(
             runtime_data.get("inverters", []),
             coordinator_data.get("pv_strings", {}),
+        ),
+        "module_field_diagnostics": _module_field_diagnostics(
+            runtime_data.get("module_fields", []),
+            runtime_data.get("inverters", []),
         ),
         "linear_cumulative_probe": await _linear_cumulative_probe(
             runtime_data["api"],

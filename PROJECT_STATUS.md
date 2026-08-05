@@ -92,6 +92,8 @@
   multiple measurement paths for one physical device
 - Validate inverter and PV-string diagnostics with additional inverter models,
   string layouts and multi-inverter installations
+- Validate module-field assignments, derived installed capacity and orientation
+  metadata with additional roof layouts
 - Add a configurable history range if real-world installations need it
 - Apply for inclusion in the default HACS catalogue after broader validation
 
@@ -110,3 +112,7 @@ The coordinator currently stores approximately:
 `pv_energy_today` is `None` when the optional PV cumulative endpoint is not
 available. `pv_strings` is empty when the optional inverter endpoints are not
 available. Live values continue updating in both cases.
+
+Static module-field metadata is stored separately in the config-entry runtime
+data because it is read only during setup and does not require five-minute
+polling.

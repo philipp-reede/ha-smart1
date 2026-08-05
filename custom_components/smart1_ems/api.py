@@ -16,6 +16,7 @@ from .inverter import (
     parse_latest_pv_string_samples,
 )
 from .interface import parse_interface
+from .module_field import Smart1ModuleField, parse_module_fields
 from .point import Smart1Point
 from .pv import parse_pv_cumulative_energy
 
@@ -115,6 +116,18 @@ class Smart1Api:
             missing_ok=missing_ok,
         )
         return parse_inverters(rows)
+
+    async def get_module_fields(
+        self,
+        *,
+        missing_ok: bool = False,
+    ) -> list[Smart1ModuleField]:
+        """Return documented PV module-field metadata for the installation."""
+        rows = await self._get_csv(
+            f"/modulfields/{self.device_id}",
+            missing_ok=missing_ok,
+        )
+        return parse_module_fields(rows)
 
     def _counter_to_point(self, row: dict[str, str]) -> Smart1Point:
         """Convert one counter row into a Smart1Point."""

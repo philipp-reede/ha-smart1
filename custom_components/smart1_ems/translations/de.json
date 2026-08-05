@@ -61,6 +61,15 @@
       },
       "inverter_temperature": {
         "name": "Wechselrichtertemperatur"
+      },
+      "module_field_installed_capacity": {
+        "name": "Modulfeld {module_field} installierte Leistung"
+      },
+      "module_field_azimuth": {
+        "name": "Modulfeld {module_field} Ausrichtung"
+      },
+      "module_field_tilt": {
+        "name": "Modulfeld {module_field} Neigung"
       }
     }
   }
