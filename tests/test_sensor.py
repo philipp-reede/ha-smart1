@@ -44,8 +44,8 @@ sensor.SensorEntity = object
 sys.modules["homeassistant.components.sensor"] = sensor
 
 const = types.ModuleType("homeassistant.const")
+const.DEGREE = "°"
 const.EntityCategory = types.SimpleNamespace(DIAGNOSTIC="diagnostic")
-const.UnitOfAngle = types.SimpleNamespace(DEGREES="°")
 const.UnitOfElectricPotential = types.SimpleNamespace(VOLT="V")
 const.UnitOfEnergy = types.SimpleNamespace(KILO_WATT_HOUR="kWh")
 const.UnitOfPower = types.SimpleNamespace(WATT="W")

@@ -8,8 +8,8 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
+    DEGREE,
     EntityCategory,
-    UnitOfAngle,
     UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
@@ -86,14 +86,14 @@ MODULE_FIELD_METRICS = (
         key="azimuth_degrees",
         translation_key="module_field_azimuth",
         device_class=None,
-        unit=UnitOfAngle.DEGREES,
+        unit=DEGREE,
         precision=1,
     ),
     Smart1ModuleFieldMetric(
         key="tilt_degrees",
         translation_key="module_field_tilt",
         device_class=None,
-        unit=UnitOfAngle.DEGREES,
+        unit=DEGREE,
         precision=1,
     ),
 )
