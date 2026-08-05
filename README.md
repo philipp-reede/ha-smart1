@@ -97,12 +97,17 @@ and should therefore work with all smart1 portals that expose the documented
 endpoints and compatible measurement metadata. Real-world validation has so far
 been limited to one installation:
 
-| Component | Tested hardware | Validation |
-| --- | --- | --- |
-| EMS and portal | M-TEC Energy Hero EMS | Real-world tested |
-| Inverter and battery storage | M-TEC Energy Butler | Real-world tested |
-| Auxiliary heating | M-TEC Energy Heater | Real-world tested |
-| EV charging | KEBA wallbox | Real-world tested |
+| Component | Tested hardware | Tested versions | Validation | Evidence |
+| --- | --- | --- | --- | --- |
+| EMS and portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, software `1.28.57` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Inverter and battery storage | M-TEC Energy Butler 20 kW 3G40 | Firmware `V04.02.00.02-V23.54.05.00` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Auxiliary heating | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, firmware `V47.22.18.24` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| EV charging | KEBA P40 M-TEC | Software `1.4.5` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Heat pump | M-TEC AP440 | Not reported | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+
+These are confirmed test combinations, not minimum version requirements.
+Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
+smart1 EMS `v0.6.1` with Home Assistant `2026.7.4` on `portal.smart1.eu`.
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a
