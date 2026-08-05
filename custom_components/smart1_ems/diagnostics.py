@@ -137,9 +137,12 @@ def _module_field_diagnostics(
     }
 
 
-def _bus_diagnostics(buses: list[Smart1BusSystem]) -> dict[str, Any]:
-    """Describe configured inverter buses without manufacturer names."""
-    return {
+def _bus_diagnostics(
+    buses: list[Smart1BusSystem],
+    endpoint_probe: object = None,
+) -> dict[str, Any]:
+    """Describe buses and the endpoint shape without values or identifiers."""
+    result: dict[str, Any] = {
         "configured_bus_count": len(buses),
         "with_manufacturer_information": sum(
             bool(bus.manufacturers) for bus in buses
@@ -148,6 +151,28 @@ def _bus_diagnostics(buses: list[Smart1BusSystem]) -> dict[str, Any]:
             len(bus.manufacturers) for bus in buses
         ),
     }
+
+    if not isinstance(endpoint_probe, dict):
+        return result
+
+    for key in (
+        "endpoint_result",
+        "response_status",
+        "response_rows",
+        "error_code",
+        "error_type",
+    ):
+        value = endpoint_probe.get(key)
+        if isinstance(value, (str, int)):
+            result[key] = value
+
+    columns = endpoint_probe.get("response_columns")
+    if isinstance(columns, (list, tuple)) and all(
+        isinstance(column, str) for column in columns
+    ):
+        result["response_columns"] = sorted(set(columns))
+
+    return result
 
 
 async def _linear_cumulative_probe(
@@ -329,6 +354,7 @@ async def async_get_config_entry_diagnostics(
         ),
         "bus_diagnostics": _bus_diagnostics(
             runtime_data.get("buses", []),
+            runtime_data.get("bus_probe"),
         ),
         "linear_cumulative_probe": await _linear_cumulative_probe(
             runtime_data["api"],
