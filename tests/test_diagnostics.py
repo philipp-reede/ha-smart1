@@ -184,6 +184,13 @@ class Hass:
                         "BusManufactor1",
                         "BusId",
                     ],
+                    "rows_with_documented_bus_id": 1,
+                    "rows_with_numeric_bus_id": 0,
+                    "rows_with_other_bus_id": 0,
+                    "rows_without_bus_id": 0,
+                    "rows_with_configuration_status": 1,
+                    "rows_with_manufacturer_count": 1,
+                    "rows_with_manufacturer_protocols": 1,
                     "private_value": "private-bus-value",
                 },
                 "history_importers": [
@@ -268,6 +275,13 @@ class DiagnosticsTest(unittest.TestCase):
                 "response_status": 200,
                 "response_rows": 1,
                 "response_columns": ["BusId", "BusManufactor1"],
+                "rows_with_documented_bus_id": 1,
+                "rows_with_numeric_bus_id": 0,
+                "rows_with_other_bus_id": 0,
+                "rows_without_bus_id": 0,
+                "rows_with_configuration_status": 1,
+                "rows_with_manufacturer_count": 1,
+                "rows_with_manufacturer_protocols": 1,
             },
         )
         self.assertEqual(
