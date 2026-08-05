@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.1] - 2026-08-05
+
+### Fixed
+
+- Use Home Assistant's supported `DEGREE` constant for module-field azimuth
+  and tilt sensors instead of the unavailable `UnitOfAngle` import
+
 ## [0.5.0] - 2026-08-05
 
 ### Added
