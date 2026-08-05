@@ -66,6 +66,12 @@
 - Other battery-related percentage points such as state of health and
   EnergyCloud enablement flags are not offered as battery state of charge
 - Entities use Home Assistant's device-aware naming convention
+- The repository contains HACS metadata, public installation documentation,
+  English and German custom-integration translations, and automated HACS and
+  Hassfest validation for the 0.3.0 public beta
+- The integration is designed for the documented smart1 portal API generally;
+  real-world hardware validation currently covers M-TEC Energy Hero EMS,
+  Energy Heater, Energy Butler inverter/storage and a KEBA wallbox
 
 ## Known problems
 

@@ -30,6 +30,7 @@ jobs:
 
       - name: Validate JSON files
         run: |
+          python -m json.tool hacs.json >/dev/null
           python -m json.tool custom_components/smart1_ems/manifest.json >/dev/null
-          python -m json.tool custom_components/smart1_ems/strings.json >/dev/null
+          python -m json.tool custom_components/smart1_ems/translations/en.json >/dev/null
           python -m json.tool custom_components/smart1_ems/translations/de.json >/dev/null

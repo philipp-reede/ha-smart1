@@ -1,7 +1,7 @@
 {
   "domain": "smart1_ems",
   "name": "smart1 EMS",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "documentation": "https://github.com/philipp-reede/ha-smart1",
   "issue_tracker": "https://github.com/philipp-reede/ha-smart1/issues",
   "codeowners": ["@philipp-reede"],
