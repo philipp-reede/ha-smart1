@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 from homeassistant.components.sensor import (
@@ -7,6 +9,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import (
     EntityCategory,
+    UnitOfAngle,
     UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
@@ -19,6 +22,7 @@ from .classifier import Smart1Category
 from .const import DOMAIN
 from .entity_mapper import get_entity_descriptions
 from .inverter import Smart1Inverter
+from .module_field import Smart1ModuleField
 
 PV_DEVICE_NAME = "Smart1 Photovoltaik"
 
@@ -59,6 +63,42 @@ INVERTER_STRING_METRICS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class Smart1ModuleFieldMetric:
+    """One static value exposed for every documented PV module field."""
+
+    key: str
+    translation_key: str
+    device_class: SensorDeviceClass | None
+    unit: str
+    precision: int
+
+
+MODULE_FIELD_METRICS = (
+    Smart1ModuleFieldMetric(
+        key="installed_capacity_w",
+        translation_key="module_field_installed_capacity",
+        device_class=SensorDeviceClass.POWER,
+        unit=UnitOfPower.WATT,
+        precision=0,
+    ),
+    Smart1ModuleFieldMetric(
+        key="azimuth_degrees",
+        translation_key="module_field_azimuth",
+        device_class=None,
+        unit=UnitOfAngle.DEGREES,
+        precision=1,
+    ),
+    Smart1ModuleFieldMetric(
+        key="tilt_degrees",
+        translation_key="module_field_tilt",
+        device_class=None,
+        unit=UnitOfAngle.DEGREES,
+        precision=1,
+    ),
+)
+
+
 def _inverter_string_unique_id(
     entry_id: str,
     inverter: Smart1Inverter,
@@ -94,11 +134,24 @@ def _device_identifier(
     return (DOMAIN, f"{entry_id}:{device_category.value}")
 
 
+def _pv_device_info(entry_id: str) -> dict:
+    """Return device registry information for the installation PV system."""
+    return {
+        "identifiers": {
+            _device_identifier(entry_id, Smart1Category.PV),
+        },
+        "name": PV_DEVICE_NAME,
+        "manufacturer": "smart1",
+        "model": "Smart1 EMS",
+    }
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     devices = hass.data[DOMAIN][entry.entry_id]["devices"]
     discovery = hass.data[DOMAIN][entry.entry_id]["discovery"]
     inverters = hass.data[DOMAIN][entry.entry_id].get("inverters", [])
+    module_fields = hass.data[DOMAIN][entry.entry_id].get("module_fields", [])
 
     entities = []
 
@@ -110,6 +163,23 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     if discovery.has_pv:
         entities.append(Smart1PvEnergySensor(coordinator, entry.entry_id))
+
+    for module_field in module_fields:
+        for metric in MODULE_FIELD_METRICS:
+            value = _module_field_metric_value(
+                module_field,
+                inverters,
+                metric,
+            )
+            if value is not None:
+                entities.append(
+                    Smart1ModuleFieldSensor(
+                        entry.entry_id,
+                        module_field,
+                        metric,
+                        value,
+                    )
+                )
 
     pv_strings = coordinator.data.get("pv_strings", {})
     entity_registry = er.async_get(hass)
@@ -244,14 +314,7 @@ class Smart1PvEnergySensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, entry_id):
         super().__init__(coordinator)
         self._attr_unique_id = f"smart1_{entry_id}_pv_energy_today"
-        self._attr_device_info = {
-            "identifiers": {
-                _device_identifier(entry_id, Smart1Category.PV),
-            },
-            "name": PV_DEVICE_NAME,
-            "manufacturer": "smart1",
-            "model": "Smart1 EMS",
-        }
+        self._attr_device_info = _pv_device_info(entry_id)
 
     @property
     def native_value(self):
@@ -262,6 +325,58 @@ class Smart1PvEnergySensor(CoordinatorEntity, SensorEntity):
     def available(self):
         """Return whether cumulative PV production is available."""
         return super().available and self.native_value is not None
+
+
+def _module_field_metric_value(
+    module_field: Smart1ModuleField,
+    inverters: list[Smart1Inverter],
+    metric: Smart1ModuleFieldMetric,
+) -> float | None:
+    """Return one static module-field value."""
+    if metric.key == "installed_capacity_w":
+        return module_field.installed_capacity_w(inverters)
+    return getattr(module_field, metric.key)
+
+
+class Smart1ModuleFieldSensor(SensorEntity):
+    """Static configuration for one documented PV module field."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        entry_id: str,
+        module_field: Smart1ModuleField,
+        metric: Smart1ModuleFieldMetric,
+        value: float,
+    ) -> None:
+        self._module_field = module_field
+        self._attr_unique_id = (
+            f"smart1_{entry_id}_module_field_{module_field.reference}_"
+            f"{metric.key}"
+        )
+        self._attr_device_info = _pv_device_info(entry_id)
+        self._attr_translation_key = metric.translation_key
+        self._attr_translation_placeholders = {
+            "module_field": module_field.name or module_field.reference,
+        }
+        self._attr_native_value = value
+        self._attr_native_unit_of_measurement = metric.unit
+        self._attr_suggested_display_precision = metric.precision
+        if metric.device_class is not None:
+            self._attr_device_class = metric.device_class
+
+    @property
+    def extra_state_attributes(self):
+        """Return documented module-field configuration attributes."""
+        return {
+            "module_field_reference": self._module_field.reference,
+            "shadow_from": self._module_field.shadow_from or None,
+            "shadow_until": self._module_field.shadow_until or None,
+            "monitoring": self._module_field.monitoring or None,
+            "configured": self._module_field.configured or None,
+        }
 
 
 def _inverter_device_info(

@@ -19,6 +19,7 @@ class Smart1DiscoveryResult:
     has_heat_pump: bool = False
     has_energy_heater: bool = False
     inverter_count: int = 0
+    module_field_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -31,6 +32,7 @@ class Smart1DiscoveryResult:
             "has_heat_pump": self.has_heat_pump,
             "has_energy_heater": self.has_energy_heater,
             "inverter_count": self.inverter_count,
+            "module_field_count": self.module_field_count,
         }
 
 

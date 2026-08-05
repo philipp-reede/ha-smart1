@@ -18,6 +18,10 @@ battery, wallbox, heat pump and auxiliary heating.
 > release and is not affiliated with or endorsed by smart1. It is built against
 > the [official smart1 CSV portal API documentation](https://data.smart1.eu/s/W3M4E8EkqMAPWqL?dir=/01%20SOFTWARE%20%26%20FIRMWARE/02%20PORTAL&editing=false&openfile=true).
 
+> **Development disclosure:** The entire integration was created through an
+> AI-assisted vibe-coding workflow with OpenAI Codex. Changes are covered by
+> automated tests and validated against a real smart1 installation.
+
 > This project is an early public beta. It has been validated with one real
 > smart1 installation and Home Assistant 2026.7.4.
 
@@ -48,6 +52,8 @@ battery, wallbox, heat pump and auxiliary heating.
 - Optional physical inverter devices discovered from the documented inverter
   endpoint, with per-string AC/DC power, DC voltage and inverter temperature
   diagnostic sensors
+- Optional PV module-field diagnostics for installed capacity, azimuth, tilt
+  and configured shadow intervals
 - Live power, energy, temperature, percentage and diagnostic sensors where the
   portal exposes suitable points
 - Battery state of charge detected from the structured smart1 `SOC` signal
@@ -183,6 +189,8 @@ redacted diagnostics file when possible.
 - Inverter diagnostics depend on the optional inverter metadata and detailed
   photovoltaic endpoints. If a portal does not expose them, all other devices
   and sensors continue to work.
+- Module-field configuration depends on the optional documented module-field
+  endpoint and is omitted when a portal does not expose it.
 - Non-PV historical energy is derived rather than read from native cumulative
   meter totals because the tested installation does not expose usable linear
   cumulative data.
@@ -197,6 +205,8 @@ redacted diagnostics file when possible.
   hardware combinations.
 - Validate the new inverter and PV-string diagnostics with additional inverter
   models and multi-inverter installations.
+- Validate module-field assignments and orientation metadata with additional
+  roof layouts.
 - Make the historical import range configurable if longer or shorter imports
   prove useful across installations.
 - Apply for inclusion in the default HACS catalogue after broader real-world

@@ -37,9 +37,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.debug("Unable to discover smart1 inverters: %s", err)
         inverters = []
 
+    try:
+        module_fields = await api.get_module_fields(missing_ok=True)
+    except (ClientError, Smart1ApiError, TimeoutError) as err:
+        # Module-field configuration is optional and must not affect existing
+        # live values or Energy Dashboard statistics.
+        _LOGGER.debug("Unable to discover smart1 module fields: %s", err)
+        module_fields = []
+
     discovery = Smart1Discovery()
     discovery_result = discovery.analyze(devices)
     discovery_result.inverter_count = len(inverters)
+    discovery_result.module_field_count = len(module_fields)
 
     _LOGGER.info(
         "Smart1 Discovery: %s",
@@ -66,6 +75,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "devices": devices,
         "discovery": discovery_result,
         "inverters": inverters,
+        "module_fields": module_fields,
     }
 
     history_importers = []

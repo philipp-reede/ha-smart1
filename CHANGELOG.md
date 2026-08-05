@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.0] - 2026-08-05
+
+### Added
+
+- Discover optional PV module-field configuration through the documented
+  `/modulfields/{deviceId}` endpoint
+- Add diagnostic entities for installed module-field capacity, azimuth and
+  tilt to the existing photovoltaic device
+- Expose documented shadow intervals and configuration status as attributes
+- Add redacted module-field capability metadata to Home Assistant diagnostics
+
+### Documentation
+
+- Disclose that the integration was created through an AI-assisted vibe-coding
+  workflow with OpenAI Codex
+
 ## [0.4.2] - 2026-08-05
 
 ### Fixed

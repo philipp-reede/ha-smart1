@@ -61,6 +61,15 @@
       },
       "inverter_temperature": {
         "name": "Inverter temperature"
+      },
+      "module_field_installed_capacity": {
+        "name": "Module field {module_field} installed capacity"
+      },
+      "module_field_azimuth": {
+        "name": "Module field {module_field} azimuth"
+      },
+      "module_field_tilt": {
+        "name": "Module field {module_field} tilt"
       }
     }
   }
