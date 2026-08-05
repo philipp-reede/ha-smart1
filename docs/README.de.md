@@ -94,12 +94,18 @@ smart1 Portale. Sie sollte deshalb mit allen smart1 Portalen funktionieren, die
 die dokumentierten Endpunkte und kompatible Messpunkt-Metadaten bereitstellen.
 Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 
-| Komponente | Getestete Hardware | Validierung |
-| --- | --- | --- |
-| EMS und Portal | M-TEC Energy Hero EMS | Praxistest erfolgreich |
-| Wechselrichter und Speicher | M-TEC Energy Butler | Praxistest erfolgreich |
-| Zusatzheizung | M-TEC Energy Heater | Praxistest erfolgreich |
-| Wallbox | KEBA | Praxistest erfolgreich |
+| Komponente | Getestete Hardware | Getestete Versionen | Validierung | Nachweis |
+| --- | --- | --- | --- | --- |
+| EMS und Portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, Software `1.28.57` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Wechselrichter und Speicher | M-TEC Energy Butler 20 kW 3G40 | Firmware `V04.02.00.02-V23.54.05.00` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Zusatzheizung | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, Firmware `V47.22.18.24` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Wallbox | KEBA P40 M-TEC | Software `1.4.5` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Wärmepumpe | M-TEC AP440 | Nicht angegeben | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+
+Diese Angaben dokumentieren bestätigte Testkombinationen und keine
+Mindestversionen. Bericht
+[#13](https://github.com/philipp-reede/ha-smart1/issues/13) wurde mit smart1 EMS
+`v0.6.1`, Home Assistant `2026.7.4` und `portal.smart1.eu` erstellt.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an
