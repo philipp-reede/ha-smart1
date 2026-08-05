@@ -46,6 +46,7 @@ class ParseInvertersTest(unittest.TestCase):
         self.assertEqual(inverter.id, "Inverter_B2_A1")
         self.assertEqual(inverter.key, (2, 1))
         self.assertEqual(inverter.string_ids, (1, 2))
+        self.assertEqual(inverter.active_string_ids, (1, 2))
         self.assertEqual(inverter.string_capacities_w, (5000.0, 6000.0))
         self.assertEqual(inverter.string_module_fields, ("1", "2"))
         self.assertEqual(inverter.serial_number, "serial-1")
@@ -66,6 +67,7 @@ class ParseInvertersTest(unittest.TestCase):
 
         self.assertEqual(inverter.string_count, 3)
         self.assertEqual(inverter.string_ids, (1, 2, 3))
+        self.assertEqual(inverter.active_string_ids, (1, 3))
         self.assertIsNone(inverter.string_capacities_w[2])
 
     def test_ignores_rows_without_documented_inverter_id(self) -> None:
@@ -117,6 +119,8 @@ class ParsePvStringSamplesTest(unittest.TestCase):
         self.assertEqual(samples[(2, 1, 1)].dc_voltage_v, 501.2)
         self.assertIsNone(samples[(2, 1, 2)].ac_power_w)
         self.assertIsNone(samples[(2, 1, 2)].inverter_temperature_c)
+        self.assertTrue(samples[(2, 1, 1)].has_measurement)
+        self.assertTrue(samples[(2, 1, 2)].has_measurement)
 
     def test_ignores_incomplete_address_rows(self) -> None:
         rows = [
