@@ -219,6 +219,193 @@ class Smart1HistoryTest(unittest.TestCase):
             ],
         )
 
+    def test_daily_pv_total_requires_hourly_migration(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        records = [
+            {
+                "start": datetime(2026, 8, 3, tzinfo=local_tz).timestamp(),
+                "state": 116.71,
+                "sum": 500.0,
+            }
+        ]
+
+        self.assertTrue(
+            history.needs_hourly_pv_migration(records, local_tz)
+        )
+        self.assertEqual(
+            history.determine_hourly_pv_import_window(
+                records,
+                date(2026, 8, 5),
+                local_tz,
+            ),
+            (date(2025, 8, 6), 0.0),
+        )
+
+    def test_exact_pv_total_is_scaled_over_measured_hours(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        midnight = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        noon = datetime(2026, 8, 3, 12, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        one_pm = datetime(2026, 8, 3, 13, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        integration = history.PowerIntegrationResult(
+            energy_kwh=10.0,
+            hourly_energy_kwh=((noon, 4.0), (one_pm, 6.0)),
+            sample_count=3,
+            integrated_intervals=2,
+            skipped_gaps=0,
+            covered_seconds=7200,
+        )
+
+        result, distributed = history.distribute_exact_pv_energy(
+            date(2026, 8, 3),
+            116.71,
+            integration,
+            local_tz,
+        )
+
+        self.assertTrue(distributed)
+        self.assertEqual(result[0], (midnight, 0.0))
+        self.assertAlmostEqual(sum(value for _start, value in result), 116.71)
+        self.assertAlmostEqual(dict(result)[noon], 116.71 * 0.4)
+        self.assertAlmostEqual(dict(result)[one_pm], 116.71 * 0.6)
+
+    def test_pv_distribution_reuses_existing_exact_daily_total(self) -> None:
+        class PvApi:
+            def __init__(self) -> None:
+                self.detailed_calls = 0
+
+            async def get_pv_cumulative_energy(self, *args, **kwargs):
+                raise AssertionError("existing exact total should be reused")
+
+            async def get_linear_detailed_rows(self, *args, **kwargs):
+                self.detailed_calls += 1
+                return [
+                    {
+                        "LinearId": "pv",
+                        "Timestamp": "2026-08-03 12:00",
+                        "Value1": "1000",
+                    },
+                    {
+                        "LinearId": "pv",
+                        "Timestamp": "2026-08-03 12:05",
+                        "Value1": "1000",
+                    },
+                ]
+
+        api = PvApi()
+        importer = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(),
+            api,
+            types.SimpleNamespace(id="pv"),
+        )
+
+        result, completed, distributed_days, fallback_days = asyncio.run(
+            importer._fetch_hourly_energy(
+                date(2026, 8, 3),
+                date(2026, 8, 3),
+                ZoneInfo("Europe/Berlin"),
+                {date(2026, 8, 3): 116.71},
+            )
+        )
+
+        self.assertTrue(completed)
+        self.assertEqual(api.detailed_calls, 1)
+        self.assertEqual(distributed_days, 1)
+        self.assertEqual(fallback_days, 0)
+        self.assertAlmostEqual(sum(value for _start, value in result), 116.71)
+
+    def test_hourly_pv_replaces_daily_midnight_spike(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        midnight = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        noon = datetime(2026, 8, 3, 12, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        records = [
+            {
+                "start": midnight.timestamp(),
+                "state": 116.71,
+                "sum": 500.0,
+            }
+        ]
+
+        result = history.merge_hourly_pv_energy(
+            records,
+            [(midnight, 0.0), (noon, 116.71)],
+            date(2026, 8, 3),
+            date(2026, 8, 3),
+            local_tz,
+        )
+
+        self.assertEqual(result, [(midnight, 0.0), (noon, 116.71)])
+
+    def test_pv_import_migrates_daily_total_under_same_statistic_id(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        midnight = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        noon = datetime(2026, 8, 3, 12, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        daily_record = {
+            "start": midnight.timestamp(),
+            "state": 116.71,
+            "sum": 500.0,
+        }
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+            types.SimpleNamespace(id="pv"),
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[daily_record]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=(
+                [(midnight, 0.0), (noon, 116.71)],
+                True,
+                1,
+                0,
+            )
+        )
+        fake_recorder = types.SimpleNamespace(
+            async_block_till_done=AsyncMock()
+        )
+
+        with (
+            patch.object(history, "get_instance", return_value=fake_recorder),
+            patch.object(
+                history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+        ):
+            asyncio.run(importer.async_import())
+
+        call = add_statistics.call_args
+        self.assertEqual(
+            call.kwargs["metadata"]["statistic_id"],
+            history.PV_STATISTIC_ID,
+        )
+        self.assertEqual(
+            [record["state"] for record in call.kwargs["statistics"]],
+            [0.0, 116.71],
+        )
+        self.assertAlmostEqual(
+            call.kwargs["statistics"][-1]["sum"],
+            116.71,
+        )
+        fake_recorder.async_block_till_done.assert_awaited_once_with()
+        self.assertFalse(importer.diagnostic_status["migration_required"])
+
     def test_derived_import_fetches_all_selected_points_together(self) -> None:
         class FakeApi:
             def __init__(self) -> None:

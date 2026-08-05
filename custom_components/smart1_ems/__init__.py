@@ -52,7 +52,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     history_importers = []
     if discovery_result.has_pv:
-        history_importers.append(Smart1PvHistoryImporter(hass, api))
+        pv_power_point = next(
+            (
+                point
+                for point in devices
+                if point.source == "counter"
+                and point.type.lower() == "energy"
+                and point.hardware.lower() == "pv_global"
+            ),
+            None,
+        )
+        history_importers.append(
+            Smart1PvHistoryImporter(hass, api, pv_power_point)
+        )
 
     points_by_id = {point.id: point for point in devices}
     selected_roles = entry.options.get("energy_roles", {})
@@ -85,10 +97,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         async def _async_refresh_current_day(_now=None) -> None:
             for history_importer in history_importers:
-                if isinstance(history_importer, Smart1DerivedEnergyImporter):
-                    await history_importer.async_import(1, repair=False)
-                else:
-                    await history_importer.async_import(1)
+                await history_importer.async_import(1, repair=False)
 
         entry.async_create_background_task(
             hass,

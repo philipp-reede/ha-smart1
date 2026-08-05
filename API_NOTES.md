@@ -136,6 +136,12 @@ requests the day endpoint once per date when importing history.
 - The initial import covers the most recent 365 days.
 - The latest three days are refreshed every six hours so delayed portal data
   can be corrected.
+- The exact daily total is distributed into UTC-aligned hourly statistics by
+  scaling the integrated five-minute `pv_global` power profile. This preserves
+  the documented daily production while keeping the Energy Dashboard's hourly
+  source and residual-consumption calculations temporally aligned.
+- A zero-valued local-midnight bucket replaces the former single daily bucket
+  during migration under the unchanged statistic ID.
 - Missing dates remain unknown and are not converted to zero production.
 - The import runs in the background and is stored as external Home Assistant
   long-term statistics under `smart1_ems:pv_production`.

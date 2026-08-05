@@ -34,6 +34,11 @@
 - Integration name and domain are now `smart1 EMS` and `smart1_ems`
 - The latest 365 days of documented PV daily production are imported as
   external long-term statistics in the background
+- Exact PV daily totals are distributed across UTC-aligned hours using the
+  measured five-minute `pv_global` profile and normalized back to the exact
+  cumulative daily value, avoiding a midnight residual-consumption spike
+- Existing daily PV records migrate in place under the unchanged
+  `smart1_ems:pv_production` statistic ID
 - Recent PV statistics are refreshed every six hours to capture corrections
 - An Options Flow lets the user explicitly map grid, battery, wallbox, heat
   pump and auxiliary-heater power points to derived energy roles
