@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] - 2026-08-05
+
+### Added
+
+- Add local 256 px and 512 px brand icons for Home Assistant and the HACS
+  repository store.
+
 ## [0.3.0] - 2026-08-05
 
 First HACS-ready public beta.
