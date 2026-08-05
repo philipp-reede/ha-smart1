@@ -101,3 +101,7 @@ Wenn dir die Integration hilft, kannst du ihre Weiterentwicklung über
 
 Weitere technische Details stehen in den englischen
 [`API_NOTES.md`](../API_NOTES.md).
+
+## Lizenz
+
+Dieses Projekt steht unter der [MIT-Lizenz](../LICENSE).

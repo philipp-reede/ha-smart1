@@ -152,3 +152,7 @@ The integration version is stored in
 `custom_components/smart1_ems/manifest.json`. Release notes are maintained in
 [`CHANGELOG.md`](CHANGELOG.md). GitHub releases use matching `vX.Y.Z` tags so
 HACS can offer stable, selectable versions.
+
+## License
+
+This project is available under the [MIT License](LICENSE).

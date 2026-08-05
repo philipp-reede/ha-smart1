@@ -1,13 +1,13 @@
 {
   "domain": "smart1_ems",
   "name": "smart1 EMS",
-  "version": "0.3.0",
-  "documentation": "https://github.com/philipp-reede/ha-smart1",
-  "issue_tracker": "https://github.com/philipp-reede/ha-smart1/issues",
   "codeowners": ["@philipp-reede"],
-  "dependencies": ["recorder"],
   "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/philipp-reede/ha-smart1",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "requirements": []
+  "issue_tracker": "https://github.com/philipp-reede/ha-smart1/issues",
+  "requirements": [],
+  "version": "0.3.0"
 }

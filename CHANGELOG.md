@@ -15,6 +15,7 @@ First HACS-ready public beta.
   auxiliary-heater energy
 - Redacted Home Assistant diagnostics for discovery and history troubleshooting
 - English and German setup translations
+- HACS metadata, automated repository validation and an MIT license
 
 ### Changed
 
@@ -30,4 +31,3 @@ First HACS-ready public beta.
 - Non-PV energy is estimated from five-minute power samples because native
   cumulative linear totals are unavailable on the validated installation
 - The integration is read-only and does not control the EMS or connected devices
-
