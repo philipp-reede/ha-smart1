@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.2] - 2026-08-05
+
+### Fixed
+
+- Prefer strings actually reported by the detailed inverter endpoint over
+  ambiguous module-field metadata
+- Keep metadata-based string discovery as a fallback until detailed rows are
+  available
+
 ## [0.4.1] - 2026-08-05
 
 ### Fixed
