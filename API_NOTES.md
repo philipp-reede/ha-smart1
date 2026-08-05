@@ -57,11 +57,13 @@ is exposed as diagnostic entities on a separate physical inverter device:
 - AC power, DC power and DC voltage per active string
 - One inverter temperature using the newest temperature reported by its strings
 
-A string is active when its metadata contains a positive configured capacity or
-a meaningful module-field assignment, or when the detailed endpoint returns an
-actual measurement for it. Declared but unused inverter inputs do not create
-unavailable Home Assistant entities. Registry entries created by earlier
-versions for such inputs are removed when the integration is reloaded.
+Once the detailed endpoint returns rows for an inverter, those rows are the
+authoritative list of active strings. This avoids false positives from portals
+that assign module fields to unused inverter inputs. Until detailed rows are
+available, a positive configured capacity or a meaningful module-field
+assignment is used as a discovery fallback. Declared but unused inverter inputs
+do not create unavailable Home Assistant entities. Registry entries created by
+earlier versions for such inputs are removed when the integration is reloaded.
 
 The inverter name, manufacturer, model and serial number populate the Home
 Assistant device registry. The API key, plant ID, inverter ID, serial number,

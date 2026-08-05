@@ -226,15 +226,15 @@ class InverterSensorTest(unittest.TestCase):
             sensor_module.Smart1InverterTemperatureSensor,
         )
 
-    def test_setup_removes_unused_configured_strings(self) -> None:
+    def test_setup_prefers_reported_strings_over_metadata(self) -> None:
         inverter = inverter_module.Smart1Inverter(
             id="Inverter_B2_A1",
             bus=2,
             address=1,
             name="Energy Butler",
             string_count=4,
-            string_capacities_w=(5000.0, 6000.0, 0.0, None),
-            string_module_fields=("East", "West", "0", ""),
+            string_capacities_w=(5000.0, 6000.0, None, None),
+            string_module_fields=("East", "West", "3", ""),
         )
         inactive_entity_ids = []
         for string_id in (3, 4):
@@ -279,6 +279,42 @@ class InverterSensorTest(unittest.TestCase):
             set(self.entity_registry.removed),
             set(inactive_entity_ids),
         )
+
+    def test_setup_uses_metadata_before_detailed_rows_are_available(self) -> None:
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler",
+            string_count=4,
+            string_capacities_w=(5000.0, 6000.0, 0.0, None),
+            string_module_fields=("East", "West", "0", ""),
+        )
+        coordinator = types.SimpleNamespace(data={"pv_strings": {}})
+        hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                added.extend,
+            )
+        )
+
+        self.assertEqual(len(added), 7)
 
 
 if __name__ == "__main__":

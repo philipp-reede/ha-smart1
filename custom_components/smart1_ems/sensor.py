@@ -114,13 +114,21 @@ async def async_setup_entry(hass, entry, async_add_entities):
     pv_strings = coordinator.data.get("pv_strings", {})
     entity_registry = er.async_get(hass)
     for inverter in inverters:
-        string_ids = set(inverter.active_string_ids)
-        string_ids.update(
+        detailed_string_ids = {
             string_id
             for (bus, address, string_id), sample in pv_strings.items()
             if (bus, address) == inverter.key
             and string_id > 0
             and sample.has_measurement
+        }
+        # The detailed endpoint reflects the strings actually reported by the
+        # inverter. Prefer it over metadata because some portals assign module
+        # fields to unused inputs. Metadata remains the discovery fallback when
+        # no detailed rows have been received yet.
+        string_ids = (
+            detailed_string_ids
+            if detailed_string_ids
+            else set(inverter.active_string_ids)
         )
         for string_id in set(inverter.string_ids) - string_ids:
             for metric in INVERTER_STRING_METRICS:
