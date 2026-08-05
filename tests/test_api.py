@@ -192,6 +192,13 @@ class Smart1ApiTest(unittest.TestCase):
                     "BusManufactor1",
                     "BusManufactors",
                 ],
+                "rows_with_documented_bus_id": 1,
+                "rows_with_numeric_bus_id": 0,
+                "rows_with_other_bus_id": 0,
+                "rows_without_bus_id": 0,
+                "rows_with_configuration_status": 1,
+                "rows_with_manufacturer_count": 1,
+                "rows_with_manufacturer_protocols": 1,
             },
         )
         self.assertNotIn("private-manufacturer", str(probe))
@@ -214,6 +221,8 @@ class Smart1ApiTest(unittest.TestCase):
             probe["response_columns"],
             ["Status", "UnknownBusColumn"],
         )
+        self.assertEqual(probe["rows_without_bus_id"], 1)
+        self.assertEqual(probe["rows_with_configuration_status"], 0)
 
     def test_bus_probe_reports_optional_endpoint_not_found(self) -> None:
         api = Smart1Api(CsvSession("", status=404), "redacted", "42")
@@ -230,6 +239,13 @@ class Smart1ApiTest(unittest.TestCase):
                 "response_status": 404,
                 "response_rows": 0,
                 "response_columns": [],
+                "rows_with_documented_bus_id": 0,
+                "rows_with_numeric_bus_id": 0,
+                "rows_with_other_bus_id": 0,
+                "rows_without_bus_id": 0,
+                "rows_with_configuration_status": 0,
+                "rows_with_manufacturer_count": 0,
+                "rows_with_manufacturer_protocols": 0,
             },
         )
 
@@ -251,6 +267,8 @@ class Smart1ApiTest(unittest.TestCase):
             probe["response_columns"],
             ["BusConfigured", "BusId", "PortalSpecificColumn"],
         )
+        self.assertEqual(probe["rows_with_documented_bus_id"], 0)
+        self.assertEqual(probe["rows_without_bus_id"], 0)
 
     def test_pv_detailed_endpoint_accepts_string_filter(self) -> None:
         api = RecordingSmart1Api([])
