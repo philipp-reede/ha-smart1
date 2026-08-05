@@ -121,8 +121,10 @@ not a distinct inverter.
 
 The bus endpoint is optional. Missing or failed requests do not affect live
 measurements, inverter devices, historical imports or Energy Dashboard
-statistics. Integration diagnostics report only bus and protocol counts; they
-do not expose bus manufacturer names.
+statistics. Integration diagnostics report bus and protocol counts plus a
+privacy-safe endpoint probe. The probe distinguishes missing, empty, failed and
+data-bearing responses and includes only HTTP status, row count and column
+names. It does not expose bus values, IDs or manufacturer names.
 
 ## Photovoltaic cumulative data
 
