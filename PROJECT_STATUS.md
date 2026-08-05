@@ -31,6 +31,8 @@
   counts instead of manufacturer protocol names
 - Bus diagnostics distinguish a missing or empty endpoint from an unrecognized
   portal response using only status, row count and column names
+- Bus response rows are classified through anonymous counters for identifier
+  formats and the presence of configuration or manufacturer metadata
 - Measurement roles now share one logical Smart1 EMS device
 - Heat pumps and heating elements have dedicated classification rules
 - Direct battery, e-car, heat-pump, and grid-meter interfaces are classified
