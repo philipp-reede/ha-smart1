@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.1] - 2026-08-05
+
+### Added
+
+- Add a privacy-safe bus endpoint probe to Home Assistant diagnostics
+- Report whether the optional endpoint is missing, empty, failed or returned
+  data, together with only its HTTP status, row count and column names
+
+### Reliability
+
+- Distinguish an unavailable bus endpoint from a portal response whose column
+  layout is not yet understood, without exposing bus values or identifiers
+
 ## [0.6.0] - 2026-08-05
 
 ### Added
