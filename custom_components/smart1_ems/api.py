@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+from dataclasses import dataclass
 from datetime import date
 from urllib.parse import quote
 
@@ -37,6 +38,29 @@ class Smart1ApiError(Exception):
         super().__init__(f"smart1 API error {code}")
 
 
+@dataclass(frozen=True, slots=True)
+class Smart1CsvResult:
+    """CSV response metadata that is safe to include in diagnostics."""
+
+    rows: list[dict[str, str]]
+    endpoint_result: str
+    response_status: int
+    response_columns: tuple[str, ...] = ()
+    error_code: str | None = None
+
+    def diagnostics(self) -> dict[str, object]:
+        """Return the response shape without exposing row values."""
+        result: dict[str, object] = {
+            "endpoint_result": self.endpoint_result,
+            "response_status": self.response_status,
+            "response_rows": len(self.rows),
+            "response_columns": list(self.response_columns),
+        }
+        if self.error_code is not None:
+            result["error_code"] = self.error_code
+        return result
+
+
 class Smart1Api:
     """Client for the smart1 EMS portal API."""
 
@@ -50,13 +74,13 @@ class Smart1Api:
         self.api_key = api_key
         self.device_id = device_id
 
-    async def _get_csv(
+    async def _get_csv_result(
         self,
         path: str,
         *,
         missing_ok: bool = False,
-    ) -> list[dict[str, str]]:
-        """Execute a CSV request."""
+    ) -> Smart1CsvResult:
+        """Execute a CSV request and retain privacy-safe response metadata."""
 
         url = f"{BASE_URL}{path}?apikey={self.api_key}"
         safe_url = _redact_secret(url, self.api_key)
@@ -68,7 +92,11 @@ class Smart1Api:
 
             if missing_ok and response.status == 404:
                 _LOGGER.debug("No smart1 data for %s", safe_url)
-                return []
+                return Smart1CsvResult(
+                    rows=[],
+                    endpoint_result="not_found",
+                    response_status=response.status,
+                )
 
             if response.status >= 400:
                 _LOGGER.error(
@@ -81,18 +109,47 @@ class Smart1Api:
                 raise Smart1ApiError(str(response.status))
 
         if not text.strip():
-            return []
+            return Smart1CsvResult(
+                rows=[],
+                endpoint_result="empty_response",
+                response_status=response.status,
+            )
 
-        rows = list(csv.DictReader(io.StringIO(text), delimiter=";"))
+        reader = csv.DictReader(io.StringIO(text), delimiter=";")
+        rows = list(reader)
+        response_columns = tuple(
+            sorted(column for column in (reader.fieldnames or []) if column)
+        )
 
         if rows and "Errorcode" in rows[0]:
             error_code = str(rows[0].get("Errorcode") or "unknown").strip()
             if missing_ok and error_code.startswith("404"):
                 _LOGGER.debug("No smart1 data for %s", safe_url)
-                return []
+                return Smart1CsvResult(
+                    rows=[],
+                    endpoint_result="not_found",
+                    response_status=response.status,
+                    response_columns=response_columns,
+                    error_code=error_code,
+                )
             raise Smart1ApiError(error_code)
 
-        return rows
+        return Smart1CsvResult(
+            rows=rows,
+            endpoint_result="data_returned" if rows else "empty_response",
+            response_status=response.status,
+            response_columns=response_columns,
+        )
+
+    async def _get_csv(
+        self,
+        path: str,
+        *,
+        missing_ok: bool = False,
+    ) -> list[dict[str, str]]:
+        """Execute a CSV request."""
+        result = await self._get_csv_result(path, missing_ok=missing_ok)
+        return result.rows
 
     async def get_plants(self) -> list[dict[str, str]]:
         """Return all plants."""
@@ -141,6 +198,18 @@ class Smart1Api:
             missing_ok=missing_ok,
         )
         return parse_bus_systems(rows)
+
+    async def get_buses_with_probe(
+        self,
+        *,
+        missing_ok: bool = False,
+    ) -> tuple[list[Smart1BusSystem], dict[str, object]]:
+        """Return buses and privacy-safe metadata about the raw response."""
+        result = await self._get_csv_result(
+            f"/bus/{self.device_id}",
+            missing_ok=missing_ok,
+        )
+        return parse_bus_systems(result.rows), result.diagnostics()
 
     def _counter_to_point(self, row: dict[str, str]) -> Smart1Point:
         """Convert one counter row into a Smart1Point."""
