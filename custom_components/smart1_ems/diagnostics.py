@@ -161,6 +161,13 @@ def _bus_diagnostics(
         "response_rows",
         "error_code",
         "error_type",
+        "rows_with_documented_bus_id",
+        "rows_with_numeric_bus_id",
+        "rows_with_other_bus_id",
+        "rows_without_bus_id",
+        "rows_with_configuration_status",
+        "rows_with_manufacturer_count",
+        "rows_with_manufacturer_protocols",
     ):
         value = endpoint_probe.get(key)
         if isinstance(value, (str, int)):
