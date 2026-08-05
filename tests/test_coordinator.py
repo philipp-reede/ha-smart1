@@ -85,6 +85,23 @@ class LiveOnlyApi:
         raise ClientError("No PV data")
 
 
+class InverterApi(LiveOnlyApi):
+    async def get_latest_pv_string_samples(
+        self,
+        *,
+        target_date=None,
+        missing_ok=False,
+    ):
+        self.target_dates.append(target_date)
+        self.missing_ok = missing_ok
+        return {(2, 1, 1): "latest-sample"}
+
+
+class FailingInverterApi(LiveOnlyApi):
+    async def get_latest_pv_string_samples(self, **kwargs):
+        raise ClientError("No inverter data")
+
+
 class Smart1CoordinatorTest(unittest.TestCase):
     def test_optional_pv_failure_keeps_live_values(self) -> None:
         api = LiveOnlyApi()
@@ -94,7 +111,41 @@ class Smart1CoordinatorTest(unittest.TestCase):
 
         self.assertEqual(data["live"], {"point-1": 123.0})
         self.assertIsNone(data["pv_energy_today"])
+        self.assertEqual(data["pv_strings"], {})
         self.assertEqual(api.target_dates, [date(2026, 8, 4)] * 2)
+
+    def test_optional_inverter_values_are_returned(self) -> None:
+        api = InverterApi()
+        coordinator = Smart1Coordinator(
+            None,
+            api,
+            [],
+            ["point-1"],
+            [object()],
+        )
+
+        data = asyncio.run(coordinator._async_update_data())
+
+        self.assertEqual(data["pv_strings"], {(2, 1, 1): "latest-sample"})
+        self.assertTrue(api.missing_ok)
+        self.assertEqual(api.target_dates, [date(2026, 8, 4)] * 3)
+
+    def test_optional_inverter_failure_keeps_previous_values(self) -> None:
+        coordinator = Smart1Coordinator(
+            None,
+            FailingInverterApi(),
+            [],
+            ["point-1"],
+            [object()],
+        )
+        coordinator.data = {"pv_strings": {(2, 1, 1): "previous-sample"}}
+
+        data = asyncio.run(coordinator._async_update_data())
+
+        self.assertEqual(
+            data["pv_strings"],
+            {(2, 1, 1): "previous-sample"},
+        )
 
 
 if __name__ == "__main__":

@@ -9,6 +9,12 @@ from urllib.parse import quote
 import aiohttp
 
 from .const import BASE_URL
+from .inverter import (
+    Smart1Inverter,
+    Smart1PvStringSample,
+    parse_inverters,
+    parse_latest_pv_string_samples,
+)
 from .interface import parse_interface
 from .point import Smart1Point
 from .pv import parse_pv_cumulative_energy
@@ -97,6 +103,18 @@ class Smart1Api:
     async def get_counters(self) -> list[dict[str, str]]:
         """Return all counters."""
         return await self._get_csv(f"/counters/{self.device_id}")
+
+    async def get_inverters(
+        self,
+        *,
+        missing_ok: bool = False,
+    ) -> list[Smart1Inverter]:
+        """Return documented inverter metadata for the installation."""
+        rows = await self._get_csv(
+            f"/inverters/{self.device_id}",
+            missing_ok=missing_ok,
+        )
+        return parse_inverters(rows)
 
     def _counter_to_point(self, row: dict[str, str]) -> Smart1Point:
         """Convert one counter row into a Smart1Point."""
@@ -256,6 +274,53 @@ class Smart1Api:
         )
 
         return parse_pv_cumulative_energy(rows)
+
+    async def get_pv_detailed_rows(
+        self,
+        period: str = "day",
+        target_date: date | None = None,
+        *,
+        bus: int | None = None,
+        address: int | None = None,
+        string_id: int | None = None,
+        missing_ok: bool = False,
+    ) -> list[dict[str, str]]:
+        """Return documented five-minute photovoltaic rows."""
+        if period not in {"day", "month", "year"}:
+            raise ValueError(f"Unsupported photovoltaic period: {period}")
+        if period == "year" and (bus is None or address is None):
+            raise ValueError("Year photovoltaic requests require bus and address")
+        if address is not None and bus is None:
+            raise ValueError("Photovoltaic address requires a bus")
+        if string_id is not None and address is None:
+            raise ValueError("Photovoltaic string requires bus and address")
+
+        date_string = (target_date or date.today()).strftime("%Y%m%d")
+        path = (
+            f"/data/csv/{self.device_id}/photovoltaics/"
+            f"{period}/detailed/{date_string}"
+        )
+        if bus is not None:
+            path += f"/{bus}"
+        if address is not None:
+            path += f"/{address}"
+        if string_id is not None:
+            path += f"/{string_id}"
+
+        return await self._get_csv(path, missing_ok=missing_ok)
+
+    async def get_latest_pv_string_samples(
+        self,
+        target_date: date | None = None,
+        *,
+        missing_ok: bool = False,
+    ) -> dict[tuple[int, int, int], Smart1PvStringSample]:
+        """Return the latest documented values for every inverter string."""
+        rows = await self.get_pv_detailed_rows(
+            target_date=target_date,
+            missing_ok=missing_ok,
+        )
+        return parse_latest_pv_string_samples(rows)
 
     async def get_linear_cumulative_rows(
         self,

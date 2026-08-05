@@ -47,6 +47,7 @@ smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 diagnostics = importlib.import_module("custom_components.smart1_ems.diagnostics")
 discovery_module = importlib.import_module("custom_components.smart1_ems.discovery")
 interface_module = importlib.import_module("custom_components.smart1_ems.interface")
+inverter_module = importlib.import_module("custom_components.smart1_ems.inverter")
 point_module = importlib.import_module("custom_components.smart1_ems.point")
 
 
@@ -98,6 +99,22 @@ class Hass:
         "smart1_ems": {
             "entry-1": {
                 "api": Api(),
+                "coordinator": types.SimpleNamespace(
+                    data={
+                        "pv_strings": {
+                            (2, 1, 1): inverter_module.Smart1PvStringSample(
+                                bus=2,
+                                address=1,
+                                string_id=1,
+                                timestamp="private-inverter-timestamp",
+                                ac_power_w=100.0,
+                                dc_power_w=110.0,
+                                dc_voltage_v=500.0,
+                                inverter_temperature_c=42.0,
+                            )
+                        }
+                    }
+                ),
                 "devices": [
                     point_module.Smart1Point(
                         id="private-point-id",
@@ -112,8 +129,23 @@ class Hass:
                     )
                 ],
                 "discovery": discovery_module.Smart1DiscoveryResult(
-                    has_pv=True
+                    has_pv=True,
+                    inverter_count=1,
                 ),
+                "inverters": [
+                    inverter_module.Smart1Inverter(
+                        id="private-inverter-id",
+                        bus=2,
+                        address=1,
+                        name="Energy Butler",
+                        manufacturer="M-TEC",
+                        model="E-SMART",
+                        serial_number="private-serial-number",
+                        string_count=1,
+                        monitoring="on",
+                        configured="ok",
+                    )
+                ],
                 "history_importers": [
                     types.SimpleNamespace(
                         diagnostic_status={
@@ -151,6 +183,32 @@ class DiagnosticsTest(unittest.TestCase):
             {"grid_import": 1},
         )
         self.assertEqual(
+            result["inverter_diagnostics"],
+            {
+                "inverter_count": 1,
+                "strings_with_data": 1,
+                "inverters": [
+                    {
+                        "inverter_number": 1,
+                        "name": "Energy Butler",
+                        "manufacturer": "M-TEC",
+                        "model": "E-SMART",
+                        "configured_strings": 1,
+                        "strings_with_data": 1,
+                        "available_metrics": [
+                            "ac_power_w",
+                            "dc_power_w",
+                            "dc_voltage_v",
+                            "inverter_temperature_c",
+                        ],
+                        "monitoring": "on",
+                        "configured": "ok",
+                        "serial_number_present": True,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(
             result["linear_cumulative_probe"],
             {
                 "period": "previous_complete_day",
@@ -182,6 +240,9 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertNotIn("private-point-id", serialized)
         self.assertNotIn("private-timestamp", serialized)
         self.assertNotIn("private-energy-value", serialized)
+        self.assertNotIn("private-inverter-id", serialized)
+        self.assertNotIn("private-serial-number", serialized)
+        self.assertNotIn("private-inverter-timestamp", serialized)
         self.assertNotIn("2026-08-03", serialized)
         self.assertNotIn('"1000"', serialized)
         self.assertNotIn("api_key", serialized)

@@ -49,6 +49,20 @@ address are mandatory for year requests.
 - `Value3`: DC voltage in V
 - `Value4`: inverter temperature in °C
 
+The integration first discovers the physical inverter layout through
+`/inverters/{deviceId}` and then reads the unfiltered current-day detailed
+response every five minutes. The newest row for each `(Bus, Address, StringId)`
+is exposed as diagnostic entities on a separate physical inverter device:
+
+- AC power, DC power and DC voltage per configured string
+- One inverter temperature using the newest temperature reported by its strings
+
+The inverter name, manufacturer, model and serial number populate the Home
+Assistant device registry. The API key, plant ID, inverter ID, serial number,
+timestamps and measurements remain excluded from integration diagnostics.
+Both endpoints are optional: a missing or failed inverter request does not make
+the existing linear entities or Energy Dashboard statistics unavailable.
+
 ## Photovoltaic cumulative data
 
 Endpoint:
@@ -151,20 +165,14 @@ requests the day endpoint once per date when importing history.
 The 2020 API document contains no control or write endpoints. Additional
 read-only features could be built from these documented calls:
 
-- `/inverters/{deviceId}` exposes static inverter metadata such as
-  manufacturer, type, serial number, capacity, bus/address and string layout.
 - `/modulfields/{deviceId}` exposes module-field configuration such as azimuth,
   tilt and configured shadow intervals.
 - `/bus/{deviceId}` exposes configured inverter bus systems and manufacturers.
-- The detailed photovoltaic endpoint exposes one row per inverter string with
-  AC power, DC power, DC voltage and inverter temperature. This is the most
-  useful candidate for optional inverter and PV-string diagnostic entities.
 - Month and year periods are documented for detailed and cumulative calls.
   Cumulative month/year replies are aggregate period totals, so they cannot
   replace the day-by-day import required for hourly Energy Dashboard history.
 
 Plant details can include address and coordinates. They are not currently
 exposed because they add little Home Assistant value and increase privacy risk.
-Any future inverter or string implementation should remain optional, avoid
-duplicating equivalent linear points and preserve the integration's read-only
-scope.
+Future additions should remain optional, avoid duplicating equivalent linear
+points and preserve the integration's read-only scope.

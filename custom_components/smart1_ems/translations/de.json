@@ -49,6 +49,18 @@
     "sensor": {
       "pv_energy_today": {
         "name": "PV-Energie heute"
+      },
+      "inverter_string_ac_power": {
+        "name": "String {string_id} AC-Leistung"
+      },
+      "inverter_string_dc_power": {
+        "name": "String {string_id} DC-Leistung"
+      },
+      "inverter_string_dc_voltage": {
+        "name": "String {string_id} DC-Spannung"
+      },
+      "inverter_temperature": {
+        "name": "Wechselrichtertemperatur"
       }
     }
   }

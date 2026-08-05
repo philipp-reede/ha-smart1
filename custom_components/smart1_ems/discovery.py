@@ -18,6 +18,7 @@ class Smart1DiscoveryResult:
     has_wallbox: bool = False
     has_heat_pump: bool = False
     has_energy_heater: bool = False
+    inverter_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -29,6 +30,7 @@ class Smart1DiscoveryResult:
             "has_wallbox": self.has_wallbox,
             "has_heat_pump": self.has_heat_pump,
             "has_energy_heater": self.has_energy_heater,
+            "inverter_count": self.inverter_count,
         }
 
 

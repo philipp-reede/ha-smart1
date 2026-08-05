@@ -34,7 +34,7 @@ battery, wallbox, heat pump and auxiliary heating.
 | --- | --- |
 | Access | Read-only cloud polling through the official CSV portal API |
 | Setup | Home Assistant UI with a masked personal API key |
-| Devices | EMS, PV, grid, battery, wallbox, heat pump and auxiliary heater |
+| Devices | EMS, PV, inverter, grid, battery, wallbox, heat pump and auxiliary heater |
 | Energy Dashboard | PV, grid, battery and selected individual consumers |
 | History | Automatic import of up to 365 days |
 | Tested hardware | M-TEC Energy Hero, Energy Butler, Energy Heater and KEBA wallbox |
@@ -45,6 +45,9 @@ battery, wallbox, heat pump and auxiliary heating.
 - Automatic plant and measurement-point discovery
 - Home Assistant devices for the EMS, PV, grid, battery, wallbox, heat pump and
   auxiliary heater
+- Optional physical inverter devices discovered from the documented inverter
+  endpoint, with per-string AC/DC power, DC voltage and inverter temperature
+  diagnostic sensors
 - Live power, energy, temperature, percentage and diagnostic sensors where the
   portal exposes suitable points
 - Battery state of charge detected from the structured smart1 `SOC` signal
@@ -177,6 +180,9 @@ redacted diagnostics file when possible.
 ## Known limitations
 
 - The smart1 CSV portal is a cloud dependency and controls data availability.
+- Inverter diagnostics depend on the optional inverter metadata and detailed
+  photovoltaic endpoints. If a portal does not expose them, all other devices
+  and sensors continue to work.
 - Non-PV historical energy is derived rather than read from native cumulative
   meter totals because the tested installation does not expose usable linear
   cumulative data.
@@ -189,9 +195,8 @@ redacted diagnostics file when possible.
 
 - Validate discovery and device mapping with additional smart1 portals and
   hardware combinations.
-- Evaluate optional inverter and PV-string diagnostics from the documented
-  inverter and detailed photovoltaic endpoints. These could include AC/DC
-  power, DC voltage and inverter temperature without adding write access.
+- Validate the new inverter and PV-string diagnostics with additional inverter
+  models and multi-inverter installations.
 - Make the historical import range configurable if longer or shorter imports
   prove useful across installations.
 - Apply for inclusion in the default HACS catalogue after broader real-world

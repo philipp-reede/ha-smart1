@@ -1,16 +1,61 @@
+from dataclasses import dataclass
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy
+from homeassistant.const import (
+    EntityCategory,
+    UnitOfElectricPotential,
+    UnitOfEnergy,
+    UnitOfPower,
+    UnitOfTemperature,
+)
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .classifier import Smart1Category
 from .const import DOMAIN
 from .entity_mapper import get_entity_descriptions
+from .inverter import Smart1Inverter
 
 PV_DEVICE_NAME = "Smart1 Photovoltaik"
+
+
+@dataclass(frozen=True, slots=True)
+class Smart1InverterMetric:
+    """One documented value exposed for every inverter string."""
+
+    key: str
+    translation_key: str
+    device_class: SensorDeviceClass
+    unit: str
+    precision: int
+
+
+INVERTER_STRING_METRICS = (
+    Smart1InverterMetric(
+        key="ac_power_w",
+        translation_key="inverter_string_ac_power",
+        device_class=SensorDeviceClass.POWER,
+        unit=UnitOfPower.WATT,
+        precision=0,
+    ),
+    Smart1InverterMetric(
+        key="dc_power_w",
+        translation_key="inverter_string_dc_power",
+        device_class=SensorDeviceClass.POWER,
+        unit=UnitOfPower.WATT,
+        precision=0,
+    ),
+    Smart1InverterMetric(
+        key="dc_voltage_v",
+        translation_key="inverter_string_dc_voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        unit=UnitOfElectricPotential.VOLT,
+        precision=1,
+    ),
+)
 
 
 def _device_category(category: Smart1Category) -> Smart1Category:
@@ -39,6 +84,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     devices = hass.data[DOMAIN][entry.entry_id]["devices"]
     discovery = hass.data[DOMAIN][entry.entry_id]["discovery"]
+    inverters = hass.data[DOMAIN][entry.entry_id].get("inverters", [])
 
     entities = []
 
@@ -50,6 +96,33 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     if discovery.has_pv:
         entities.append(Smart1PvEnergySensor(coordinator, entry.entry_id))
+
+    pv_strings = coordinator.data.get("pv_strings", {})
+    for inverter in inverters:
+        string_ids = set(inverter.string_ids)
+        string_ids.update(
+            string_id
+            for bus, address, string_id in pv_strings
+            if (bus, address) == inverter.key and string_id > 0
+        )
+        for string_id in sorted(string_ids):
+            for metric in INVERTER_STRING_METRICS:
+                entities.append(
+                    Smart1InverterStringSensor(
+                        coordinator,
+                        entry.entry_id,
+                        inverter,
+                        string_id,
+                        metric,
+                    )
+                )
+        entities.append(
+            Smart1InverterTemperatureSensor(
+                coordinator,
+                entry.entry_id,
+                inverter,
+            )
+        )
 
     async_add_entities(entities)
 
@@ -148,4 +221,132 @@ class Smart1PvEnergySensor(CoordinatorEntity, SensorEntity):
     @property
     def available(self):
         """Return whether cumulative PV production is available."""
+        return super().available and self.native_value is not None
+
+
+def _inverter_device_info(
+    entry_id: str,
+    inverter: Smart1Inverter,
+) -> dict:
+    """Return device registry information for one physical inverter."""
+    device_info = {
+        "identifiers": {(DOMAIN, f"{entry_id}:inverter:{inverter.id}")},
+        "name": inverter.name
+        or f"Smart1 Inverter B{inverter.bus} A{inverter.address}",
+        "manufacturer": inverter.manufacturer or "smart1",
+        "model": inverter.model or "Inverter",
+        "via_device": _device_identifier(entry_id, Smart1Category.OTHER),
+    }
+    if inverter.serial_number:
+        device_info["serial_number"] = inverter.serial_number
+    return device_info
+
+
+class Smart1InverterStringSensor(CoordinatorEntity, SensorEntity):
+    """A documented five-minute measurement for one inverter string."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator,
+        entry_id: str,
+        inverter: Smart1Inverter,
+        string_id: int,
+        metric: Smart1InverterMetric,
+    ) -> None:
+        super().__init__(coordinator)
+        self._inverter = inverter
+        self._string_id = string_id
+        self._metric = metric
+        self._attr_unique_id = (
+            f"smart1_{entry_id}_inverter_{inverter.bus}_{inverter.address}_"
+            f"string_{string_id}_{metric.key}"
+        )
+        self._attr_device_info = _inverter_device_info(entry_id, inverter)
+        self._attr_translation_key = metric.translation_key
+        self._attr_translation_placeholders = {"string_id": str(string_id)}
+        self._attr_device_class = metric.device_class
+        self._attr_native_unit_of_measurement = metric.unit
+        self._attr_suggested_display_precision = metric.precision
+
+    @property
+    def native_value(self):
+        """Return the latest value for this inverter string."""
+        sample = self.coordinator.data.get("pv_strings", {}).get(
+            (*self._inverter.key, self._string_id)
+        )
+        return getattr(sample, self._metric.key) if sample else None
+
+    @property
+    def available(self):
+        """Return whether the optional detailed endpoint has this value."""
+        return super().available and self.native_value is not None
+
+    @property
+    def extra_state_attributes(self):
+        """Return static string configuration without volatile metadata."""
+        index = self._string_id - 1
+        capacity = (
+            self._inverter.string_capacities_w[index]
+            if index < len(self._inverter.string_capacities_w)
+            else None
+        )
+        module_field = (
+            self._inverter.string_module_fields[index]
+            if index < len(self._inverter.string_module_fields)
+            else ""
+        )
+        return {
+            "string_id": self._string_id,
+            "configured_capacity_w": capacity,
+            "module_field": module_field or None,
+        }
+
+
+class Smart1InverterTemperatureSensor(CoordinatorEntity, SensorEntity):
+    """Latest documented temperature reported for one inverter."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "inverter_temperature"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_suggested_display_precision = 1
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator,
+        entry_id: str,
+        inverter: Smart1Inverter,
+    ) -> None:
+        super().__init__(coordinator)
+        self._inverter = inverter
+        self._attr_unique_id = (
+            f"smart1_{entry_id}_inverter_{inverter.bus}_{inverter.address}_"
+            "temperature"
+        )
+        self._attr_device_info = _inverter_device_info(entry_id, inverter)
+
+    @property
+    def native_value(self):
+        """Return the newest available temperature across inverter strings."""
+        samples = [
+            sample
+            for (bus, address, _string_id), sample in self.coordinator.data.get(
+                "pv_strings", {}
+            ).items()
+            if (bus, address) == self._inverter.key
+            and sample.inverter_temperature_c is not None
+        ]
+        if not samples:
+            return None
+        return max(samples, key=lambda sample: sample.timestamp).inverter_temperature_c
+
+    @property
+    def available(self):
+        """Return whether the optional detailed endpoint has a temperature."""
         return super().available and self.native_value is not None

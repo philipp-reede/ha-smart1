@@ -17,6 +17,14 @@
 - PV production is read from the documented photovoltaics cumulative endpoint
 - PV production is aggregated once per inverter and exposed in kWh
 - A failure of optional PV cumulative data no longer blocks live values
+- Physical inverters are discovered from the documented metadata endpoint and
+  represented as separate Home Assistant devices
+- The detailed photovoltaic endpoint supplies per-string AC/DC power and DC
+  voltage plus inverter temperature as optional diagnostic sensors
+- Missing or failed inverter endpoints do not block linear entities, PV totals
+  or Energy Dashboard statistics; transient failures retain the latest sample
+- Inverter diagnostics report only redacted capability metadata and never
+  expose inverter IDs, serial numbers, timestamps or measurements
 - Measurement roles now share one logical Smart1 EMS device
 - Heat pumps and heating elements have dedicated classification rules
 - Direct battery, e-car, heat-pump, and grid-meter interfaces are classified
@@ -82,8 +90,8 @@
   estimates derived from five-minute power samples
 - The preferred source needs confirmation where the installation exposes
   multiple measurement paths for one physical device
-- Evaluate optional inverter and PV-string diagnostic entities from the
-  documented inverter and detailed photovoltaic endpoints
+- Validate inverter and PV-string diagnostics with additional inverter models,
+  string layouts and multi-inverter installations
 - Add a configurable history range if real-world installations need it
 - Apply for inclusion in the default HACS catalogue after broader validation
 
@@ -95,8 +103,10 @@ The coordinator currently stores approximately:
 {
     "live": {...},
     "pv_energy_today": 12.345,
+    "pv_strings": {(2, 1, 1): Smart1PvStringSample(...)},
 }
 ```
 
 `pv_energy_today` is `None` when the optional PV cumulative endpoint is not
-available. Live values continue updating in that case.
+available. `pv_strings` is empty when the optional inverter endpoints are not
+available. Live values continue updating in both cases.

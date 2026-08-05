@@ -49,8 +49,19 @@
     "sensor": {
       "pv_energy_today": {
         "name": "PV energy today"
+      },
+      "inverter_string_ac_power": {
+        "name": "String {string_id} AC power"
+      },
+      "inverter_string_dc_power": {
+        "name": "String {string_id} DC power"
+      },
+      "inverter_string_dc_voltage": {
+        "name": "String {string_id} DC voltage"
+      },
+      "inverter_temperature": {
+        "name": "Inverter temperature"
       }
     }
   }
 }
-

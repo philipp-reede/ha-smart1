@@ -16,6 +16,7 @@ from .api import Smart1Api, Smart1ApiError
 from .classifier import classify_point
 from .const import DOMAIN
 from .energy_roles import ENERGY_ROLES_BY_KEY
+from .inverter import Smart1Inverter, Smart1PvStringSample
 from .point import Smart1Point
 from .power_integration import integrate_power_rows
 
@@ -58,6 +59,53 @@ def _configured_energy_roles(
         role_key: point_numbers_by_id.get(point_id)
         for role_key, point_id in selected_roles.items()
         if role_key in ENERGY_ROLES_BY_KEY
+    }
+
+
+def _inverter_diagnostics(
+    inverters: list[Smart1Inverter],
+    samples: dict[tuple[int, int, int], Smart1PvStringSample],
+) -> dict[str, Any]:
+    """Describe inverter support without IDs, serial numbers, or values."""
+    inverter_rows = []
+    for number, inverter in enumerate(inverters, start=1):
+        inverter_samples = [
+            sample
+            for (bus, address, _string_id), sample in samples.items()
+            if (bus, address) == inverter.key
+        ]
+        available_metrics = set()
+        for sample in inverter_samples:
+            for metric in (
+                "ac_power_w",
+                "dc_power_w",
+                "dc_voltage_v",
+                "inverter_temperature_c",
+            ):
+                if getattr(sample, metric) is not None:
+                    available_metrics.add(metric)
+
+        inverter_rows.append(
+            {
+                "inverter_number": number,
+                "name": inverter.name,
+                "manufacturer": inverter.manufacturer,
+                "model": inverter.model,
+                "configured_strings": inverter.string_count,
+                "strings_with_data": len(
+                    {sample.string_id for sample in inverter_samples}
+                ),
+                "available_metrics": sorted(available_metrics),
+                "monitoring": inverter.monitoring,
+                "configured": inverter.configured,
+                "serial_number_present": bool(inverter.serial_number),
+            }
+        )
+
+    return {
+        "inverter_count": len(inverters),
+        "strings_with_data": len(samples),
+        "inverters": inverter_rows,
     }
 
 
@@ -217,6 +265,7 @@ async def async_get_config_entry_diagnostics(
     runtime_data = hass.data[DOMAIN][entry.entry_id]
     points = runtime_data["devices"]
     numbered_points = list(enumerate(points, start=1))
+    coordinator_data = runtime_data["coordinator"].data or {}
 
     return {
         "integration": DOMAIN,
@@ -229,6 +278,10 @@ async def async_get_config_entry_diagnostics(
             numbered_points,
         ),
         "discovery": runtime_data["discovery"].to_dict(),
+        "inverter_diagnostics": _inverter_diagnostics(
+            runtime_data.get("inverters", []),
+            coordinator_data.get("pv_strings", {}),
+        ),
         "linear_cumulative_probe": await _linear_cumulative_probe(
             runtime_data["api"],
             numbered_points,
