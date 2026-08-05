@@ -29,6 +29,8 @@
   documented bus endpoint and exposed as static diagnostics on the EMS device
 - Empty bus slots are omitted, and bus diagnostics expose only capability
   counts instead of manufacturer protocol names
+- Bus diagnostics distinguish a missing or empty endpoint from an unrecognized
+  portal response using only status, row count and column names
 - Measurement roles now share one logical Smart1 EMS device
 - Heat pumps and heating elements have dedicated classification rules
 - Direct battery, e-car, heat-pump, and grid-meter interfaces are classified
