@@ -95,16 +95,24 @@ switches or commands.
 The integration uses the common, officially documented smart1 CSV portal API
 and should therefore work with all smart1 portals that expose the documented
 endpoints and compatible measurement metadata. Real-world validation has so far
-been limited to this installation:
+been limited to one installation:
 
-- M-TEC Energy Hero EMS
-- M-TEC Energy Heater heating element
-- M-TEC Energy Butler inverter and battery storage
-- KEBA wallbox
+| Component | Tested hardware | Validation |
+| --- | --- | --- |
+| EMS and portal | M-TEC Energy Hero EMS | Real-world tested |
+| Inverter and battery storage | M-TEC Energy Butler | Real-world tested |
+| Auxiliary heating | M-TEC Energy Heater | Real-world tested |
+| EV charging | KEBA wallbox | Real-world tested |
+
+Active inverter-bus configurations, installations with multiple inverters and
+other smart1 portal or hardware combinations have not yet been confirmed on a
+real installation.
 
 Other smart1 installations and hardware combinations may use different point
 names or interface metadata. Diagnostic reports from those systems are welcome
-and help extend the discovery rules.
+and help extend the discovery rules. Please use the
+[compatibility report](https://github.com/philipp-reede/ha-smart1/issues/new?template=compatibility_report.yml)
+for successful or partially successful tests.
 
 ## Installation with HACS
 
@@ -180,10 +188,14 @@ combining measurements from different sources.
   identifiers and measurements, but review any diagnostic file before sharing
   it publicly.
 
-Please report reproducible problems through the
-[GitHub issue tracker](https://github.com/philipp-reede/ha-smart1/issues).
-Include the Home Assistant version, integration version, relevant logs and the
-redacted diagnostics file when possible.
+Please report reproducible problems using the structured
+[bug-report form](https://github.com/philipp-reede/ha-smart1/issues/new?template=bug_report.yml).
+Successful tests with another portal or hardware combination can be shared
+through the
+[compatibility-report form](https://github.com/philipp-reede/ha-smart1/issues/new?template=compatibility_report.yml).
+Never include an API key or other credentials. Review logs and diagnostics
+before attaching them, even though integration diagnostics are designed to
+redact credentials, identifiers and measurements.
 
 ## Known limitations
 
