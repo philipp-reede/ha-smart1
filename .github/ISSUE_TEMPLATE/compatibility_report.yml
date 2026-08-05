@@ -42,12 +42,12 @@ body:
     id: hardware
     attributes:
       label: Installed hardware / Installierte Hardware
-      description: List EMS, inverter, battery, wallbox, heat pump, heater and other relevant models. / EMS, Wechselrichter, Speicher, Wallbox, Wärmepumpe, Heizstab und weitere relevante Modelle auflisten.
+      description: List exact models and, when available, model-wide hardware revisions and software or firmware versions. Do not include serial numbers or device-specific hardware IDs. / Genaue Modelle und, soweit verfügbar, allgemeine Hardware-Revisionen sowie Software- oder Firmware-Versionen auflisten. Keine Seriennummern oder gerätespezifischen Hardware-IDs angeben.
       placeholder: |
-        EMS: ...
-        Inverter/battery: ...
-        Wallbox: ...
-        Heat pump/heater: ...
+        EMS: model, hardware revision, software version / Modell, Hardware-Revision, Software-Version
+        Inverter/battery: model, firmware / Wechselrichter/Speicher: Modell, Firmware
+        Wallbox: model, firmware / Modell, Firmware
+        Heat pump/heater: model, firmware / Wärmepumpe/Heizstab: Modell, Firmware
     validations:
       required: true
 
@@ -77,7 +77,16 @@ body:
     id: result
     attributes:
       label: Test result / Testergebnis
-      description: Describe what works and any limitations or unusual mappings. / Beschreibe, was funktioniert und welche Einschränkungen oder ungewöhnlichen Zuordnungen aufgefallen sind.
+      description: For each selected feature, state whether it works, works partially or is not applicable. Include relevant device or entity counts and describe any unusual mappings. / Für jede ausgewählte Funktion angeben, ob sie funktioniert, teilweise funktioniert oder nicht zutrifft. Relevante Geräte- oder Entitätszahlen und ungewöhnliche Zuordnungen ergänzen.
+      placeholder: |
+        Device discovery and assignment / Geräteerkennung und Zuordnung:
+        Live values and plausibility / Live-Werte und Plausibilität:
+        Energy Dashboard:
+        Historical import / Historischer Import:
+        Inverter and PV strings / Wechselrichter und PV-Strings:
+        Module fields / Modulfelder:
+        Bus diagnostics / Busdiagnosen:
+        Limitations or observations / Einschränkungen oder Auffälligkeiten:
     validations:
       required: true
 
