@@ -92,16 +92,25 @@ Befehle oder andere Steuerungsmöglichkeiten bereit.
 Die Integration verwendet die gemeinsame, offiziell dokumentierte CSV-API der
 smart1 Portale. Sie sollte deshalb mit allen smart1 Portalen funktionieren, die
 die dokumentierten Endpunkte und kompatible Messpunkt-Metadaten bereitstellen.
-Praktisch getestet werden konnte sie bisher nur mit folgender Anlage:
+Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 
-- M-TEC Energy Hero EMS
-- M-TEC Energy Heater Heizstab
-- M-TEC Energy Butler Wechselrichter und Speicher
-- KEBA Wallbox
+| Komponente | Getestete Hardware | Validierung |
+| --- | --- | --- |
+| EMS und Portal | M-TEC Energy Hero EMS | Praxistest erfolgreich |
+| Wechselrichter und Speicher | M-TEC Energy Butler | Praxistest erfolgreich |
+| Zusatzheizung | M-TEC Energy Heater | Praxistest erfolgreich |
+| Wallbox | KEBA | Praxistest erfolgreich |
+
+Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
+und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an
+einer realen Anlage bestätigt werden.
 
 Andere Anlagen und Hardwarekombinationen können abweichende Messpunktnamen oder
 Schnittstellen-Metadaten verwenden. Diagnosen solcher Systeme helfen dabei, die
-Erkennungsregeln zu erweitern.
+Erkennungsregeln zu erweitern. Erfolgreiche oder teilweise erfolgreiche Tests
+können über den
+[Kompatibilitätsbericht](https://github.com/philipp-reede/ha-smart1/issues/new?template=compatibility_report.yml)
+gemeldet werden.
 
 ## Installation über HACS
 
@@ -163,12 +172,14 @@ können deshalb zu niedrigeren Summen führen.
 
 ## Fehler melden
 
-Bei Problemen bitte die Home-Assistant-Version, die Integrationsversion,
-relevante Protokollmeldungen und möglichst die Diagnose der smart1 EMS
-Integration im [GitHub Issue-Tracker](https://github.com/philipp-reede/ha-smart1/issues)
-angeben. Die Integration entfernt API-Schlüssel, Anlagen- und Messpunkt-IDs
-sowie Messwerte aus ihrer Diagnose. Vor einer öffentlichen Weitergabe sollte
-die Datei dennoch geprüft werden.
+Reproduzierbare Probleme bitte über das strukturierte
+[Fehlerformular](https://github.com/philipp-reede/ha-smart1/issues/new?template=bug_report.yml)
+melden. Erfolgreiche Tests mit anderen Portalen oder Hardwarekombinationen
+können über den
+[Kompatibilitätsbericht](https://github.com/philipp-reede/ha-smart1/issues/new?template=compatibility_report.yml)
+geteilt werden. Niemals API-Schlüssel oder andere Zugangsdaten veröffentlichen.
+Protokolle und Diagnosen sollten vor dem Anhängen geprüft werden, auch wenn die
+Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 
 ## Bekannte Einschränkungen
 

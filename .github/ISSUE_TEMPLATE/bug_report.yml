@@ -1,0 +1,101 @@
+name: Bug report / Fehlerbericht
+description: Report a reproducible integration problem / Einen reproduzierbaren Fehler melden
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve smart1 EMS. Reports in English or German are welcome.
+
+        Danke, dass du bei der Verbesserung von smart1 EMS hilfst. Meldungen auf Deutsch oder Englisch sind willkommen.
+
+        **Never include an API key or other credentials. Review logs and diagnostic files before publishing them.**
+
+        **Niemals API-Schlüssel oder andere Zugangsdaten veröffentlichen. Protokolle und Diagnosedateien vor der Veröffentlichung prüfen.**
+
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version / Integrationsversion
+      placeholder: v0.6.1
+    validations:
+      required: true
+
+  - type: input
+    id: home_assistant_version
+    attributes:
+      label: Home Assistant version / Home-Assistant-Version
+      placeholder: 2026.7.4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation_method
+    attributes:
+      label: Installation method / Installationsart
+      options:
+        - HACS custom repository / Benutzerdefiniertes HACS-Repository
+        - Manual installation / Manuelle Installation
+        - Other / Sonstige
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem description / Problembeschreibung
+      description: What happened, and which device or entity is affected? / Was ist passiert und welches Gerät oder welche Entität ist betroffen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce / Schritte zum Reproduzieren
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / Erwartetes Verhalten
+    validations:
+      required: true
+
+  - type: textarea
+    id: installation
+    attributes:
+      label: Portal and hardware / Portal und Hardware
+      description: List the portal provider or domain and relevant hardware models. Do not include an API key, plant ID or serial number. / Portalbetreiber oder Domain und relevante Hardwaremodelle nennen. Keine API-Schlüssel, Anlagen-IDs oder Seriennummern angeben.
+      placeholder: M-TEC Energy Hero EMS, Energy Butler, KEBA wallbox, ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / Relevante Protokolle
+      description: Paste only the relevant excerpt after removing credentials and identifiers. / Nur den relevanten Ausschnitt nach Entfernen von Zugangsdaten und Kennungen einfügen.
+      render: text
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics / Bereinigte Diagnose
+      description: Drag a reviewed smart1 EMS diagnostic file here when it helps reproduce discovery, mapping or history problems. / Eine geprüfte smart1-EMS-Diagnosedatei hier ablegen, wenn sie bei Erkennungs-, Zuordnungs- oder Verlaufsproblemen hilft.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation / Bestätigung
+      options:
+        - label: I searched existing issues for the same problem. / Ich habe bestehende Issues nach demselben Problem durchsucht.
+          required: true
+        - label: I confirm that this report contains no API key or other credentials. / Ich bestätige, dass diese Meldung keine API-Schlüssel oder anderen Zugangsdaten enthält.
+          required: true
+        - label: I reviewed all attached logs and diagnostics before sharing them. / Ich habe alle angehängten Protokolle und Diagnosen vor dem Teilen geprüft.
+          required: true

@@ -1,0 +1,98 @@
+name: Compatibility report / Kompatibilitätsbericht
+description: Share a successful or partial test with another smart1 setup / Einen erfolgreichen oder teilweisen Test mit einer anderen smart1 Anlage melden
+title: "[Compatibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing smart1 EMS. Positive and partial results help document real-world compatibility. Reports in English or German are welcome.
+
+        Danke für deinen Test von smart1 EMS. Erfolgreiche und teilweise erfolgreiche Tests helfen, die Praxiskompatibilität zu dokumentieren. Meldungen auf Deutsch oder Englisch sind willkommen.
+
+        **Never include an API key or other credentials. Review diagnostic files before publishing them.**
+
+        **Niemals API-Schlüssel oder andere Zugangsdaten veröffentlichen. Diagnosedateien vor der Veröffentlichung prüfen.**
+
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version / Integrationsversion
+      placeholder: v0.6.1
+    validations:
+      required: true
+
+  - type: input
+    id: home_assistant_version
+    attributes:
+      label: Home Assistant version / Home-Assistant-Version
+      placeholder: 2026.7.4
+    validations:
+      required: true
+
+  - type: input
+    id: portal
+    attributes:
+      label: Portal provider or domain / Portalbetreiber oder Domain
+      description: Do not include an API key or plant identifier. / Keine API-Schlüssel oder Anlagenkennungen angeben.
+      placeholder: portal.smart1.eu
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Installed hardware / Installierte Hardware
+      description: List EMS, inverter, battery, wallbox, heat pump, heater and other relevant models. / EMS, Wechselrichter, Speicher, Wallbox, Wärmepumpe, Heizstab und weitere relevante Modelle auflisten.
+      placeholder: |
+        EMS: ...
+        Inverter/battery: ...
+        Wallbox: ...
+        Heat pump/heater: ...
+    validations:
+      required: true
+
+  - type: input
+    id: discovered
+    attributes:
+      label: Discovered devices and entities / Erkannte Geräte und Entitäten
+      placeholder: 7 devices, 85 entities / 7 Geräte, 85 Entitäten
+
+  - type: dropdown
+    id: validated_features
+    attributes:
+      label: Validated features / Geprüfte Funktionen
+      multiple: true
+      options:
+        - Setup and discovery / Einrichtung und Erkennung
+        - Live sensors / Live-Sensoren
+        - Energy Dashboard
+        - Historical import / Historischer Import
+        - Inverter and PV-string diagnostics / Wechselrichter- und PV-String-Diagnosen
+        - Module-field diagnostics / Modulfeld-Diagnosen
+        - Inverter-bus diagnostics / Wechselrichter-Busdiagnosen
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Test result / Testergebnis
+      description: Describe what works and any limitations or unusual mappings. / Beschreibe, was funktioniert und welche Einschränkungen oder ungewöhnlichen Zuordnungen aufgefallen sind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Optional redacted diagnostics / Optionale bereinigte Diagnose
+      description: Drag a reviewed smart1 EMS diagnostic file here if it helps confirm discovery coverage. / Eine geprüfte smart1-EMS-Diagnosedatei hier ablegen, wenn sie die Erkennungsabdeckung bestätigt.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation / Bestätigung
+      options:
+        - label: I confirm that this report contains no API key or other credentials. / Ich bestätige, dass diese Meldung keine API-Schlüssel oder anderen Zugangsdaten enthält.
+          required: true
+        - label: I reviewed all attached diagnostics before sharing them. / Ich habe alle angehängten Diagnosen vor dem Teilen geprüft.
+          required: true
