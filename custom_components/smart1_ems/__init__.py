@@ -46,12 +46,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         module_fields = []
 
     try:
-        buses = await api.get_buses(missing_ok=True)
-    except (ClientError, Smart1ApiError, TimeoutError) as err:
+        buses, bus_probe = await api.get_buses_with_probe(missing_ok=True)
+    except Smart1ApiError as err:
         # Inverter-bus configuration is optional static metadata. A missing
         # endpoint must not affect inverter or Energy Dashboard entities.
         _LOGGER.debug("Unable to discover smart1 inverter buses: %s", err)
         buses = []
+        bus_probe = {
+            "endpoint_result": "api_error",
+            "error_code": err.code,
+        }
+    except (ClientError, TimeoutError) as err:
+        # Client exceptions can contain the request URL and therefore the API
+        # key. Log and retain only their class name.
+        _LOGGER.debug(
+            "Unable to discover smart1 inverter buses (%s)",
+            type(err).__name__,
+        )
+        buses = []
+        bus_probe = {
+            "endpoint_result": "request_failed",
+            "error_type": type(err).__name__,
+        }
 
     discovery = Smart1Discovery()
     discovery_result = discovery.analyze(devices)
@@ -86,6 +102,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "inverters": inverters,
         "module_fields": module_fields,
         "buses": buses,
+        "bus_probe": bus_probe,
     }
 
     history_importers = []
