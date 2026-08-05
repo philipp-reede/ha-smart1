@@ -176,6 +176,16 @@ class Hass:
                         manufacturers=("private-bus-manufacturer",),
                     )
                 ],
+                "bus_probe": {
+                    "endpoint_result": "data_returned",
+                    "response_status": 200,
+                    "response_rows": 1,
+                    "response_columns": [
+                        "BusManufactor1",
+                        "BusId",
+                    ],
+                    "private_value": "private-bus-value",
+                },
                 "history_importers": [
                     types.SimpleNamespace(
                         diagnostic_status={
@@ -254,6 +264,10 @@ class DiagnosticsTest(unittest.TestCase):
                 "configured_bus_count": 1,
                 "with_manufacturer_information": 1,
                 "manufacturer_protocol_counts": [1],
+                "endpoint_result": "data_returned",
+                "response_status": 200,
+                "response_rows": 1,
+                "response_columns": ["BusId", "BusManufactor1"],
             },
         )
         self.assertEqual(
@@ -294,6 +308,7 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertNotIn("private-module-field-id", serialized)
         self.assertNotIn("private-module-field-name", serialized)
         self.assertNotIn("private-bus-manufacturer", serialized)
+        self.assertNotIn("private-bus-value", serialized)
         self.assertNotIn("2026-08-03", serialized)
         self.assertNotIn('"1000"', serialized)
         self.assertNotIn("api_key", serialized)
