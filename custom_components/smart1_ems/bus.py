@@ -36,6 +36,68 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _row_bus_id(row: dict[str, str]) -> str:
+    """Return the normalized bus identifier from one API row."""
+    return _clean_text(
+        row.get("BusId")
+        or row.get("Bus Id")
+        or row.get('"BusId"')
+    )
+
+
+def _row_manufacturers(row: dict[str, str]) -> dict[int, str]:
+    """Return non-empty manufacturer protocols indexed by API position."""
+    manufacturers: dict[int, str] = {}
+    for field, value in row.items():
+        field_match = _MANUFACTURER_FIELD_PATTERN.match(
+            _normalized_field_name(field)
+        )
+        if field_match is None:
+            continue
+        manufacturer = _clean_text(value)
+        if manufacturer:
+            manufacturers[int(field_match.group("number"))] = manufacturer
+    return manufacturers
+
+
+def bus_response_diagnostics(
+    rows: list[dict[str, str]],
+) -> dict[str, int]:
+    """Classify bus rows without exposing identifiers or response values."""
+    result = {
+        "rows_with_documented_bus_id": 0,
+        "rows_with_numeric_bus_id": 0,
+        "rows_with_other_bus_id": 0,
+        "rows_without_bus_id": 0,
+        "rows_with_configuration_status": 0,
+        "rows_with_manufacturer_count": 0,
+        "rows_with_manufacturer_protocols": 0,
+    }
+
+    for row in rows:
+        bus_id = _row_bus_id(row)
+        if _BUS_ID_PATTERN.fullmatch(bus_id):
+            result["rows_with_documented_bus_id"] += 1
+        elif _optional_int(bus_id) is not None:
+            result["rows_with_numeric_bus_id"] += 1
+        elif bus_id:
+            result["rows_with_other_bus_id"] += 1
+        else:
+            result["rows_without_bus_id"] += 1
+
+        if _clean_text(row.get("BusConfigured")):
+            result["rows_with_configuration_status"] += 1
+        if _clean_text(
+            row.get("BusManufactors")
+            or row.get("BusManufacturers")
+        ):
+            result["rows_with_manufacturer_count"] += 1
+        if _row_manufacturers(row):
+            result["rows_with_manufacturer_protocols"] += 1
+
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class Smart1BusSystem:
     """Static metadata returned by `/bus/{deviceId}`."""
@@ -57,27 +119,12 @@ def parse_bus_systems(rows: list[dict[str, str]]) -> list[Smart1BusSystem]:
     bus_systems: dict[int, Smart1BusSystem] = {}
 
     for row in rows:
-        bus_id = _clean_text(
-            row.get("BusId")
-            or row.get("Bus Id")
-            or row.get('"BusId"')
-        )
+        bus_id = _row_bus_id(row)
         match = _BUS_ID_PATTERN.match(bus_id)
         if match is None:
             continue
 
-        manufacturers_by_index: dict[int, str] = {}
-        for field, value in row.items():
-            field_match = _MANUFACTURER_FIELD_PATTERN.match(
-                _normalized_field_name(field)
-            )
-            if field_match is None:
-                continue
-            manufacturer = _clean_text(value)
-            if manufacturer:
-                manufacturers_by_index[int(field_match.group("number"))] = (
-                    manufacturer
-                )
+        manufacturers_by_index = _row_manufacturers(row)
 
         manufacturers = tuple(
             dict.fromkeys(
