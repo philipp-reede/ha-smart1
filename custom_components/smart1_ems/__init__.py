@@ -1,12 +1,14 @@
 from datetime import timedelta
 import logging
 
+from aiohttp import ClientError
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
-from .api import Smart1Api
+from .api import Smart1Api, Smart1ApiError
 from .const import DOMAIN
 from .coordinator import Smart1Coordinator
 from .derived_history import Smart1DerivedEnergyImporter
@@ -27,8 +29,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     devices = await api.get_linear_devices()
 
+    try:
+        inverters = await api.get_inverters(missing_ok=True)
+    except (ClientError, Smart1ApiError, TimeoutError) as err:
+        # Inverter metadata and string diagnostics are optional. Installations
+        # without these endpoints must retain all existing linear entities.
+        _LOGGER.debug("Unable to discover smart1 inverters: %s", err)
+        inverters = []
+
     discovery = Smart1Discovery()
     discovery_result = discovery.analyze(devices)
+    discovery_result.inverter_count = len(inverters)
 
     _LOGGER.info(
         "Smart1 Discovery: %s",
@@ -40,7 +51,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         [device.id for device in devices],
     )
 
-    coordinator = Smart1Coordinator(hass, api, devices, active_linear_ids)
+    coordinator = Smart1Coordinator(
+        hass,
+        api,
+        devices,
+        active_linear_ids,
+        inverters,
+    )
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
@@ -48,6 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         "devices": devices,
         "discovery": discovery_result,
+        "inverters": inverters,
     }
 
     history_importers = []

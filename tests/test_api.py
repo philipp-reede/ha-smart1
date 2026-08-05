@@ -108,6 +108,50 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertIsNone(value)
         self.assertTrue(api.missing_ok)
 
+    def test_inverter_metadata_endpoint_is_optional(self) -> None:
+        api = RecordingSmart1Api(
+            [
+                {
+                    "Inverter Id": "Inverter_B2_A1",
+                    "Name": "Energy Butler",
+                    "Strings": "2",
+                }
+            ]
+        )
+
+        inverters = asyncio.run(api.get_inverters(missing_ok=True))
+
+        self.assertEqual(inverters[0].key, (2, 1))
+        self.assertEqual(inverters[0].string_ids, (1, 2))
+        self.assertEqual(api.requested_path, "/inverters/42")
+        self.assertTrue(api.missing_ok)
+
+    def test_pv_detailed_endpoint_accepts_string_filter(self) -> None:
+        api = RecordingSmart1Api([])
+
+        rows = asyncio.run(
+            api.get_pv_detailed_rows(
+                target_date=date(2026, 8, 5),
+                bus=2,
+                address=1,
+                string_id=3,
+                missing_ok=True,
+            )
+        )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            api.requested_path,
+            "/data/csv/42/photovoltaics/day/detailed/20260805/2/1/3",
+        )
+        self.assertTrue(api.missing_ok)
+
+    def test_year_pv_detailed_request_requires_inverter(self) -> None:
+        api = RecordingSmart1Api([])
+
+        with self.assertRaisesRegex(ValueError, "require bus and address"):
+            asyncio.run(api.get_pv_detailed_rows(period="year"))
+
     def test_linear_live_endpoint_uses_requested_date(self) -> None:
         api = RecordingSmart1Api([])
 

@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Discover physical inverters through the documented smart1 inverter endpoint
+- Add optional diagnostic sensors for per-string AC/DC power, DC voltage and
+  inverter temperature
+- Include redacted inverter capability metadata in Home Assistant diagnostics
+
+### Reliability
+
+- Keep all existing linear entities and Energy Dashboard statistics available
+  when optional inverter endpoints are missing or temporarily fail
+
 ### Documentation
 
 - Add a compact project overview and clearer navigation to the English and

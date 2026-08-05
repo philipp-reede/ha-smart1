@@ -35,7 +35,7 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 | --- | --- |
 | Zugriff | Ausschließlich lesendes Cloud-Polling über die offizielle CSV-Portal-API |
 | Einrichtung | Home-Assistant-Oberfläche mit verdecktem persönlichem API-Schlüssel |
-| Geräte | EMS, PV, Netz, Batterie, Wallbox, Wärmepumpe und Zusatzheizung |
+| Geräte | EMS, PV, Wechselrichter, Netz, Batterie, Wallbox, Wärmepumpe und Zusatzheizung |
 | Energy Dashboard | PV, Netz, Batterie und ausgewählte Einzelverbraucher |
 | Historie | Automatischer Import von bis zu 365 Tagen |
 | Getestete Hardware | M-TEC Energy Hero, Energy Butler, Energy Heater und KEBA Wallbox |
@@ -44,6 +44,9 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 
 - Automatische Erkennung von Anlage und Messpunkten
 - Live-Sensoren für Leistung, Energie, Temperaturen, Prozentwerte und Diagnosen
+- Optionale physische Wechselrichter-Geräte aus dem dokumentierten
+  Wechselrichter-Endpunkt mit AC-/DC-Leistung und DC-Spannung je PV-String sowie
+  Wechselrichtertemperatur als Diagnosesensoren
 - Ladezustand der Batterie aus dem strukturierten smart1 `SOC`-Signal
 - Exakte PV-Produktion aus dem dokumentierten kumulativen PV-Endpunkt
 - Energy-Dashboard-Statistiken für Netz, Batterie, Wallbox, Wärmepumpe und
@@ -162,6 +165,9 @@ die Datei dennoch geprüft werden.
 ## Bekannte Einschränkungen
 
 - Die Verfügbarkeit der Daten hängt vom smart1 CSV-Portal ab.
+- Wechselrichterdiagnosen benötigen die optionalen Endpunkte für
+  Wechselrichter-Metadaten und detaillierte Photovoltaikdaten. Stellt ein Portal
+  diese nicht bereit, funktionieren alle übrigen Geräte und Sensoren weiter.
 - Historische Energiewerte außerhalb der PV-Anlage werden aus
   5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
   verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
@@ -174,9 +180,8 @@ die Datei dennoch geprüft werden.
 
 - Erkennung und Gerätezuordnung mit weiteren smart1 Portalen und
   Hardwarekombinationen validieren
-- Optionale Wechselrichter- und PV-String-Diagnosen aus den dokumentierten
-  Endpunkten untersuchen, darunter AC-/DC-Leistung, DC-Spannung und
-  Wechselrichtertemperatur
+- Die neuen Wechselrichter- und PV-String-Diagnosen mit weiteren
+  Wechselrichtermodellen und Anlagen mit mehreren Wechselrichtern prüfen
 - Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
 - Nach breiterer Praxiserprobung die Aufnahme in den HACS-Standardkatalog
   beantragen
