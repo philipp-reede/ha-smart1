@@ -165,6 +165,93 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertEqual(api.requested_path, "/bus/42")
         self.assertTrue(api.missing_ok)
 
+    def test_bus_probe_reports_response_shape_without_values(self) -> None:
+        api = Smart1Api(
+            CsvSession(
+                "BusId;BusConfigured;BusManufactors;BusManufactor1\n"
+                "Bus2;ok;1;private-manufacturer\n"
+            ),
+            "redacted",
+            "42",
+        )
+
+        buses, probe = asyncio.run(
+            api.get_buses_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual([bus.number for bus in buses], [2])
+        self.assertEqual(
+            probe,
+            {
+                "endpoint_result": "data_returned",
+                "response_status": 200,
+                "response_rows": 1,
+                "response_columns": [
+                    "BusConfigured",
+                    "BusId",
+                    "BusManufactor1",
+                    "BusManufactors",
+                ],
+            },
+        )
+        self.assertNotIn("private-manufacturer", str(probe))
+
+    def test_bus_probe_distinguishes_unknown_columns_from_no_data(self) -> None:
+        api = Smart1Api(
+            CsvSession("UnknownBusColumn;Status\nBus2;ok\n"),
+            "redacted",
+            "42",
+        )
+
+        buses, probe = asyncio.run(
+            api.get_buses_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual(buses, [])
+        self.assertEqual(probe["endpoint_result"], "data_returned")
+        self.assertEqual(probe["response_rows"], 1)
+        self.assertEqual(
+            probe["response_columns"],
+            ["Status", "UnknownBusColumn"],
+        )
+
+    def test_bus_probe_reports_optional_endpoint_not_found(self) -> None:
+        api = Smart1Api(CsvSession("", status=404), "redacted", "42")
+
+        buses, probe = asyncio.run(
+            api.get_buses_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual(buses, [])
+        self.assertEqual(
+            probe,
+            {
+                "endpoint_result": "not_found",
+                "response_status": 404,
+                "response_rows": 0,
+                "response_columns": [],
+            },
+        )
+
+    def test_bus_probe_retains_headers_from_an_empty_csv(self) -> None:
+        api = Smart1Api(
+            CsvSession("BusId;BusConfigured;PortalSpecificColumn\n"),
+            "redacted",
+            "42",
+        )
+
+        buses, probe = asyncio.run(
+            api.get_buses_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual(buses, [])
+        self.assertEqual(probe["endpoint_result"], "empty_response")
+        self.assertEqual(probe["response_rows"], 0)
+        self.assertEqual(
+            probe["response_columns"],
+            ["BusConfigured", "BusId", "PortalSpecificColumn"],
+        )
+
     def test_pv_detailed_endpoint_accepts_string_filter(self) -> None:
         api = RecordingSmart1Api([])
 
