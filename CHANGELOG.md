@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Documentation
+
+- Add a compact project overview and clearer navigation to the English and
+  German README files
+- Add anonymized setup, device-overview and battery Energy Dashboard screenshots
+- Document the next read-only API opportunities and project roadmap
+- Replace the plain support link with a GitHub-compatible "Buy me a beer"
+  button
+
 ## [0.3.1] - 2026-08-05
 
 ### Added

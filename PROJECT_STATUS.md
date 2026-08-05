@@ -73,17 +73,19 @@
   real-world hardware validation currently covers M-TEC Energy Hero EMS,
   Energy Heater, Energy Butler inverter/storage and a KEBA wallbox
 
-## Known problems
+## Remaining work
 
-- Device assignment needs validation against real installation metadata
-- Temperature is a property and should be assigned to its source device
+- Validate discovery and device assignment with additional smart1 portals and
+  hardware combinations
 - Device-specific cumulative totals for wallbox, heat pump, heating element,
   grid and battery remain unavailable; their optional energy statistics are
   estimates derived from five-minute power samples
 - The preferred source needs confirmation where the installation exposes
   multiple measurement paths for one physical device
-- The domain change from `smart1_csv` to `smart1_ems` is intentionally
-  breaking while the integration is still under development
+- Evaluate optional inverter and PV-string diagnostic entities from the
+  documented inverter and detailed photovoltaic endpoints
+- Add a configurable history range if real-world installations need it
+- Apply for inclusion in the default HACS catalogue after broader validation
 
 ## Current code behavior
 

@@ -1,5 +1,9 @@
 # smart1 EMS für Home Assistant
 
+<p align="center">
+  <img src="../custom_components/smart1_ems/brand/icon.png" width="128" alt="Logo der smart1 EMS Integration">
+</p>
+
 Eine inoffizielle, ausschließlich lesende Home-Assistant-Integration für das
 smart1 Energiemanagementsystem. Sie ruft Messwerte über die CSV-API des smart1
 Portals ab und bildet neben der Photovoltaikanlage auch Netzanschluss, Batterie,
@@ -13,7 +17,59 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 > Das Projekt ist eine frühe öffentliche Beta-Version. Es wurde mit einer realen
 > smart1 Anlage und Home Assistant 2026.7.4 geprüft.
 
-[English documentation](../README.md)
+[English documentation](../README.md) ·
+[Installation](#installation-über-hacs) ·
+[Screenshots](#screenshots) ·
+[Energy Dashboard](#energy-dashboard) ·
+[Fehler melden](#fehler-melden) ·
+[Roadmap](#roadmap)
+
+## Auf einen Blick
+
+| | |
+| --- | --- |
+| Zugriff | Ausschließlich lesendes Cloud-Polling über die offizielle CSV-Portal-API |
+| Einrichtung | Home-Assistant-Oberfläche mit verdecktem persönlichem API-Schlüssel |
+| Geräte | EMS, PV, Netz, Batterie, Wallbox, Wärmepumpe und Zusatzheizung |
+| Energy Dashboard | PV, Netz, Batterie und ausgewählte Einzelverbraucher |
+| Historie | Automatischer Import von bis zu 365 Tagen |
+| Getestete Hardware | M-TEC Energy Hero, Energy Butler, Energy Heater und KEBA Wallbox |
+
+## Funktionen
+
+- Automatische Erkennung von Anlage und Messpunkten
+- Live-Sensoren für Leistung, Energie, Temperaturen, Prozentwerte und Diagnosen
+- Ladezustand der Batterie aus dem strukturierten smart1 `SOC`-Signal
+- Exakte PV-Produktion aus dem dokumentierten kumulativen PV-Endpunkt
+- Energy-Dashboard-Statistiken für Netz, Batterie, Wallbox, Wärmepumpe und
+  Zusatzheizung
+- Automatischer historischer Import im Hintergrund
+- Redigierte Home-Assistant-Diagnosen ohne API-Schlüssel, Anlagen-IDs,
+  Messpunkt-IDs oder Messwerte
+
+Alle Zugriffe auf das Portal sind lesend. Die Integration stellt keine Schalter,
+Befehle oder andere Steuerungsmöglichkeiten bereit.
+
+## Screenshots
+
+**Einrichtung mit verdecktem API-Schlüssel**
+
+<p align="center">
+  <img src="images/setup-api-key.jpg" width="720" alt="Einrichtung von smart1 EMS mit verdecktem API-Schlüssel">
+</p>
+
+**Automatisch erkannte Geräte**
+
+<p align="center">
+  <img src="images/device-overview.jpg" width="900" alt="Home-Assistant-Geräteübersicht für smart1 EMS">
+</p>
+
+<details>
+  <summary><strong>Batteriekonfiguration für das Energy Dashboard</strong></summary>
+  <p align="center">
+    <img src="images/energy-battery.jpg" width="500" alt="Konfiguration von Batterieladung, Entladung, Leistung und Ladezustand">
+  </p>
+</details>
 
 ## Kompatibilität
 
@@ -94,10 +150,34 @@ angeben. Die Integration entfernt API-Schlüssel, Anlagen- und Messpunkt-IDs
 sowie Messwerte aus ihrer Diagnose. Vor einer öffentlichen Weitergabe sollte
 die Datei dennoch geprüft werden.
 
+## Bekannte Einschränkungen
+
+- Die Verfügbarkeit der Daten hängt vom smart1 CSV-Portal ab.
+- Historische Energiewerte außerhalb der PV-Anlage werden aus
+  5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
+  verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
+- Ungewöhnliche Messpunktnamen oder Schnittstellen-Metadaten können zusätzliche
+  Zuordnungsregeln erfordern.
+- Die Integration ist ausschließlich lesend und kann weder das EMS noch
+  angeschlossene Geräte steuern.
+
+## Roadmap
+
+- Erkennung und Gerätezuordnung mit weiteren smart1 Portalen und
+  Hardwarekombinationen validieren
+- Optionale Wechselrichter- und PV-String-Diagnosen aus den dokumentierten
+  Endpunkten untersuchen, darunter AC-/DC-Leistung, DC-Spannung und
+  Wechselrichtertemperatur
+- Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
+- Nach breiterer Praxiserprobung die Aufnahme in den HACS-Standardkatalog
+  beantragen
+
 ## Projekt unterstützen
 
-Wenn dir die Integration hilft, kannst du ihre Weiterentwicklung über
-[Buy Me a Coffee](http://buymeacoffee.com/philipp_reede) unterstützen.
+Wenn dir die Integration hilft, kannst du ihre Weiterentwicklung hier
+unterstützen:
+
+[![Buy me a beer](images/buy-me-a-beer.svg)](https://www.buymeacoffee.com/philipp_reede)
 
 Weitere technische Details stehen in den englischen
 [`API_NOTES.md`](../API_NOTES.md).

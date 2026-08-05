@@ -3,6 +3,10 @@
 [![CI](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml)
 [![HACS validation](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml)
 
+<p align="center">
+  <img src="custom_components/smart1_ems/brand/icon.png" width="128" alt="smart1 EMS integration icon">
+</p>
+
 An unofficial, read-only Home Assistant integration for the smart1 energy
 management system. It reads measurements from the smart1 CSV portal API and
 represents the complete EMS, including photovoltaic production, grid exchange,
@@ -15,7 +19,23 @@ battery, wallbox, heat pump and auxiliary heating.
 > This project is an early public beta. It has been validated with one real
 > smart1 installation and Home Assistant 2026.7.4.
 
-[Deutsche Anleitung](docs/README.de.md)
+[Deutsche Anleitung](docs/README.de.md) ·
+[Installation](#installation-with-hacs) ·
+[Screenshots](#screenshots) ·
+[Energy Dashboard](#energy-dashboard) ·
+[Troubleshooting](#troubleshooting) ·
+[Roadmap](#roadmap)
+
+## At a glance
+
+| | |
+| --- | --- |
+| Access | Read-only cloud polling through the official CSV portal API |
+| Setup | Home Assistant UI with a masked personal API key |
+| Devices | EMS, PV, grid, battery, wallbox, heat pump and auxiliary heater |
+| Energy Dashboard | PV, grid, battery and selected individual consumers |
+| History | Automatic import of up to 365 days |
+| Tested hardware | M-TEC Energy Hero, Energy Butler, Energy Heater and KEBA wallbox |
 
 ## Features
 
@@ -35,6 +55,27 @@ battery, wallbox, heat pump and auxiliary heating.
 
 All portal access is read-only. The integration does not expose controls,
 switches or commands.
+
+## Screenshots
+
+**Masked API-key setup**
+
+<p align="center">
+  <img src="docs/images/setup-api-key.jpg" width="720" alt="smart1 EMS setup with a masked API-key field">
+</p>
+
+**Automatically discovered devices**
+
+<p align="center">
+  <img src="docs/images/device-overview.jpg" width="900" alt="Home Assistant device overview for smart1 EMS">
+</p>
+
+<details>
+  <summary><strong>Battery Energy Dashboard configuration</strong></summary>
+  <p align="center">
+    <img src="docs/images/energy-battery.jpg" width="500" alt="Battery charge, discharge, power and state-of-charge configuration">
+  </p>
+</details>
 
 ## Compatibility
 
@@ -138,13 +179,27 @@ redacted diagnostics file when possible.
   mapping rules.
 - The integration is read-only and cannot control the EMS or connected devices.
 
+## Roadmap
+
+- Validate discovery and device mapping with additional smart1 portals and
+  hardware combinations.
+- Evaluate optional inverter and PV-string diagnostics from the documented
+  inverter and detailed photovoltaic endpoints. These could include AC/DC
+  power, DC voltage and inverter temperature without adding write access.
+- Make the historical import range configurable if longer or shorter imports
+  prove useful across installations.
+- Apply for inclusion in the default HACS catalogue after broader real-world
+  validation.
+
 Technical API findings and implementation details are documented in
 [`API_NOTES.md`](API_NOTES.md).
 
 ## Support the project
 
 If this integration is useful to you, you can support its continued development
-on [Buy Me a Coffee](http://buymeacoffee.com/philipp_reede).
+here:
+
+[![Buy me a beer](docs/images/buy-me-a-beer.svg)](https://www.buymeacoffee.com/philipp_reede)
 
 ## Releases
 
