@@ -24,6 +24,42 @@ bus_module = importlib.import_module("custom_components.smart1_ems.bus")
 
 
 class BusParserTest(unittest.TestCase):
+    def test_response_diagnostics_classify_rows_without_values(self) -> None:
+        diagnostics = bus_module.bus_response_diagnostics(
+            [
+                {
+                    "BusId": "Bus1",
+                    "BusConfigured": "No value",
+                    "BusManufactors": "No value",
+                    "BusManufactor1": "No value",
+                },
+                {
+                    "BusId": "Bus2",
+                    "BusConfigured": "ok",
+                    "BusManufactors": "1",
+                    "BusManufactor1": "private-manufacturer",
+                },
+                {"BusId": "3", "BusConfigured": "No value"},
+                {"BusId": "private-other-id"},
+                {"BusConfigured": "No value"},
+            ]
+        )
+
+        self.assertEqual(
+            diagnostics,
+            {
+                "rows_with_documented_bus_id": 2,
+                "rows_with_numeric_bus_id": 1,
+                "rows_with_other_bus_id": 1,
+                "rows_without_bus_id": 1,
+                "rows_with_configuration_status": 1,
+                "rows_with_manufacturer_count": 1,
+                "rows_with_manufacturer_protocols": 1,
+            },
+        )
+        self.assertNotIn("private-manufacturer", str(diagnostics))
+        self.assertNotIn("private-other-id", str(diagnostics))
+
     def test_documented_response_omits_empty_bus_slots(self) -> None:
         buses = bus_module.parse_bus_systems(
             [
