@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.2] - 2026-08-05
+
+### Added
+
+- Classify bus response rows through privacy-safe counters for documented,
+  numeric, missing and unknown bus ID formats
+- Report how many rows contain configuration status, manufacturer-count and
+  manufacturer-protocol values without exposing the values themselves
+
 ## [0.6.1] - 2026-08-05
 
 ### Added
