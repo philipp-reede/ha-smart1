@@ -1,0 +1,36 @@
+name: HACS and Home Assistant validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate integration repository
+        uses: hacs/action@main
+        with:
+          category: integration
+          # Remove this ignore after smart1_ems is registered in
+          # home-assistant/brands and before applying to hacs/default.
+          ignore: brands
+
+  validate-hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Validate Home Assistant integration
+        uses: home-assistant/actions/hassfest@master
+

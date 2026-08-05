@@ -61,10 +61,19 @@ class Smart1Discovery:
             if "wallbox" in interface or "ecar" in name:
                 result.has_wallbox = True
 
-            if "heatpump" in interface or "wärmepumpe" in name:
+            if (
+                "heatpump" in interface
+                or "wärmepumpe" in name
+                or "waermepumpe" in name
+            ):
                 result.has_heat_pump = True
 
-            if "heater" in interface:
+            if (
+                "heater" in interface
+                or "energy heater" in name
+                or "energyheater" in name
+                or "heizstab" in name
+            ):
                 result.has_energy_heater = True
 
         return result

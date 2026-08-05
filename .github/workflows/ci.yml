@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python sources
+        run: python -m compileall -q custom_components tests
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate JSON files
+        run: |
+          python -m json.tool hacs.json >/dev/null
+          python -m json.tool custom_components/smart1_ems/manifest.json >/dev/null
+          python -m json.tool custom_components/smart1_ems/translations/en.json >/dev/null
+          python -m json.tool custom_components/smart1_ems/translations/de.json >/dev/null

@@ -22,7 +22,7 @@ heating elements and other devices known to smart1.
 
 ## Architecture
 
-Current integration domain: `smart1_csv`.
+Current integration domain: `smart1_ems`.
 
 Current layers:
 
@@ -35,6 +35,9 @@ Current layers:
 - `sensor.py`: Home Assistant entities and device registry
 - `discovery.py`: installation discovery used inside Home Assistant
 - `config_flow.py`: API-key setup and automatic plant selection
+- `power_integration.py`: guarded trapezoidal integration of detailed power data
+- `energy_roles.py`: eligible points, recommendations and stable statistic IDs
+- `derived_history.py`: opt-in derived energy statistics for selected roles
 
 Do not introduce generic abstractions unless they directly improve this
 Home Assistant integration.
@@ -65,6 +68,8 @@ Known classifications:
 - Name containing standalone `WP` may indicate heat pump
 - `Energy Heater` is M-TEC's product name for an electric heating element
 - `Heizstab` is the generic German description
+- On the current installation the auxiliary-heater `buscounter` has no
+  available data; the `remoteio` `POWER_METER` counter is the validated source
 - `energytrader` currently appears to indicate battery-related EnergyCloud
   points, but this should remain treated as an inference until verified
 - Temperatures must belong to their actual logical device where possible;
@@ -116,15 +121,11 @@ PV cumulative endpoint:
 
 ## Current priorities
 
-1. Correct logical device classification and grouping
-2. Detect heat pump and heating element correctly
-3. Remove invalid automatically generated linear cumulative entities
-4. Implement PV energy using the photovoltaics cumulative endpoint
-5. Investigate energy data for wallbox, heat pump, heating element, grid
-   and battery without inventing unsupported API behavior
-6. Add Options Flow
-7. Add diagnostics
-8. Prepare GitHub/HACS release
+1. Validate selected energy roles and their derived statistics in Home Assistant
+2. Confirm the preferred measurement path where the installation exposes
+   duplicate wallbox, heat-pump or heating-element points
+3. Add configurable history range if real-world import duration requires it
+4. Prepare GitHub/HACS release
 
 ## Safety and secrets
 
