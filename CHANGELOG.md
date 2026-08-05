@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] - 2026-08-05
+
+### Added
+
+- Discover configured inverter bus systems through the optional documented
+  `/bus/{deviceId}` endpoint
+- Add one static diagnostic entity for every active inverter bus to the
+  existing smart1 EMS device
+- Expose the documented bus status and manufacturer protocols as entity
+  attributes
+- Add redacted bus capability counts to Home Assistant diagnostics
+
+### Reliability
+
+- Ignore unconfigured bus slots and keep all existing entities available when
+  the optional bus endpoint is absent or temporarily fails
+
 ## [0.5.1] - 2026-08-05
 
 ### Fixed

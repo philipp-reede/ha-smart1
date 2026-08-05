@@ -100,6 +100,30 @@ measurements, inverter diagnostics, historical imports or Energy Dashboard
 statistics. Integration diagnostics report only capability counts, not module-
 field names, IDs, angles or other configuration values.
 
+## Inverter bus configuration
+
+Endpoint:
+
+`/bus/{deviceId}`
+
+The documented response contains one row per available bus slot. `BusId`
+identifies the bus, `BusConfigured` reports its configuration status,
+`BusManufactors` contains the documented protocol count, and numbered
+`BusManufactorN` columns contain the manufacturer protocols. The API document
+uses the `Manufactor` spelling; the parser also accepts corrected
+`Manufacturer` headers for portal compatibility.
+
+Rows where both the configuration status and all manufacturer fields contain
+`No value` are empty slots and are omitted. Every active bus becomes one static
+diagnostic entity on the existing smart1 EMS device. It is not represented as
+a separate physical device because the endpoint describes a communication bus,
+not a distinct inverter.
+
+The bus endpoint is optional. Missing or failed requests do not affect live
+measurements, inverter devices, historical imports or Energy Dashboard
+statistics. Integration diagnostics report only bus and protocol counts; they
+do not expose bus manufacturer names.
+
 ## Photovoltaic cumulative data
 
 Endpoint:
@@ -202,7 +226,6 @@ requests the day endpoint once per date when importing history.
 The 2020 API document contains no control or write endpoints. Additional
 read-only features could be built from these documented calls:
 
-- `/bus/{deviceId}` exposes configured inverter bus systems and manufacturers.
 - Month and year periods are documented for detailed and cumulative calls.
   Cumulative month/year replies are aggregate period totals, so they cannot
   replace the day-by-day import required for hourly Energy Dashboard history.

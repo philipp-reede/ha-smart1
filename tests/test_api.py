@@ -146,6 +146,25 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertEqual(api.requested_path, "/modulfields/42")
         self.assertTrue(api.missing_ok)
 
+    def test_bus_endpoint_is_optional(self) -> None:
+        api = RecordingSmart1Api(
+            [
+                {
+                    "BusId": "Bus2",
+                    "BusConfigured": "ok",
+                    "BusManufactors": "1",
+                    "BusManufactor1": "M-TEC",
+                }
+            ]
+        )
+
+        buses = asyncio.run(api.get_buses(missing_ok=True))
+
+        self.assertEqual(buses[0].number, 2)
+        self.assertEqual(buses[0].manufacturers, ("M-TEC",))
+        self.assertEqual(api.requested_path, "/bus/42")
+        self.assertTrue(api.missing_ok)
+
     def test_pv_detailed_endpoint_accepts_string_filter(self) -> None:
         api = RecordingSmart1Api([])
 

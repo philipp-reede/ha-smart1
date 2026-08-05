@@ -49,6 +49,7 @@ smart1_ems = sys.modules.setdefault(
 smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
 diagnostics = importlib.import_module("custom_components.smart1_ems.diagnostics")
+bus_module = importlib.import_module("custom_components.smart1_ems.bus")
 discovery_module = importlib.import_module("custom_components.smart1_ems.discovery")
 interface_module = importlib.import_module("custom_components.smart1_ems.interface")
 inverter_module = importlib.import_module("custom_components.smart1_ems.inverter")
@@ -166,6 +167,15 @@ class Hass:
                         shadow_until="13:00:00",
                     )
                 ],
+                "buses": [
+                    bus_module.Smart1BusSystem(
+                        id="Bus2",
+                        number=2,
+                        configured="ok",
+                        documented_manufacturer_count=1,
+                        manufacturers=("private-bus-manufacturer",),
+                    )
+                ],
                 "history_importers": [
                     types.SimpleNamespace(
                         diagnostic_status={
@@ -239,6 +249,14 @@ class DiagnosticsTest(unittest.TestCase):
             },
         )
         self.assertEqual(
+            result["bus_diagnostics"],
+            {
+                "configured_bus_count": 1,
+                "with_manufacturer_information": 1,
+                "manufacturer_protocol_counts": [1],
+            },
+        )
+        self.assertEqual(
             result["linear_cumulative_probe"],
             {
                 "period": "previous_complete_day",
@@ -275,6 +293,7 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertNotIn("private-inverter-timestamp", serialized)
         self.assertNotIn("private-module-field-id", serialized)
         self.assertNotIn("private-module-field-name", serialized)
+        self.assertNotIn("private-bus-manufacturer", serialized)
         self.assertNotIn("2026-08-03", serialized)
         self.assertNotIn('"1000"', serialized)
         self.assertNotIn("api_key", serialized)

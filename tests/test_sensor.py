@@ -102,6 +102,7 @@ smart1_ems = sys.modules.setdefault(
 )
 smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 
+bus_module = importlib.import_module("custom_components.smart1_ems.bus")
 inverter_module = importlib.import_module("custom_components.smart1_ems.inverter")
 module_field_module = importlib.import_module(
     "custom_components.smart1_ems.module_field"
@@ -260,6 +261,59 @@ class InverterSensorTest(unittest.TestCase):
                 "shadow_until": "13:00:00",
                 "monitoring": "on",
                 "configured": "ok",
+            },
+        )
+
+    def test_setup_adds_active_bus_configuration_to_ems(self) -> None:
+        bus = bus_module.Smart1BusSystem(
+            id="Bus2",
+            number=2,
+            configured="ok",
+            documented_manufacturer_count=1,
+            manufacturers=("M-TEC",),
+        )
+        hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": self.coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [],
+                        "buses": [bus],
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                added.extend,
+            )
+        )
+
+        self.assertEqual(len(added), 1)
+        entity = added[0]
+        self.assertIsInstance(
+            entity,
+            sensor_module.Smart1BusConfigurationSensor,
+        )
+        self.assertEqual(entity._attr_native_value, "ok")
+        self.assertEqual(entity._attr_translation_placeholders, {"bus": "2"})
+        self.assertEqual(
+            entity._attr_device_info["identifiers"],
+            {("smart1_ems", "entry-1:other")},
+        )
+        self.assertEqual(
+            entity.extra_state_attributes,
+            {
+                "bus_number": 2,
+                "manufacturers": ["M-TEC"],
+                "documented_manufacturer_count": 1,
             },
         )
 

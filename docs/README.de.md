@@ -53,6 +53,8 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
   Wechselrichtertemperatur als Diagnosesensoren
 - Optionale Modulfeld-Diagnosen für installierte Leistung, Ausrichtung, Neigung
   und konfigurierte Verschattungszeiträume
+- Optionale statische Diagnosen für aktive Wechselrichter-Bussysteme und ihre
+  dokumentierten Herstellerprotokolle
 - Ladezustand der Batterie aus dem strukturierten smart1 `SOC`-Signal
 - Exakte PV-Produktion aus dem dokumentierten kumulativen PV-Endpunkt
 - Energy-Dashboard-Statistiken für Netz, Batterie, Wallbox, Wärmepumpe und
@@ -176,6 +178,9 @@ die Datei dennoch geprüft werden.
   diese nicht bereit, funktionieren alle übrigen Geräte und Sensoren weiter.
 - Die Modulfeld-Konfiguration benötigt den optionalen dokumentierten
   Modulfeld-Endpunkt und wird ausgelassen, wenn das Portal ihn nicht bereitstellt.
+- Die Wechselrichter-Buskonfiguration benötigt den optionalen dokumentierten
+  Bus-Endpunkt. Leere Busplätze und Portale ohne diesen Endpunkt erzeugen keine
+  Entitäten.
 - Historische Energiewerte außerhalb der PV-Anlage werden aus
   5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
   verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
@@ -192,6 +197,8 @@ die Datei dennoch geprüft werden.
   Wechselrichtermodellen und Anlagen mit mehreren Wechselrichtern prüfen
 - Modulfeld-Zuordnungen und Ausrichtungsdaten mit weiteren Dachaufteilungen
   prüfen
+- Wechselrichter-Buskonfiguration und Herstellerprotokolle mit weiteren EMS-
+  und Wechselrichterkombinationen prüfen
 - Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
 - Nach breiterer Praxiserprobung die Aufnahme in den HACS-Standardkatalog
   beantragen

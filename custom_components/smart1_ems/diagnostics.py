@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .api import Smart1Api, Smart1ApiError
+from .bus import Smart1BusSystem
 from .classifier import classify_point
 from .const import DOMAIN
 from .energy_roles import ENERGY_ROLES_BY_KEY
@@ -132,6 +133,19 @@ def _module_field_diagnostics(
         "with_shadow_interval": sum(
             bool(module_field.shadow_from and module_field.shadow_until)
             for module_field in module_fields
+        ),
+    }
+
+
+def _bus_diagnostics(buses: list[Smart1BusSystem]) -> dict[str, Any]:
+    """Describe configured inverter buses without manufacturer names."""
+    return {
+        "configured_bus_count": len(buses),
+        "with_manufacturer_information": sum(
+            bool(bus.manufacturers) for bus in buses
+        ),
+        "manufacturer_protocol_counts": sorted(
+            len(bus.manufacturers) for bus in buses
         ),
     }
 
@@ -312,6 +326,9 @@ async def async_get_config_entry_diagnostics(
         "module_field_diagnostics": _module_field_diagnostics(
             runtime_data.get("module_fields", []),
             runtime_data.get("inverters", []),
+        ),
+        "bus_diagnostics": _bus_diagnostics(
+            runtime_data.get("buses", []),
         ),
         "linear_cumulative_probe": await _linear_cumulative_probe(
             runtime_data["api"],

@@ -54,6 +54,8 @@ battery, wallbox, heat pump and auxiliary heating.
   diagnostic sensors
 - Optional PV module-field diagnostics for installed capacity, azimuth, tilt
   and configured shadow intervals
+- Optional static diagnostics for active inverter bus systems and their
+  documented manufacturer protocols
 - Live power, energy, temperature, percentage and diagnostic sensors where the
   portal exposes suitable points
 - Battery state of charge detected from the structured smart1 `SOC` signal
@@ -191,6 +193,8 @@ redacted diagnostics file when possible.
   and sensors continue to work.
 - Module-field configuration depends on the optional documented module-field
   endpoint and is omitted when a portal does not expose it.
+- Inverter-bus configuration depends on the optional documented bus endpoint.
+  Empty bus slots and portals without that endpoint do not create entities.
 - Non-PV historical energy is derived rather than read from native cumulative
   meter totals because the tested installation does not expose usable linear
   cumulative data.
@@ -207,6 +211,8 @@ redacted diagnostics file when possible.
   models and multi-inverter installations.
 - Validate module-field assignments and orientation metadata with additional
   roof layouts.
+- Validate inverter-bus configuration and manufacturer protocols with
+  additional EMS and inverter combinations.
 - Make the historical import range configurable if longer or shorter imports
   prove useful across installations.
 - Apply for inclusion in the default HACS catalogue after broader real-world
