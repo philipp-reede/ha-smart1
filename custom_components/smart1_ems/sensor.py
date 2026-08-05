@@ -18,6 +18,7 @@ from homeassistant.const import (
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .bus import Smart1BusSystem
 from .classifier import Smart1Category
 from .const import DOMAIN
 from .entity_mapper import get_entity_descriptions
@@ -146,12 +147,25 @@ def _pv_device_info(entry_id: str) -> dict:
     }
 
 
+def _ems_device_info(entry_id: str) -> dict:
+    """Return device registry information for the smart1 EMS hub."""
+    return {
+        "identifiers": {
+            _device_identifier(entry_id, Smart1Category.OTHER),
+        },
+        "name": "Smart1 EMS",
+        "manufacturer": "smart1",
+        "model": "Smart1 EMS",
+    }
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     devices = hass.data[DOMAIN][entry.entry_id]["devices"]
     discovery = hass.data[DOMAIN][entry.entry_id]["discovery"]
     inverters = hass.data[DOMAIN][entry.entry_id].get("inverters", [])
     module_fields = hass.data[DOMAIN][entry.entry_id].get("module_fields", [])
+    buses = hass.data[DOMAIN][entry.entry_id].get("buses", [])
 
     entities = []
 
@@ -163,6 +177,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     if discovery.has_pv:
         entities.append(Smart1PvEnergySensor(coordinator, entry.entry_id))
+
+    for bus in buses:
+        entities.append(Smart1BusConfigurationSensor(entry.entry_id, bus))
 
     for module_field in module_fields:
         for metric in MODULE_FIELD_METRICS:
@@ -325,6 +342,37 @@ class Smart1PvEnergySensor(CoordinatorEntity, SensorEntity):
     def available(self):
         """Return whether cumulative PV production is available."""
         return super().available and self.native_value is not None
+
+
+class Smart1BusConfigurationSensor(SensorEntity):
+    """Static configuration for one documented inverter bus."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "inverter_bus_configuration"
+    _attr_icon = "mdi:transit-connection-variant"
+
+    def __init__(self, entry_id: str, bus: Smart1BusSystem) -> None:
+        self._bus = bus
+        self._attr_unique_id = (
+            f"smart1_{entry_id}_inverter_bus_{bus.number}_configuration"
+        )
+        self._attr_device_info = _ems_device_info(entry_id)
+        self._attr_translation_placeholders = {
+            "bus": str(bus.number),
+        }
+        self._attr_native_value = bus.configured or "configured"
+
+    @property
+    def extra_state_attributes(self):
+        """Return documented inverter-bus manufacturer configuration."""
+        return {
+            "bus_number": self._bus.number,
+            "manufacturers": list(self._bus.manufacturers),
+            "documented_manufacturer_count": (
+                self._bus.documented_manufacturer_count
+            ),
+        }
 
 
 def _module_field_metric_value(

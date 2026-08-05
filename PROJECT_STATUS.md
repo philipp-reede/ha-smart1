@@ -25,6 +25,10 @@
   or Energy Dashboard statistics; transient failures retain the latest sample
 - Inverter diagnostics report only redacted capability metadata and never
   expose inverter IDs, serial numbers, timestamps or measurements
+- Active inverter communication buses are discovered from the optional
+  documented bus endpoint and exposed as static diagnostics on the EMS device
+- Empty bus slots are omitted, and bus diagnostics expose only capability
+  counts instead of manufacturer protocol names
 - Measurement roles now share one logical Smart1 EMS device
 - Heat pumps and heating elements have dedicated classification rules
 - Direct battery, e-car, heat-pump, and grid-meter interfaces are classified
@@ -94,6 +98,8 @@
   string layouts and multi-inverter installations
 - Validate module-field assignments, derived installed capacity and orientation
   metadata with additional roof layouts
+- Validate inverter-bus discovery and manufacturer protocols with additional
+  EMS and inverter combinations
 - Add a configurable history range if real-world installations need it
 - Apply for inclusion in the default HACS catalogue after broader validation
 
@@ -115,4 +121,4 @@ available. Live values continue updating in both cases.
 
 Static module-field metadata is stored separately in the config-entry runtime
 data because it is read only during setup and does not require five-minute
-polling.
+polling. Optional configured inverter buses are stored in the same way.

@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from .bus import Smart1BusSystem, parse_bus_systems
 from .const import BASE_URL
 from .inverter import (
     Smart1Inverter,
@@ -128,6 +129,18 @@ class Smart1Api:
             missing_ok=missing_ok,
         )
         return parse_module_fields(rows)
+
+    async def get_buses(
+        self,
+        *,
+        missing_ok: bool = False,
+    ) -> list[Smart1BusSystem]:
+        """Return documented configured inverter-bus metadata."""
+        rows = await self._get_csv(
+            f"/bus/{self.device_id}",
+            missing_ok=missing_ok,
+        )
+        return parse_bus_systems(rows)
 
     def _counter_to_point(self, row: dict[str, str]) -> Smart1Point:
         """Convert one counter row into a Smart1Point."""

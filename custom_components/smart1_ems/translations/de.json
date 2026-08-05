@@ -70,6 +70,9 @@
       },
       "module_field_tilt": {
         "name": "Modulfeld {module_field} Neigung"
+      },
+      "inverter_bus_configuration": {
+        "name": "Bus {bus} Konfiguration"
       }
     }
   }
