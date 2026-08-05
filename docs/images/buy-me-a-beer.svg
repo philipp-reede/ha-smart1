@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="236" height="64" viewBox="0 0 236 64" role="img" aria-labelledby="title description">
+  <title id="title">Buy me a beer</title>
+  <desc id="description">Yellow support button with a beer mug</desc>
+  <rect x="1" y="1" width="234" height="62" rx="9" fill="#FFDD00" stroke="#000000" stroke-width="2"/>
+  <g transform="translate(18 14)" stroke="#000000" stroke-width="2.5" stroke-linejoin="round">
+    <path d="M4 9h24v26H8a4 4 0 0 1-4-4z" fill="#ffffff"/>
+    <path d="M28 13h4a7 7 0 0 1 0 14h-4" fill="none"/>
+    <path d="M7 12h18v19H8a1 1 0 0 1-1-1z" fill="#F5A623" stroke="none"/>
+    <path d="M4 10c0-5 5-8 9-5 3-5 11-3 11 2 4-1 7 2 5 6H4z" fill="#ffffff"/>
+  </g>
+  <text x="67" y="41" fill="#000000" font-family="Cookie, 'Brush Script MT', cursive" font-size="28" font-weight="600">Buy me a beer</text>
+</svg>

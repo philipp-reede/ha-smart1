@@ -145,3 +145,26 @@ requests the day endpoint once per date when importing history.
 - Missing dates remain unknown and are not converted to zero production.
 - The import runs in the background and is stored as external Home Assistant
   long-term statistics under `smart1_ems:pv_production`.
+
+## Further documented opportunities
+
+The 2020 API document contains no control or write endpoints. Additional
+read-only features could be built from these documented calls:
+
+- `/inverters/{deviceId}` exposes static inverter metadata such as
+  manufacturer, type, serial number, capacity, bus/address and string layout.
+- `/modulfields/{deviceId}` exposes module-field configuration such as azimuth,
+  tilt and configured shadow intervals.
+- `/bus/{deviceId}` exposes configured inverter bus systems and manufacturers.
+- The detailed photovoltaic endpoint exposes one row per inverter string with
+  AC power, DC power, DC voltage and inverter temperature. This is the most
+  useful candidate for optional inverter and PV-string diagnostic entities.
+- Month and year periods are documented for detailed and cumulative calls.
+  Cumulative month/year replies are aggregate period totals, so they cannot
+  replace the day-by-day import required for hourly Energy Dashboard history.
+
+Plant details can include address and coordinates. They are not currently
+exposed because they add little Home Assistant value and increase privacy risk.
+Any future inverter or string implementation should remain optional, avoid
+duplicating equivalent linear points and preserve the integration's read-only
+scope.
