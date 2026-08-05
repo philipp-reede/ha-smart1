@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml)
 [![HACS validation](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml)
+[![Latest release](https://img.shields.io/github/v/release/philipp-reede/ha-smart1?display_name=tag&sort=semver)](https://github.com/philipp-reede/ha-smart1/releases/latest)
+[![License](https://img.shields.io/github/license/philipp-reede/ha-smart1)](LICENSE)
 
 <p align="center">
   <img src="custom_components/smart1_ems/brand/icon.png" width="128" alt="smart1 EMS integration icon">
@@ -97,6 +99,10 @@ and help extend the discovery rules.
 
 Until the integration is included in the default HACS catalogue, add it as a
 custom repository:
+
+[![Open your Home Assistant instance and open this repository inside HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=philipp-reede&repository=ha-smart1&category=integration)
+
+Alternatively, add the repository manually:
 
 1. Open HACS in Home Assistant.
 2. Open the three-dot menu and select **Custom repositories**.

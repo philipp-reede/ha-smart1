@@ -1,5 +1,10 @@
 # smart1 EMS für Home Assistant
 
+[![CI](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml)
+[![HACS validation](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml)
+[![Neueste Version](https://img.shields.io/github/v/release/philipp-reede/ha-smart1?display_name=tag&sort=semver&label=Version)](https://github.com/philipp-reede/ha-smart1/releases/latest)
+[![Lizenz](https://img.shields.io/github/license/philipp-reede/ha-smart1?label=Lizenz)](../LICENSE)
+
 <p align="center">
   <img src="../custom_components/smart1_ems/brand/icon.png" width="128" alt="Logo der smart1 EMS Integration">
 </p>
@@ -91,6 +96,10 @@ Erkennungsregeln zu erweitern.
 
 Bis die Integration im Standardkatalog von HACS enthalten ist, wird sie als
 benutzerdefiniertes Repository hinzugefügt:
+
+[![Home Assistant öffnen und dieses Repository in HACS anzeigen](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=philipp-reede&repository=ha-smart1&category=integration)
+
+Alternativ kann das Repository manuell hinzugefügt werden:
 
 1. HACS in Home Assistant öffnen.
 2. Im Drei-Punkte-Menü **Benutzerdefinierte Repositories** auswählen.

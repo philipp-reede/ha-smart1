@@ -9,6 +9,7 @@ All notable changes to this project are documented in this file.
 - Add a compact project overview and clearer navigation to the English and
   German README files
 - Add anonymized setup, device-overview and battery Energy Dashboard screenshots
+- Add release and license badges plus a direct "Open in HACS" installation link
 - Document the next read-only API opportunities and project roadmap
 - Replace the plain support link with a GitHub-compatible "Buy me a beer"
   button
