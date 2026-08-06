@@ -3,10 +3,10 @@
 [![CI](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml)
 [![HACS validation](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml)
 [![Latest release](https://img.shields.io/github/v/release/philipp-reede/ha-smart1?display_name=tag&sort=semver)](https://github.com/philipp-reede/ha-smart1/releases/latest)
-[![License](https://img.shields.io/github/license/philipp-reede/ha-smart1)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/philipp-reede/ha-smart1/blob/main/LICENSE)
 
 <p align="center">
-  <img src="custom_components/smart1_ems/brand/icon.png" width="128" alt="smart1 EMS integration icon">
+  <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/custom_components/smart1_ems/brand/icon.png" width="128" alt="smart1 EMS integration icon">
 </p>
 
 An unofficial, read-only Home Assistant integration for the smart1 energy
@@ -74,19 +74,19 @@ switches or commands.
 **Masked API-key setup**
 
 <p align="center">
-  <img src="docs/images/setup-api-key.jpg" width="720" alt="smart1 EMS setup with a masked API-key field">
+  <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/setup-api-key.jpg" width="720" alt="smart1 EMS setup with a masked API-key field">
 </p>
 
 **Automatically discovered devices**
 
 <p align="center">
-  <img src="docs/images/device-overview.jpg" width="900" alt="Home Assistant device overview for smart1 EMS">
+  <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/device-overview.jpg" width="900" alt="Home Assistant device overview for smart1 EMS">
 </p>
 
 <details>
   <summary><strong>Battery Energy Dashboard configuration</strong></summary>
   <p align="center">
-    <img src="docs/images/energy-battery.jpg" width="500" alt="Battery charge, discharge, power and state-of-charge configuration">
+    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/energy-battery.jpg" width="500" alt="Battery charge, discharge, power and state-of-charge configuration">
   </p>
 </details>
 
@@ -243,7 +243,7 @@ Technical API findings and implementation details are documented in
 If this integration is useful to you, you can support its continued development
 here:
 
-[![Buy me a beer](docs/images/buy-me-a-beer.svg)](https://www.buymeacoffee.com/philipp_reede)
+[![Buy me a beer](https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/buy-me-a-beer.svg)](https://www.buymeacoffee.com/philipp_reede)
 
 ## Releases
 
