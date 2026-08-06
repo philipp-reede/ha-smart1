@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.2] - 2026-08-06
+
+### Fixed
+
+- Use absolute GitHub URLs for repository images so HACS can render the icon,
+  screenshots and support button from the README
+- Replace the dynamic license badge with a static MIT badge and an absolute
+  link to the license
+
 ## [0.6.1] - 2026-08-05
 
 ### Added
