@@ -3,10 +3,10 @@
 [![CI](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/ci.yml)
 [![HACS validation](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml/badge.svg)](https://github.com/philipp-reede/ha-smart1/actions/workflows/validate.yml)
 [![Neueste Version](https://img.shields.io/github/v/release/philipp-reede/ha-smart1?display_name=tag&sort=semver&label=Version)](https://github.com/philipp-reede/ha-smart1/releases/latest)
-[![Lizenz](https://img.shields.io/github/license/philipp-reede/ha-smart1?label=Lizenz)](../LICENSE)
+[![Lizenz](https://img.shields.io/badge/Lizenz-MIT-blue.svg)](https://github.com/philipp-reede/ha-smart1/blob/main/LICENSE)
 
 <p align="center">
-  <img src="../custom_components/smart1_ems/brand/icon.png" width="128" alt="Logo der smart1 EMS Integration">
+  <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/custom_components/smart1_ems/brand/icon.png" width="128" alt="Logo der smart1 EMS Integration">
 </p>
 
 Eine inoffizielle, ausschließlich lesende Home-Assistant-Integration für das
@@ -71,19 +71,19 @@ Befehle oder andere Steuerungsmöglichkeiten bereit.
 **Einrichtung mit verdecktem API-Schlüssel**
 
 <p align="center">
-  <img src="images/setup-api-key.jpg" width="720" alt="Einrichtung von smart1 EMS mit verdecktem API-Schlüssel">
+  <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/setup-api-key.jpg" width="720" alt="Einrichtung von smart1 EMS mit verdecktem API-Schlüssel">
 </p>
 
 **Automatisch erkannte Geräte**
 
 <p align="center">
-  <img src="images/device-overview.jpg" width="900" alt="Home-Assistant-Geräteübersicht für smart1 EMS">
+  <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/device-overview.jpg" width="900" alt="Home-Assistant-Geräteübersicht für smart1 EMS">
 </p>
 
 <details>
   <summary><strong>Batteriekonfiguration für das Energy Dashboard</strong></summary>
   <p align="center">
-    <img src="images/energy-battery.jpg" width="500" alt="Konfiguration von Batterieladung, Entladung, Leistung und Ladezustand">
+    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/energy-battery.jpg" width="500" alt="Konfiguration von Batterieladung, Entladung, Leistung und Ladezustand">
   </p>
 </details>
 
@@ -225,7 +225,7 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 Wenn dir die Integration hilft, kannst du ihre Weiterentwicklung hier
 unterstützen:
 
-[![Buy me a beer](images/buy-me-a-beer.svg)](https://www.buymeacoffee.com/philipp_reede)
+[![Buy me a beer](https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/buy-me-a-beer.svg)](https://www.buymeacoffee.com/philipp_reede)
 
 Weitere technische Details stehen in den englischen
 [`API_NOTES.md`](../API_NOTES.md).
