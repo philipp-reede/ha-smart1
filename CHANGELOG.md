@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.3] - 2026-08-27
+
+### Validation
+
+- Run HACS repository validation without ignored checks in preparation for
+  inclusion in the default HACS catalogue
+- Confirm operation with Energy Hero software `1.28.59` and Home Assistant Core
+  `2026.8.3`
+
+### Documentation
+
+- Record the additional tested software versions in the compatibility matrix
+
 ## [0.6.2] - 2026-08-06
 
 ### Fixed
