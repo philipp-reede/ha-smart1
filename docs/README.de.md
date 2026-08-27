@@ -23,8 +23,9 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 > KI-gestützten Vibe-Coding-Prozess mit OpenAI Codex erstellt. Änderungen werden
 > durch automatisierte Tests und an einer realen smart1 Anlage geprüft.
 
-> Das Projekt ist eine frühe öffentliche Beta-Version. Es wurde mit einer realen
-> smart1 Anlage und Home Assistant 2026.7.4 geprüft.
+> Das Projekt ist eine frühe öffentliche Beta-Version. Es wurde wiederholt mit
+> einer realen smart1 Anlage sowie Home Assistant Core 2026.7.4 und 2026.8.3
+> geprüft.
 
 [English documentation](../README.md) ·
 [Installation](#installation-über-hacs) ·
@@ -96,7 +97,7 @@ Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 
 | Komponente | Getestete Hardware | Getestete Versionen | Validierung | Nachweis |
 | --- | --- | --- | --- | --- |
-| EMS und Portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, Software `1.28.57` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| EMS und Portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, Software `1.28.57` und `1.28.59` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wechselrichter und Speicher | M-TEC Energy Butler 20 kW 3G40 | Firmware `V04.02.00.02-V23.54.05.00` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Zusatzheizung | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, Firmware `V47.22.18.24` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wallbox | KEBA P40 M-TEC | Software `1.4.5` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
@@ -105,7 +106,9 @@ Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 Diese Angaben dokumentieren bestätigte Testkombinationen und keine
 Mindestversionen. Bericht
 [#13](https://github.com/philipp-reede/ha-smart1/issues/13) wurde mit smart1 EMS
-`v0.6.1`, Home Assistant `2026.7.4` und `portal.smart1.eu` erstellt.
+`v0.6.1`, Home Assistant Core `2026.7.4` und `portal.smart1.eu` erstellt. Die
+gleiche Anlage wurde anschließend mit Energy Hero Software `1.28.59` und Home
+Assistant Core `2026.8.3` erneut erfolgreich getestet.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an
@@ -217,8 +220,8 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Wechselrichter-Buskonfiguration und Herstellerprotokolle mit weiteren EMS-
   und Wechselrichterkombinationen prüfen
 - Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
-- Nach breiterer Praxiserprobung die Aufnahme in den HACS-Standardkatalog
-  beantragen
+- Die Aufnahme in den HACS-Standardkatalog abschließen und Rückmeldungen aus dem
+  Review bearbeiten
 
 ## Projekt unterstützen
 

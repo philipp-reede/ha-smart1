@@ -22,8 +22,8 @@ battery, wallbox, heat pump and auxiliary heating.
 > AI-assisted vibe-coding workflow with OpenAI Codex. Changes are covered by
 > automated tests and validated against a real smart1 installation.
 
-> This project is an early public beta. It has been validated with one real
-> smart1 installation and Home Assistant 2026.7.4.
+> This project is an early public beta. It has been validated repeatedly with
+> one real smart1 installation and Home Assistant Core 2026.7.4 and 2026.8.3.
 
 [Deutsche Anleitung](docs/README.de.md) ·
 [Installation](#installation-with-hacs) ·
@@ -99,7 +99,7 @@ been limited to one installation:
 
 | Component | Tested hardware | Tested versions | Validation | Evidence |
 | --- | --- | --- | --- | --- |
-| EMS and portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, software `1.28.57` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| EMS and portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, software `1.28.57` and `1.28.59` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Inverter and battery storage | M-TEC Energy Butler 20 kW 3G40 | Firmware `V04.02.00.02-V23.54.05.00` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Auxiliary heating | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, firmware `V47.22.18.24` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | EV charging | KEBA P40 M-TEC | Software `1.4.5` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
@@ -107,7 +107,9 @@ been limited to one installation:
 
 These are confirmed test combinations, not minimum version requirements.
 Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
-smart1 EMS `v0.6.1` with Home Assistant `2026.7.4` on `portal.smart1.eu`.
+smart1 EMS `v0.6.1` with Home Assistant Core `2026.7.4` on `portal.smart1.eu`.
+The same installation was retested successfully with Energy Hero software
+`1.28.59` and Home Assistant Core `2026.8.3`.
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a
@@ -232,8 +234,7 @@ redact credentials, identifiers and measurements.
   additional EMS and inverter combinations.
 - Make the historical import range configurable if longer or shorter imports
   prove useful across installations.
-- Apply for inclusion in the default HACS catalogue after broader real-world
-  validation.
+- Complete inclusion in the default HACS catalogue and address review feedback.
 
 Technical API findings and implementation details are documented in
 [`API_NOTES.md`](API_NOTES.md).

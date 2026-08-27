@@ -21,9 +21,6 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          # Remove this ignore after smart1_ems is registered in
-          # home-assistant/brands and before applying to hacs/default.
-          ignore: brands
 
   validate-hassfest:
     name: Hassfest
@@ -33,4 +30,3 @@ jobs:
         uses: actions/checkout@v4
       - name: Validate Home Assistant integration
         uses: home-assistant/actions/hassfest@master
-
