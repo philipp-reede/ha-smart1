@@ -15,7 +15,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTemperature,
 )
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .bus import Smart1BusSystem
@@ -159,6 +159,15 @@ def _ems_device_info(entry_id: str) -> dict:
     }
 
 
+def _supports_via_device_id() -> bool:
+    """Return whether this Home Assistant version supports via_device_id."""
+    return "via_device_id" in getattr(
+        dr.DeviceInfo,
+        "__annotations__",
+        {},
+    )
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     devices = hass.data[DOMAIN][entry.entry_id]["devices"]
@@ -166,6 +175,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
     inverters = hass.data[DOMAIN][entry.entry_id].get("inverters", [])
     module_fields = hass.data[DOMAIN][entry.entry_id].get("module_fields", [])
     buses = hass.data[DOMAIN][entry.entry_id].get("buses", [])
+
+    ems_device_id = None
+    if inverters:
+        # Register the parent before its inverter children. Current Home
+        # Assistant versions require its registry ID; older supported versions
+        # still resolve the legacy identifier tuple.
+        ems_device_id = dr.async_get(hass).async_get_or_create(
+            config_entry_id=entry.entry_id,
+            **_ems_device_info(entry.entry_id),
+        ).id
 
     entities = []
 
@@ -201,6 +220,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     pv_strings = coordinator.data.get("pv_strings", {})
     entity_registry = er.async_get(hass)
     for inverter in inverters:
+        assert ems_device_id is not None
         detailed_string_ids = {
             string_id
             for (bus, address, string_id), sample in pv_strings.items()
@@ -241,6 +261,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                         inverter,
                         string_id,
                         metric,
+                        ems_device_id,
                     )
                 )
         entities.append(
@@ -248,6 +269,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 coordinator,
                 entry.entry_id,
                 inverter,
+                ems_device_id,
             )
         )
 
@@ -430,6 +452,7 @@ class Smart1ModuleFieldSensor(SensorEntity):
 def _inverter_device_info(
     entry_id: str,
     inverter: Smart1Inverter,
+    via_device_id: str,
 ) -> dict:
     """Return device registry information for one physical inverter."""
     device_info = {
@@ -438,8 +461,15 @@ def _inverter_device_info(
         or f"Smart1 Inverter B{inverter.bus} A{inverter.address}",
         "manufacturer": inverter.manufacturer or "smart1",
         "model": inverter.model or "Inverter",
-        "via_device": _device_identifier(entry_id, Smart1Category.OTHER),
     }
+    if _supports_via_device_id():
+        device_info["via_device_id"] = via_device_id
+    else:
+        # Home Assistant 2026.7 and earlier do not yet accept via_device_id.
+        device_info["via_device"] = _device_identifier(
+            entry_id,
+            Smart1Category.OTHER,
+        )
     if inverter.serial_number:
         device_info["serial_number"] = inverter.serial_number
     return device_info
@@ -459,6 +489,7 @@ class Smart1InverterStringSensor(CoordinatorEntity, SensorEntity):
         inverter: Smart1Inverter,
         string_id: int,
         metric: Smart1InverterMetric,
+        via_device_id: str,
     ) -> None:
         super().__init__(coordinator)
         self._inverter = inverter
@@ -470,7 +501,11 @@ class Smart1InverterStringSensor(CoordinatorEntity, SensorEntity):
             string_id,
             metric,
         )
-        self._attr_device_info = _inverter_device_info(entry_id, inverter)
+        self._attr_device_info = _inverter_device_info(
+            entry_id,
+            inverter,
+            via_device_id,
+        )
         self._attr_translation_key = metric.translation_key
         self._attr_translation_placeholders = {"string_id": str(string_id)}
         self._attr_device_class = metric.device_class
@@ -527,6 +562,7 @@ class Smart1InverterTemperatureSensor(CoordinatorEntity, SensorEntity):
         coordinator,
         entry_id: str,
         inverter: Smart1Inverter,
+        via_device_id: str,
     ) -> None:
         super().__init__(coordinator)
         self._inverter = inverter
@@ -534,7 +570,11 @@ class Smart1InverterTemperatureSensor(CoordinatorEntity, SensorEntity):
             f"smart1_{entry_id}_inverter_{inverter.bus}_{inverter.address}_"
             "temperature"
         )
-        self._attr_device_info = _inverter_device_info(entry_id, inverter)
+        self._attr_device_info = _inverter_device_info(
+            entry_id,
+            inverter,
+            via_device_id,
+        )
 
     @property
     def native_value(self):

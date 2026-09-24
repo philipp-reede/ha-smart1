@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -87,6 +88,33 @@ class FakeEntityRegistry:
         self.removed.append(entity_id)
 
 
+class FakeDeviceRegistry:
+    def __init__(self) -> None:
+        self.created = []
+
+    def async_get_or_create(self, **kwargs):
+        self.created.append(kwargs)
+        return types.SimpleNamespace(id="ems-device-id")
+
+
+def async_get_device_registry(hass):
+    if not hasattr(hass, "device_registry"):
+        hass.device_registry = FakeDeviceRegistry()
+    return hass.device_registry
+
+
+device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+
+
+class DeviceInfo(dict):
+    __annotations__ = {"via_device_id": str}
+
+
+device_registry.DeviceInfo = DeviceInfo
+device_registry.async_get = async_get_device_registry
+sys.modules["homeassistant.helpers.device_registry"] = device_registry
+
+
 entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
 entity_registry.async_get = lambda hass: hass.entity_registry
 sys.modules["homeassistant.helpers.entity_registry"] = entity_registry
@@ -147,6 +175,7 @@ class InverterSensorTest(unittest.TestCase):
             ),
         }
         self.coordinator = types.SimpleNamespace(data={"pv_strings": self.samples})
+        self.device_registry = FakeDeviceRegistry()
         self.entity_registry = FakeEntityRegistry()
 
     def test_string_sensor_uses_physical_inverter_device(self) -> None:
@@ -156,6 +185,7 @@ class InverterSensorTest(unittest.TestCase):
             self.inverter,
             2,
             sensor_module.INVERTER_STRING_METRICS[2],
+            "ems-device-id",
         )
 
         self.assertEqual(entity.native_value, 450.0)
@@ -168,6 +198,11 @@ class InverterSensorTest(unittest.TestCase):
         )
         self.assertEqual(entity._attr_device_info["name"], "Energy Butler")
         self.assertEqual(entity._attr_device_info["serial_number"], "serial-1")
+        self.assertEqual(
+            entity._attr_device_info["via_device_id"],
+            "ems-device-id",
+        )
+        self.assertNotIn("via_device", entity._attr_device_info)
         self.assertEqual(
             entity.extra_state_attributes,
             {
@@ -182,10 +217,28 @@ class InverterSensorTest(unittest.TestCase):
             self.coordinator,
             "entry-1",
             self.inverter,
+            "ems-device-id",
         )
 
         self.assertEqual(entity.native_value, 42.0)
         self.assertTrue(entity.available)
+
+    def test_inverter_device_info_supports_home_assistant_2026_7(self) -> None:
+        class LegacyDeviceInfo(dict):
+            __annotations__ = {"via_device": tuple}
+
+        with patch.object(sensor_module.dr, "DeviceInfo", LegacyDeviceInfo):
+            device_info = sensor_module._inverter_device_info(
+                "entry-1",
+                self.inverter,
+                "unused-registry-id",
+            )
+
+        self.assertEqual(
+            device_info["via_device"],
+            ("smart1_ems", "entry-1:other"),
+        )
+        self.assertNotIn("via_device_id", device_info)
 
     def test_setup_adds_static_module_field_configuration(self) -> None:
         module_field = module_field_module.Smart1ModuleField(
@@ -208,6 +261,7 @@ class InverterSensorTest(unittest.TestCase):
             string_module_fields=("1", "2"),
         )
         hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
             entity_registry=self.entity_registry,
             data={
                 "smart1_ems": {
@@ -319,6 +373,7 @@ class InverterSensorTest(unittest.TestCase):
 
     def test_setup_adds_three_metrics_per_string_and_temperature(self) -> None:
         hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
             entity_registry=self.entity_registry,
             data={
                 "smart1_ems": {
@@ -359,6 +414,31 @@ class InverterSensorTest(unittest.TestCase):
         self.assertIsInstance(
             added[-1],
             sensor_module.Smart1InverterTemperatureSensor,
+        )
+        self.assertEqual(
+            self.device_registry.created,
+            [
+                {
+                    "config_entry_id": "entry-1",
+                    "identifiers": {("smart1_ems", "entry-1:other")},
+                    "name": "Smart1 EMS",
+                    "manufacturer": "smart1",
+                    "model": "Smart1 EMS",
+                }
+            ],
+        )
+        self.assertTrue(
+            all(
+                entity._attr_device_info["via_device_id"]
+                == "ems-device-id"
+                for entity in added
+            )
+        )
+        self.assertTrue(
+            all(
+                "via_device" not in entity._attr_device_info
+                for entity in added
+            )
         )
 
     def test_setup_prefers_reported_strings_over_metadata(self) -> None:
