@@ -459,6 +459,9 @@ class Smart1PvHistoryImporter:
                 records,
                 local_tz,
             )
+            if not repair and not records:
+                self._last_result = "repair_pending"
+                return
             if self.pv_power_point is None:
                 start_date, baseline_sum = determine_import_window(
                     records,

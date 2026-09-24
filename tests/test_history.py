@@ -159,6 +159,25 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertEqual(start, date(2026, 8, 4))
         self.assertEqual(baseline, 42.5)
 
+    def test_current_day_pv_refresh_waits_for_initial_backfill(self) -> None:
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_daily_energy = AsyncMock()
+
+        asyncio.run(importer.async_import(1, repair=False))
+
+        importer._fetch_daily_energy.assert_not_awaited()
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "repair_pending",
+        )
+
     def test_statistics_are_cumulative_and_hour_aligned(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
 
@@ -984,6 +1003,92 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertEqual(
             importer.diagnostic_status["last_result"],
             "repair_pending",
+        )
+
+    def test_current_day_derived_refresh_waits_for_initial_backfill(
+        self,
+    ) -> None:
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_hourly_energy = AsyncMock()
+
+        asyncio.run(importer.async_import(1, repair=False))
+
+        importer._fetch_hourly_energy.assert_not_awaited()
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "repair_pending",
+        )
+
+    def test_current_day_derived_refresh_skips_uninitialized_role(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        hour_start = datetime.combine(
+            today,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).replace(hour=1).astimezone(timezone.utc)
+        existing_record = {
+            "start": hour_start.timestamp(),
+            "state": 0.25,
+            "sum": 20.0,
+        }
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                ),
+                "wallbox_consumption": types.SimpleNamespace(
+                    id="wallbox",
+                    name="ECar Laden",
+                ),
+            },
+        )
+        importer._existing_statistics = AsyncMock(
+            side_effect=([existing_record], []),
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=(
+                {"grid_import": [(hour_start, 0.5)]},
+                True,
+            )
+        )
+
+        with patch.object(
+            derived_history,
+            "async_add_external_statistics",
+        ) as add_statistics:
+            asyncio.run(importer.async_import(1, repair=False))
+
+        importer._fetch_hourly_energy.assert_awaited_once_with(
+            today,
+            today,
+            local_tz,
+        )
+        add_statistics.assert_called_once()
+        self.assertEqual(
+            add_statistics.call_args.kwargs["metadata"]["statistic_id"],
+            derived_history.statistic_id_for_role("grid_import", "grid"),
         )
 
     def test_hourly_merge_replaces_old_daily_midnight_record(self) -> None:
