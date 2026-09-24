@@ -23,7 +23,8 @@ battery, wallbox, heat pump and auxiliary heating.
 > automated tests and validated against a real smart1 installation.
 
 > This project is an early public beta. It has been validated repeatedly with
-> one real smart1 installation and Home Assistant Core 2026.7.4 and 2026.8.3.
+> one real smart1 installation and Home Assistant Core 2026.7.4, 2026.8.3 and
+> 2026.9.3, most recently on Home Assistant OS 18.3.
 
 [Deutsche Anleitung](docs/README.de.md) ·
 [Installation](#installation-with-hacs) ·
@@ -104,12 +105,15 @@ been limited to one installation:
 | Auxiliary heating | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, firmware `V47.22.18.24` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | EV charging | KEBA P40 M-TEC | Software `1.4.5` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Heat pump | M-TEC AP440 | Not reported | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3` and `2026.9.3`; OS `18.3` tested with Core `2026.9.3` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 
 These are confirmed test combinations, not minimum version requirements.
 Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
 smart1 EMS `v0.6.1` with Home Assistant Core `2026.7.4` on `portal.smart1.eu`.
 The same installation was retested successfully with Energy Hero software
-`1.28.59` and Home Assistant Core `2026.8.3`.
+`1.28.59` and Home Assistant Core `2026.8.3`. The current smart1 EMS release
+`v0.6.3` remains stable with Home Assistant OS `18.3` and Home Assistant Core
+`2026.9.3`.
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a
