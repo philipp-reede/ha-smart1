@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from urllib.parse import quote
@@ -30,12 +31,28 @@ def _redact_secret(value: str, secret: str) -> str:
     return value.replace(secret, "***") if secret else value
 
 
+def sanitize_api_error_code(code: object) -> str:
+    """Return only a conventional three-digit API or HTTP error code."""
+    match = re.match(r"^\s*(\d{3})(?:\D|$)", str(code))
+    return match.group(1) if match else "unknown"
+
+
 class Smart1ApiError(Exception):
     """Sanitized error returned by the smart1 API."""
 
-    def __init__(self, code: str) -> None:
-        self.code = code
-        super().__init__(f"smart1 API error {code}")
+    def __init__(self, code: object) -> None:
+        self.code = sanitize_api_error_code(code)
+        super().__init__(f"smart1 API error {self.code}")
+
+
+def describe_api_error(error: BaseException) -> str:
+    """Return an error description that cannot expose request details."""
+    if isinstance(error, Smart1ApiError):
+        return f"smart1 API error {sanitize_api_error_code(error.code)}"
+
+    # aiohttp exceptions can include the complete request URL in their
+    # message, including the API key. Timeout errors may also wrap them.
+    return type(error).__name__
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +74,7 @@ class Smart1CsvResult:
             "response_columns": list(self.response_columns),
         }
         if self.error_code is not None:
-            result["error_code"] = self.error_code
+            result["error_code"] = sanitize_api_error_code(self.error_code)
         return result
 
 
@@ -87,26 +104,35 @@ class Smart1Api:
 
         _LOGGER.debug("GET %s", safe_url)
 
-        async with self.session.get(url, timeout=30) as response:
-            text = await response.text()
+        try:
+            async with self.session.get(url, timeout=30) as response:
+                text = await response.text()
 
-            if missing_ok and response.status == 404:
-                _LOGGER.debug("No smart1 data for %s", safe_url)
-                return Smart1CsvResult(
-                    rows=[],
-                    endpoint_result="not_found",
-                    response_status=response.status,
-                )
+                if missing_ok and response.status == 404:
+                    _LOGGER.debug("No smart1 data for %s", safe_url)
+                    return Smart1CsvResult(
+                        rows=[],
+                        endpoint_result="not_found",
+                        response_status=response.status,
+                    )
 
-            if response.status >= 400:
-                _LOGGER.error(
-                    "HTTP %s for %s",
-                    response.status,
-                    safe_url,
-                )
-                # aiohttp's ClientResponseError includes the full request URL,
-                # which contains the API key. Raise only a sanitized error.
-                raise Smart1ApiError(str(response.status))
+                if response.status >= 400:
+                    _LOGGER.error(
+                        "HTTP %s for %s",
+                        response.status,
+                        safe_url,
+                    )
+                    # aiohttp's ClientResponseError includes the full request
+                    # URL, which contains the API key. Raise only a sanitized
+                    # error.
+                    raise Smart1ApiError(response.status)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.debug(
+                "Request failed for %s (%s)",
+                safe_url,
+                type(err).__name__,
+            )
+            raise Smart1ApiError("unknown") from None
 
         if not text.strip():
             return Smart1CsvResult(

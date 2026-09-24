@@ -339,13 +339,18 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertAlmostEqual(sum(value for _start, value in result), 116.71)
 
     def test_daily_pv_fetch_reports_failure_after_retries(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+
         class FailingApi:
             def __init__(self) -> None:
                 self.calls = 0
 
             async def get_pv_cumulative_energy(self, *args, **kwargs):
                 self.calls += 1
-                raise aiohttp.ClientError("temporary")
+                raise aiohttp.ClientError(
+                    "Request failed for "
+                    f"https://example.test/?apikey={api_key}"
+                )
 
         api = FailingApi()
         importer = history.Smart1PvHistoryImporter(
@@ -359,7 +364,10 @@ class Smart1HistoryTest(unittest.TestCase):
                 "sleep",
                 new=AsyncMock(),
             ) as sleep,
-            self.assertLogs(history._LOGGER, level="WARNING"),
+            self.assertLogs(
+                history._LOGGER,
+                level="WARNING",
+            ) as captured,
         ):
             result, completed = asyncio.run(
                 importer._fetch_daily_energy(
@@ -375,6 +383,9 @@ class Smart1HistoryTest(unittest.TestCase):
             [awaited.args[0] for awaited in sleep.await_args_list],
             [1, 2],
         )
+        logs = "\n".join(captured.output)
+        self.assertNotIn(api_key, logs)
+        self.assertIn("ClientError", logs)
 
     def test_hourly_pv_replaces_daily_midnight_spike(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
@@ -630,6 +641,53 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertEqual(api.calls, 2)
         sleep.assert_awaited_once_with(1)
         self.assertTrue(result["grid_import"])
+
+    def test_derived_failure_log_does_not_expose_api_key(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+
+        class FailingApi:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_linear_detailed_rows(self, *args, **kwargs):
+                self.calls += 1
+                raise aiohttp.ClientError(
+                    "Request failed for "
+                    f"https://example.test/?apikey={api_key}"
+                )
+
+        api = FailingApi()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(),
+            api,
+            {"grid_import": types.SimpleNamespace(id="grid")},
+        )
+
+        with (
+            patch.object(
+                derived_history.asyncio,
+                "sleep",
+                new=AsyncMock(),
+            ),
+            self.assertLogs(
+                derived_history._LOGGER,
+                level="WARNING",
+            ) as captured,
+        ):
+            result, completed = asyncio.run(
+                importer._fetch_hourly_energy(
+                    date(2026, 8, 3),
+                    date(2026, 8, 3),
+                    ZoneInfo("Europe/Berlin"),
+                )
+            )
+
+        logs = "\n".join(captured.output)
+        self.assertFalse(completed)
+        self.assertEqual(result, {"grid_import": []})
+        self.assertEqual(api.calls, derived_history.FETCH_ATTEMPTS)
+        self.assertNotIn(api_key, logs)
+        self.assertIn("ClientError", logs)
 
     def test_daily_derived_history_triggers_full_hourly_migration(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")

@@ -17,7 +17,7 @@ body:
     id: integration_version
     attributes:
       label: Integration version / Integrationsversion
-      placeholder: v0.6.1
+      placeholder: vX.Y.Z
     validations:
       required: true
 
@@ -25,7 +25,7 @@ body:
     id: home_assistant_version
     attributes:
       label: Home Assistant version / Home-Assistant-Version
-      placeholder: 2026.7.4
+      placeholder: YYYY.M.P
     validations:
       required: true
 

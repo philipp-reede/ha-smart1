@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Security
+
+- Sanitize portal, HTTP and network errors before they reach Home Assistant
+  logs, update failures or downloadable diagnostics
+- Prevent chained client exceptions from exposing request URLs containing the
+  personal API key
+
+### Testing
+
+- Add an integration setup test for startup, six-hour repair and 15-minute
+  current-day history imports
+- Add a pinned Home Assistant `2026.9.3` import smoke test on Python 3.14 to CI
+
+### Reliability
+
+- Let Home Assistant retry required initial discovery failures through
+  `ConfigEntryNotReady` without retaining sensitive client exceptions
+
+### Documentation
+
+- Align project status, compatibility notes and issue templates with the
+  current `v0.6.4` early-beta release
+
 ## [0.6.4] - 2026-09-24
 
 ### Fixed

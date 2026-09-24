@@ -25,7 +25,7 @@ from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .api import Smart1Api, Smart1ApiError
+from .api import Smart1Api, Smart1ApiError, describe_api_error
 from .const import DOMAIN
 from .energy_roles import ENERGY_ROLES_BY_KEY, statistic_id_for_role
 from .history import HISTORY_DAYS, REFRESH_DAYS
@@ -248,7 +248,7 @@ class Smart1DerivedEnergyImporter:
                             "%s after %d attempts: %s",
                             target_date,
                             FETCH_ATTEMPTS,
-                            err,
+                            describe_api_error(err),
                         )
                         return hourly_energy, False
                     await asyncio.sleep(2**attempt)

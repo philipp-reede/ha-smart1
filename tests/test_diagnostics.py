@@ -200,6 +200,20 @@ class Hass:
 
 
 class DiagnosticsTest(unittest.TestCase):
+    def test_bus_error_code_is_sanitized(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+
+        result = diagnostics._bus_diagnostics(
+            [],
+            {
+                "endpoint_result": "api_error",
+                "error_code": f"500: rejected key {api_key}",
+            },
+        )
+
+        self.assertEqual(result["error_code"], "500")
+        self.assertNotIn(api_key, json.dumps(result))
+
     def test_returns_classification_metadata_without_credentials_or_values(
         self,
     ) -> None:

@@ -5,7 +5,8 @@
 - Custom integration loads through Home Assistant
 - Config flow asks for the API key in a translated, masked password field
 - `/plants` is queried automatically
-- A single plant is selected automatically
+- A single plant is selected automatically; when an API key exposes multiple
+  plants, the config flow asks the user to select one
 - Sensors and counters are discovered automatically
 - Live values are fetched through one filtered linear request
 - DataUpdateCoordinator updates values periodically
@@ -26,9 +27,11 @@
 - Inverter diagnostics report only redacted capability metadata and never
   expose inverter IDs, serial numbers, timestamps or measurements
 - Active inverter communication buses are discovered from the optional
-  documented bus endpoint and exposed as static diagnostics on the EMS device
-- Empty bus slots are omitted, and bus diagnostics expose only capability
-  counts instead of manufacturer protocol names
+  documented bus endpoint and exposed as static diagnostic entities on the EMS
+  device
+- Empty bus slots are omitted. Home Assistant entity attributes may show the
+  documented manufacturer protocol names, while the redacted downloadable
+  diagnostics expose only capability counts instead of those names
 - Bus diagnostics distinguish a missing or empty endpoint from an unrecognized
   portal response using only status, row count and column names
 - Measurement roles now share one logical Smart1 EMS device
@@ -37,14 +40,18 @@
   by their parsed smart1 service
 - Multi-device counter calculations remain assigned to the EMS
 - Redacted diagnostics expose classification metadata without credentials or values
+- Portal, HTTP and network errors are reduced to privacy-safe codes or exception
+  types before they reach logs, update failures or downloadable diagnostics;
+  failed required discovery is retried through Home Assistant without retaining
+  the API-key-bearing request exception
 - Diagnostics probe the previous complete day for linear cumulative support
   without exporting IDs, timestamps, or measurements
-- The completed-day probe returned an API error row rather than cumulative
-  measurements for the current installation
+- On the reference installation, the completed-day probe returned an API error
+  row rather than cumulative measurements
 - Diagnostics can calibrate guarded five-minute power integration against the
   exact PV daily total without exporting power or energy values
-- Real-installation calibration produced a 0.43% difference with all 288
-  expected five-minute samples and no skipped gaps
+- Calibration on the reference installation produced a 0.43% difference with
+  all 288 expected five-minute samples and no skipped gaps
 - Integration name and domain are now `smart1 EMS` and `smart1_ems`
 - The latest 365 days of documented PV daily production are imported as
   external long-term statistics in the background
@@ -65,8 +72,13 @@
   exact PV history and statistics from other integrations are not cleared
 - A role without replacement data no longer blocks repairs for other roles;
   transient detailed-history requests are retried before a repair is deferred
+- Since version 0.6.4, an initial PV or derived-energy backfill is written only
+  after the complete requested history range has been fetched. Temporary daily
+  request failures are retried and an incomplete initial import is deferred
+  instead of being stored as a permanent partial baseline
 - Current-day PV and derived statistics refresh every 15 minutes while the
-  wider historical window continues to refresh every six hours
+  wider historical window continues to refresh every six hours. A pending
+  initial repair is not restarted by every current-day refresh
 - Redacted diagnostics expose the history import result and repair state
   without statistic source IDs or measurement values
 - Derived grid import and export statistics were accepted by the real Home
@@ -82,18 +94,30 @@
 - Entities use Home Assistant's device-aware naming convention
 - The repository contains HACS metadata, public installation documentation,
   English and German custom-integration translations, and automated HACS and
-  Hassfest validation for the 0.3.0 public beta
+  Hassfest validation for the current 0.6.4 early-beta release
+- CI also imports every integration module against pinned Home Assistant Core
+  2026.9.3 on Python 3.14, while setup tests cover startup history import and
+  the separate scheduled repair and current-day refresh paths
 - The integration is designed for the documented smart1 portal API generally;
   real-world hardware validation currently covers M-TEC Energy Hero EMS,
-  Energy Heater, Energy Butler inverter/storage and a KEBA wallbox
+  Energy Heater, Energy Butler inverter/storage, M-TEC AP440 heat pump and a
+  KEBA wallbox
+
+## Known limitations
+
+- Device-specific cumulative totals for wallbox, heat pump, heating element,
+  grid and battery are unavailable on the reference installation. Their
+  optional energy statistics are therefore estimates derived from five-minute
+  power samples
+- The version 0.6.4 backfill protection is preventive. Existing historical
+  gaps are not rebuilt automatically because a date for which the portal
+  supplied no data cannot be distinguished reliably from an earlier failed
+  fetch
 
 ## Remaining work
 
 - Validate discovery and device assignment with additional smart1 portals and
   hardware combinations
-- Device-specific cumulative totals for wallbox, heat pump, heating element,
-  grid and battery remain unavailable; their optional energy statistics are
-  estimates derived from five-minute power samples
 - The preferred source needs confirmation where the installation exposes
   multiple measurement paths for one physical device
 - Validate inverter and PV-string diagnostics with additional inverter models,
@@ -103,7 +127,11 @@
 - Validate inverter-bus discovery and manufacturer protocols with additional
   EMS and inverter combinations
 - Add a configurable history range if real-world installations need it
-- Apply for inclusion in the default HACS catalogue after broader validation
+- Add config-entry unique IDs and an explicit reauthentication flow for API-key
+  changes as a separate config-flow improvement
+- Monitor the pending default HACS catalogue review in
+  [hacs/default#10379](https://github.com/hacs/default/pull/10379) and address
+  review feedback
 
 ## Current code behavior
 
@@ -119,7 +147,9 @@ The coordinator currently stores approximately:
 
 `pv_energy_today` is `None` when the optional PV cumulative endpoint is not
 available. `pv_strings` is empty when the optional inverter endpoints are not
-available. Live values continue updating in both cases.
+available. After a successful detailed-inverter update, a transient request
+failure retains the previous `pv_strings` samples. Live values continue
+updating in all cases.
 
 Static module-field metadata is stored separately in the config-entry runtime
 data because it is read only during setup and does not require five-minute

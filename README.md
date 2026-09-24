@@ -42,7 +42,7 @@ battery, wallbox, heat pump and auxiliary heating.
 | Devices | EMS, PV, inverter, grid, battery, wallbox, heat pump and auxiliary heater |
 | Energy Dashboard | PV, grid, battery and selected individual consumers |
 | History | Automatic import of up to 365 days |
-| Tested hardware | M-TEC Energy Hero, Energy Butler, Energy Heater and KEBA wallbox |
+| Tested hardware | M-TEC Energy Hero, Energy Butler, Energy Heater, AP440 heat pump and KEBA wallbox |
 
 ## Features
 
@@ -220,6 +220,10 @@ redact credentials, identifiers and measurements.
 - Non-PV historical energy is derived rather than read from native cumulative
   meter totals because the tested installation does not expose usable linear
   cumulative data.
+- The version 0.6.4 backfill checks prevent incomplete initial imports from
+  creating new permanent gaps. Existing historical gaps cannot be rebuilt
+  automatically because a portal no-data day cannot be distinguished reliably
+  from an earlier failed fetch.
 - Device classification is based on structured interface metadata and known
   smart1 naming conventions; unusual installations may require additional
   mapping rules.

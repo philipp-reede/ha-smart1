@@ -12,7 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .api import Smart1Api, Smart1ApiError
+from .api import Smart1Api, Smart1ApiError, sanitize_api_error_code
 from .bus import Smart1BusSystem
 from .classifier import classify_point
 from .const import DOMAIN
@@ -164,7 +164,11 @@ def _bus_diagnostics(
     ):
         value = endpoint_probe.get(key)
         if isinstance(value, (str, int)):
-            result[key] = value
+            result[key] = (
+                sanitize_api_error_code(value)
+                if key == "error_code"
+                else value
+            )
 
     columns = endpoint_probe.get("response_columns")
     if isinstance(columns, (list, tuple)) and all(
@@ -201,7 +205,7 @@ async def _linear_cumulative_probe(
             "period": "previous_complete_day",
             "requested_points": len(energy_points),
             "result": "api_error",
-            "error_code": err.code,
+            "error_code": sanitize_api_error_code(err.code),
         }
     except (ClientError, TimeoutError) as err:
         return {
@@ -273,7 +277,7 @@ async def _pv_power_integration_probe(
             "period": "previous_complete_day",
             "point_number": point_number,
             "result": "api_error",
-            "error_code": err.code,
+            "error_code": sanitize_api_error_code(err.code),
         }
     except (ClientError, TimeoutError) as err:
         return {

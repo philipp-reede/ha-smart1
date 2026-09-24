@@ -102,7 +102,72 @@ class FailingInverterApi(LiveOnlyApi):
         raise ClientError("No inverter data")
 
 
+class SecretOptionalErrorApi(LiveOnlyApi):
+    def __init__(self, api_key: str) -> None:
+        super().__init__()
+        self.api_key = api_key
+
+    async def get_pv_cumulative_energy(self, *, target_date=None):
+        raise ClientError(
+            f"Request failed for https://example.test/?apikey={self.api_key}"
+        )
+
+    async def get_latest_pv_string_samples(self, **kwargs):
+        raise ClientError(
+            f"Request failed for https://example.test/?apikey={self.api_key}"
+        )
+
+
+class FailingLiveApi:
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+
+    async def get_latest_linear_values(self, *args, **kwargs):
+        raise ClientError(
+            f"Request failed for https://example.test/?apikey={self.api_key}"
+        )
+
+
 class Smart1CoordinatorTest(unittest.TestCase):
+    def test_required_update_failure_does_not_expose_api_key(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        coordinator = Smart1Coordinator(
+            None,
+            FailingLiveApi(api_key),
+            [],
+            ["point-1"],
+        )
+
+        with self.assertRaises(UpdateFailed) as raised:
+            asyncio.run(coordinator._async_update_data())
+
+        self.assertEqual(str(raised.exception), "ClientError")
+        self.assertNotIn(api_key, str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_optional_failure_logs_do_not_expose_api_key(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        coordinator = Smart1Coordinator(
+            None,
+            SecretOptionalErrorApi(api_key),
+            [],
+            ["point-1"],
+            [object()],
+        )
+
+        with self.assertLogs(
+            coordinator_module._LOGGER,
+            level="DEBUG",
+        ) as captured:
+            data = asyncio.run(coordinator._async_update_data())
+
+        logs = "\n".join(captured.output)
+        self.assertNotIn(api_key, logs)
+        self.assertEqual(logs.count("ClientError"), 2)
+        self.assertIsNone(data["pv_energy_today"])
+        self.assertEqual(data["pv_strings"], {})
+
     def test_optional_pv_failure_keeps_live_values(self) -> None:
         api = LiveOnlyApi()
         coordinator = Smart1Coordinator(None, api, [], ["point-1"])
