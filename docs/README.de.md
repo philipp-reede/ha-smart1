@@ -24,8 +24,8 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 > durch automatisierte Tests und an einer realen smart1 Anlage geprüft.
 
 > Das Projekt ist eine frühe öffentliche Beta-Version. Es wurde wiederholt mit
-> einer realen smart1 Anlage sowie Home Assistant Core 2026.7.4 und 2026.8.3
-> geprüft.
+> einer realen smart1 Anlage sowie Home Assistant Core 2026.7.4, 2026.8.3 und
+> 2026.9.3 geprüft, zuletzt unter Home Assistant OS 18.3.
 
 [English documentation](../README.md) ·
 [Installation](#installation-über-hacs) ·
@@ -102,13 +102,16 @@ Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 | Zusatzheizung | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, Firmware `V47.22.18.24` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wallbox | KEBA P40 M-TEC | Software `1.4.5` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wärmepumpe | M-TEC AP440 | Nicht angegeben | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3` und `2026.9.3`; OS `18.3` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 
 Diese Angaben dokumentieren bestätigte Testkombinationen und keine
 Mindestversionen. Bericht
 [#13](https://github.com/philipp-reede/ha-smart1/issues/13) wurde mit smart1 EMS
 `v0.6.1`, Home Assistant Core `2026.7.4` und `portal.smart1.eu` erstellt. Die
 gleiche Anlage wurde anschließend mit Energy Hero Software `1.28.59` und Home
-Assistant Core `2026.8.3` erneut erfolgreich getestet.
+Assistant Core `2026.8.3` erneut erfolgreich getestet. Die aktuelle smart1-EMS-
+Version `v0.6.3` läuft auch unter Home Assistant OS `18.3` mit Home Assistant
+Core `2026.9.3` stabil.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an
