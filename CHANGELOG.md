@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.6] - 2026-09-24
+
+### Fixed
+
+- Use the Home Assistant device registry `via_device_id` for inverter parents
+  on supported Core versions, while retaining compatibility with Home
+  Assistant 2026.7 and earlier
+
 ## [0.6.5] - 2026-09-24
 
 ### Security
