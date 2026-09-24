@@ -25,7 +25,7 @@ from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.util.unit_conversion import EnergyConverter
 
-from .api import Smart1Api, Smart1ApiError
+from .api import Smart1Api, Smart1ApiError, describe_api_error
 from .const import DOMAIN
 from .point import Smart1Point
 from .power_integration import PowerIntegrationResult, integrate_power_rows
@@ -322,7 +322,7 @@ class Smart1PvHistoryImporter:
                             "after %d attempts: %s",
                             target_date,
                             PV_FETCH_ATTEMPTS,
-                            err,
+                            describe_api_error(err),
                         )
                         return daily_energy, False
                     await asyncio.sleep(2**attempt)
@@ -372,7 +372,7 @@ class Smart1PvHistoryImporter:
                                 "%s after %d attempts: %s",
                                 target_date,
                                 PV_FETCH_ATTEMPTS,
-                                err,
+                                describe_api_error(err),
                             )
                             completed = False
                             break
@@ -406,7 +406,7 @@ class Smart1PvHistoryImporter:
                                 "%s after %d attempts: %s",
                                 target_date,
                                 PV_FETCH_ATTEMPTS,
-                                err,
+                                describe_api_error(err),
                             )
                             completed = False
                             break

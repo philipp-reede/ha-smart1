@@ -43,7 +43,7 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 | Geräte | EMS, PV, Wechselrichter, Netz, Batterie, Wallbox, Wärmepumpe und Zusatzheizung |
 | Energy Dashboard | PV, Netz, Batterie und ausgewählte Einzelverbraucher |
 | Historie | Automatischer Import von bis zu 365 Tagen |
-| Getestete Hardware | M-TEC Energy Hero, Energy Butler, Energy Heater und KEBA Wallbox |
+| Getestete Hardware | M-TEC Energy Hero, Energy Butler, Energy Heater, AP440 Wärmepumpe und KEBA Wallbox |
 
 ## Funktionen
 
@@ -207,6 +207,11 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Historische Energiewerte außerhalb der PV-Anlage werden aus
   5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
   verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
+- Die Backfill-Prüfungen ab Version 0.6.4 verhindern, dass unvollständige
+  Erstimporte neue dauerhafte Lücken erzeugen. Bereits vorhandene historische
+  Lücken können nicht automatisch rekonstruiert werden, weil sich ein Tag ohne
+  Portaldaten nicht zuverlässig von einem früher fehlgeschlagenen Abruf
+  unterscheiden lässt.
 - Ungewöhnliche Messpunktnamen oder Schnittstellen-Metadaten können zusätzliche
   Zuordnungsregeln erfordern.
 - Die Integration ist ausschließlich lesend und kann weder das EMS noch

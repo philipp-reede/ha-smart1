@@ -13,6 +13,12 @@ ROOT = Path(__file__).parents[1]
 
 if "aiohttp" not in sys.modules:
     sys.modules["aiohttp"] = types.ModuleType("aiohttp")
+if not hasattr(sys.modules["aiohttp"], "ClientError"):
+    sys.modules["aiohttp"].ClientError = type(
+        "ClientError",
+        (Exception,),
+        {},
+    )
 
 custom_components = sys.modules.setdefault(
     "custom_components",
@@ -29,6 +35,8 @@ smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 api_module = importlib.import_module("custom_components.smart1_ems.api")
 Smart1Api = api_module.Smart1Api
 Smart1ApiError = api_module.Smart1ApiError
+describe_api_error = api_module.describe_api_error
+sanitize_api_error_code = api_module.sanitize_api_error_code
 
 
 class CsvResponse:
@@ -54,6 +62,14 @@ class CsvSession:
         return CsvResponse(self._text, self._status)
 
 
+class FailingSession:
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    def get(self, *args, **kwargs):
+        raise api_module.aiohttp.ClientError(self._message)
+
+
 class RecordingSmart1Api(Smart1Api):
     def __init__(self, rows: list[dict[str, str]]) -> None:
         super().__init__(None, "redacted", "42")
@@ -73,6 +89,50 @@ class RecordingSmart1Api(Smart1Api):
 
 
 class Smart1ApiTest(unittest.TestCase):
+    def test_error_description_does_not_expose_exception_details(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        network_error = type("ClientError", (Exception,), {})(
+            f"Request failed for https://example.test/?apikey={api_key}"
+        )
+        api_error = Smart1ApiError(f"500: rejected key {api_key}")
+
+        self.assertEqual(describe_api_error(network_error), "ClientError")
+        self.assertEqual(describe_api_error(api_error), "smart1 API error 500")
+        self.assertEqual(sanitize_api_error_code(api_error.code), "500")
+        self.assertEqual(str(api_error), "smart1 API error 500")
+        self.assertNotIn(api_key, describe_api_error(network_error))
+        self.assertNotIn(api_key, describe_api_error(api_error))
+        self.assertNotIn(api_key, sanitize_api_error_code(api_error.code))
+        self.assertNotIn(api_key, str(api_error))
+
+    def test_network_error_is_replaced_with_sanitized_api_error(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        api = Smart1Api(
+            FailingSession(
+                f"Request failed for https://example.test/?apikey={api_key}"
+            ),
+            api_key,
+            "42",
+        )
+
+        with self.assertRaises(Smart1ApiError) as raised:
+            asyncio.run(api._get_csv("/test"))
+
+        self.assertEqual(str(raised.exception), "smart1 API error unknown")
+        self.assertNotIn(api_key, str(raised.exception))
+
+    def test_csv_diagnostics_sanitize_embedded_api_error_details(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        result = api_module.Smart1CsvResult(
+            rows=[],
+            endpoint_result="not_found",
+            response_status=200,
+            error_code=f"404: rejected key {api_key}",
+        ).diagnostics()
+
+        self.assertEqual(result["error_code"], "404")
+        self.assertNotIn(api_key, str(result))
+
     def test_pv_cumulative_endpoint_and_conversion(self) -> None:
         api = RecordingSmart1Api(
             [

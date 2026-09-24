@@ -121,11 +121,16 @@ PV cumulative endpoint:
 
 ## Current priorities
 
-1. Validate selected energy roles and their derived statistics in Home Assistant
-2. Confirm the preferred measurement path where the installation exposes
-   duplicate wallbox, heat-pump or heating-element points
-3. Add configurable history range if real-world import duration requires it
-4. Prepare GitHub/HACS release
+1. Monitor default HACS catalogue pull request `hacs/default#10379` and address
+   review feedback
+2. Collect structured compatibility reports from additional smart1 portals and
+   hardware combinations
+3. Confirm the preferred measurement path where installations expose duplicate
+   wallbox, heat-pump or heating-element points
+4. Validate multi-inverter layouts, module-field assignments and active
+   inverter-bus configurations with additional real installations
+5. Add a configurable history range only if real-world import duration or
+   reliability reports demonstrate a need
 
 ## Safety and secrets
 

@@ -17,7 +17,7 @@ body:
     id: integration_version
     attributes:
       label: Integration version / Integrationsversion
-      placeholder: v0.6.1
+      placeholder: vX.Y.Z
     validations:
       required: true
 
@@ -25,7 +25,7 @@ body:
     id: home_assistant_core_version
     attributes:
       label: Home Assistant Core version / Home-Assistant-Core-Version
-      placeholder: 2026.9.3
+      placeholder: YYYY.M.P
     validations:
       required: true
 
@@ -34,7 +34,7 @@ body:
     attributes:
       label: Installation type and Home Assistant OS version (optional) / Installationsart und Home-Assistant-OS-Version (optional)
       description: Examples include Home Assistant OS 18.3, Container or Core. / Beispiele sind Home Assistant OS 18.3, Container oder Core.
-      placeholder: Home Assistant OS 18.3
+      placeholder: Home Assistant OS X.Y / Container / Core
 
   - type: input
     id: portal

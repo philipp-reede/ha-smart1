@@ -34,3 +34,52 @@ jobs:
           python -m json.tool custom_components/smart1_ems/manifest.json >/dev/null
           python -m json.tool custom_components/smart1_ems/translations/en.json >/dev/null
           python -m json.tool custom_components/smart1_ems/translations/de.json >/dev/null
+
+  home-assistant-import:
+    name: Home Assistant 2026.9.3 import smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Home Assistant Core
+        run: python -m pip install --disable-pip-version-check "homeassistant==2026.9.3"
+
+      - name: Import integration modules against Home Assistant
+        run: |
+          python - <<'PY'
+          import importlib
+          from importlib.metadata import version
+          import pkgutil
+          import sys
+
+          expected_python = (3, 14)
+          if sys.version_info[:2] != expected_python:
+              raise RuntimeError(
+                  f"Expected Python {expected_python[0]}.{expected_python[1]}, "
+                  f"got {sys.version_info.major}.{sys.version_info.minor}"
+              )
+
+          package = importlib.import_module("custom_components.smart1_ems")
+          module_names = [
+              module.name
+              for module in pkgutil.iter_modules(
+                  package.__path__,
+                  prefix=f"{package.__name__}.",
+              )
+          ]
+          for module_name in sorted(module_names):
+              importlib.import_module(module_name)
+
+          print(
+              f"Imported {package.__name__} and {len(module_names)} modules "
+              f"with Home Assistant {version('homeassistant')}"
+          )
+          PY

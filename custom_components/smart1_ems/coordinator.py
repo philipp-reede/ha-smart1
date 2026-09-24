@@ -6,7 +6,7 @@ from aiohttp import ClientError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import Smart1ApiError
+from .api import Smart1ApiError, describe_api_error
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,7 +42,9 @@ class Smart1Coordinator(DataUpdateCoordinator):
                 target_date=today,
             )
         except (ClientError, Smart1ApiError, TimeoutError) as err:
-            raise UpdateFailed(str(err)) from err
+            # Client exceptions can contain the request URL and API key. Do
+            # not retain them as a visible chained cause in Home Assistant.
+            raise UpdateFailed(describe_api_error(err)) from None
 
         try:
             pv_energy_today = await self.api.get_pv_cumulative_energy(
@@ -51,7 +53,10 @@ class Smart1Coordinator(DataUpdateCoordinator):
         except (ClientError, Smart1ApiError, TimeoutError) as err:
             # PV production is optional. A missing cumulative endpoint must not
             # make otherwise valid live measurements unavailable.
-            _LOGGER.debug("Unable to update cumulative PV production: %s", err)
+            _LOGGER.debug(
+                "Unable to update cumulative PV production: %s",
+                describe_api_error(err),
+            )
             pv_energy_today = None
 
         pv_strings = {}
@@ -64,7 +69,10 @@ class Smart1Coordinator(DataUpdateCoordinator):
             except (ClientError, Smart1ApiError, TimeoutError) as err:
                 # Detailed inverter diagnostics are optional. Keep the latest
                 # successful values instead of failing all linear entities.
-                _LOGGER.debug("Unable to update inverter diagnostics: %s", err)
+                _LOGGER.debug(
+                    "Unable to update inverter diagnostics: %s",
+                    describe_api_error(err),
+                )
                 previous_data = getattr(self, "data", None) or {}
                 pv_strings = previous_data.get("pv_strings", {})
 
