@@ -290,6 +290,11 @@ class Smart1DerivedEnergyImporter:
                 role_key: await self._existing_statistics(statistic_id)
                 for role_key, statistic_id in statistic_ids.items()
             }
+            roles_without_statistics = {
+                role_key
+                for role_key, records in records_by_role.items()
+                if not records
+            }
             detected_rebuild_roles = {
                 role_key
                 for role_key, records in records_by_role.items()
@@ -304,7 +309,9 @@ class Smart1DerivedEnergyImporter:
             else:
                 rebuild_roles = set()
                 refreshable_roles = (
-                    set(self.role_points) - detected_rebuild_roles
+                    set(self.role_points)
+                    - detected_rebuild_roles
+                    - roles_without_statistics
                 )
                 if not refreshable_roles:
                     self._last_result = "repair_pending"
@@ -326,6 +333,16 @@ class Smart1DerivedEnergyImporter:
                 local_tz,
             )
             self._last_fetch_completed = fetch_completed
+            initial_backfill_roles = (
+                refreshable_roles & roles_without_statistics
+            )
+            if initial_backfill_roles and not fetch_completed:
+                _LOGGER.warning(
+                    "Deferring initial smart1 derived energy import because "
+                    "the history fetch did not complete",
+                )
+                self._last_result = "incomplete_fetch"
+                return
             missing_replacements = {
                 role_key
                 for role_key in rebuild_roles

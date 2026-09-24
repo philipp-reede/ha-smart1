@@ -109,9 +109,9 @@ Mindestversionen. Bericht
 [#13](https://github.com/philipp-reede/ha-smart1/issues/13) wurde mit smart1 EMS
 `v0.6.1`, Home Assistant Core `2026.7.4` und `portal.smart1.eu` erstellt. Die
 gleiche Anlage wurde anschließend mit Energy Hero Software `1.28.59` und Home
-Assistant Core `2026.8.3` erneut erfolgreich getestet. Die aktuelle smart1-EMS-
-Version `v0.6.3` läuft auch unter Home Assistant OS `18.3` mit Home Assistant
-Core `2026.9.3` stabil.
+Assistant Core `2026.8.3` erneut erfolgreich getestet. Version `v0.6.3` wurde
+auch unter Home Assistant OS `18.3` mit Home Assistant Core `2026.9.3`
+erfolgreich getestet.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an
