@@ -22,12 +22,19 @@ body:
       required: true
 
   - type: input
-    id: home_assistant_version
+    id: home_assistant_core_version
     attributes:
-      label: Home Assistant version / Home-Assistant-Version
-      placeholder: 2026.7.4
+      label: Home Assistant Core version / Home-Assistant-Core-Version
+      placeholder: 2026.9.3
     validations:
       required: true
+
+  - type: input
+    id: home_assistant_installation
+    attributes:
+      label: Installation type and Home Assistant OS version (optional) / Installationsart und Home-Assistant-OS-Version (optional)
+      description: Examples include Home Assistant OS 18.3, Container or Core. / Beispiele sind Home Assistant OS 18.3, Container oder Core.
+      placeholder: Home Assistant OS 18.3
 
   - type: input
     id: portal
