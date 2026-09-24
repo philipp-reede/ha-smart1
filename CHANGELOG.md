@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.6.5] - 2026-09-24
 
 ### Security
 
@@ -25,7 +25,7 @@ All notable changes to this project are documented in this file.
 ### Documentation
 
 - Align project status, compatibility notes and issue templates with the
-  current `v0.6.4` early-beta release
+  current `v0.6.5` early-beta release
 
 ## [0.6.4] - 2026-09-24
 
