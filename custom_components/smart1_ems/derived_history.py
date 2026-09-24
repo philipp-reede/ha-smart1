@@ -326,6 +326,18 @@ class Smart1DerivedEnergyImporter:
                 local_tz,
             )
             self._last_fetch_completed = fetch_completed
+            initial_backfill_roles = {
+                role_key
+                for role_key in refreshable_roles
+                if not records_by_role[role_key]
+            }
+            if initial_backfill_roles and not fetch_completed:
+                _LOGGER.warning(
+                    "Deferring initial smart1 derived energy import because "
+                    "the history fetch did not complete",
+                )
+                self._last_result = "incomplete_fetch"
+                return
             missing_replacements = {
                 role_key
                 for role_key in rebuild_roles

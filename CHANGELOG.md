@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.4] - 2026-09-24
+
+### Fixed
+
+- Retry temporary failures while fetching daily photovoltaic history
+- Defer the first photovoltaic or derived-energy backfill when the complete
+  history range could not be fetched, preventing permanent gaps caused by a
+  partial initial import
+- Preserve the existing partial-refresh behavior after statistics have already
+  been established
+
 ## [0.6.3] - 2026-08-27
 
 ### Validation

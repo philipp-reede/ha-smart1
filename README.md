@@ -111,9 +111,8 @@ These are confirmed test combinations, not minimum version requirements.
 Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
 smart1 EMS `v0.6.1` with Home Assistant Core `2026.7.4` on `portal.smart1.eu`.
 The same installation was retested successfully with Energy Hero software
-`1.28.59` and Home Assistant Core `2026.8.3`. The current smart1 EMS release
-`v0.6.3` remains stable with Home Assistant OS `18.3` and Home Assistant Core
-`2026.9.3`.
+`1.28.59` and Home Assistant Core `2026.8.3`. Version `v0.6.3` was also tested
+successfully with Home Assistant OS `18.3` and Home Assistant Core `2026.9.3`.
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a

@@ -302,31 +302,37 @@ class Smart1PvHistoryImporter:
         self,
         start_date: date,
         end_date: date,
-    ) -> list[tuple[date, float]]:
+    ) -> tuple[list[tuple[date, float]], bool]:
         """Fetch daily production without failing on dates with no data."""
         daily_energy: list[tuple[date, float]] = []
         target_date = start_date
 
         while target_date <= end_date:
-            try:
-                value = await self.api.get_pv_cumulative_energy(
-                    target_date=target_date,
-                    missing_ok=True,
-                )
-            except (ClientError, Smart1ApiError, TimeoutError) as err:
-                _LOGGER.warning(
-                    "Unable to import smart1 PV history from %s: %s",
-                    target_date,
-                    err,
-                )
-                break
+            for attempt in range(PV_FETCH_ATTEMPTS):
+                try:
+                    value = await self.api.get_pv_cumulative_energy(
+                        target_date=target_date,
+                        missing_ok=True,
+                    )
+                    break
+                except (ClientError, Smart1ApiError, TimeoutError) as err:
+                    if attempt == PV_FETCH_ATTEMPTS - 1:
+                        _LOGGER.warning(
+                            "Unable to import smart1 PV history from %s "
+                            "after %d attempts: %s",
+                            target_date,
+                            PV_FETCH_ATTEMPTS,
+                            err,
+                        )
+                        return daily_energy, False
+                    await asyncio.sleep(2**attempt)
 
             if value is not None:
                 daily_energy.append((target_date, value))
 
             target_date += timedelta(days=1)
 
-        return daily_energy
+        return daily_energy, True
 
     async def _fetch_hourly_energy(
         self,
@@ -460,11 +466,18 @@ class Smart1PvHistoryImporter:
                     local_tz,
                     refresh_days,
                 )
-                fetched_energy = await self._fetch_daily_energy(
+                fetched_energy, fetch_completed = await self._fetch_daily_energy(
                     start_date,
                     today,
                 )
                 self._last_fetched_days = len(fetched_energy)
+                if not records and not fetch_completed:
+                    _LOGGER.warning(
+                        "Deferring initial smart1 PV history import because "
+                        "the history fetch did not complete",
+                    )
+                    self._last_result = "incomplete_fetch"
+                    return
                 daily_energy = merge_daily_energy(
                     records,
                     fetched_energy,
@@ -512,6 +525,13 @@ class Smart1PvHistoryImporter:
                 )
                 self._last_distributed_days = distributed_days
                 self._last_daily_fallback_days = daily_fallback_days
+                if not records and not fetch_completed:
+                    _LOGGER.warning(
+                        "Deferring initial smart1 PV history import because "
+                        "the history fetch did not complete",
+                    )
+                    self._last_result = "incomplete_fetch"
+                    return
                 hourly_energy = merge_hourly_pv_energy(
                     records,
                     fetched_hourly_energy,
