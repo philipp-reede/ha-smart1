@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from aiohttp import ClientError
@@ -30,6 +31,9 @@ from .history_state import (
     STATISTICS_NAMESPACE_KEY,
     statistics_namespace_for_device,
 )
+
+ENERGY_ROLES_OPTION = "energy_roles"
+ENERGY_ROLES_CONFIGURED_OPTION = "energy_roles_configured"
 
 
 class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -214,6 +218,26 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class Smart1OptionsFlow(OptionsFlowWithReload):
     """Select the source point for each derived energy role."""
 
+    def _configured_energy_role_keys(self) -> set[str]:
+        """Return roles whose selection was explicitly saved before."""
+        role_keys = {role.key for role in ENERGY_ROLES}
+        raw_configured = self.config_entry.options.get(
+            ENERGY_ROLES_CONFIGURED_OPTION
+        )
+        if isinstance(raw_configured, (list, tuple)):
+            return {
+                role_key
+                for role_key in raw_configured
+                if isinstance(role_key, str) and role_key in role_keys
+            }
+
+        # Older options flows only persisted non-empty selections. The
+        # presence of the mapping nevertheless proves that the user saved the
+        # complete form, so every omitted role was explicitly left disabled.
+        if ENERGY_ROLES_OPTION in self.config_entry.options:
+            return role_keys
+        return set()
+
     async def async_step_init(self, user_input=None):
         """Manage smart1 EMS options."""
         runtime_data = self.hass.data.get(DOMAIN, {}).get(
@@ -222,7 +246,16 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
         if runtime_data is None:
             return self.async_abort(reason="not_loaded")
         points = runtime_data["devices"]
-        current_roles = dict(self.config_entry.options.get("energy_roles", {}))
+        raw_current_roles = self.config_entry.options.get(
+            ENERGY_ROLES_OPTION,
+            {},
+        )
+        current_roles = (
+            dict(raw_current_roles)
+            if isinstance(raw_current_roles, Mapping)
+            else {}
+        )
+        configured_roles = self._configured_energy_role_keys()
         recommendations = recommend_energy_roles(points)
         errors = {}
 
@@ -237,7 +270,10 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
                 errors["base"] = "duplicate_energy_point"
             else:
                 new_options = dict(self.config_entry.options)
-                new_options["energy_roles"] = selected_roles
+                new_options[ENERGY_ROLES_OPTION] = selected_roles
+                new_options[ENERGY_ROLES_CONFIGURED_OPTION] = [
+                    role.key for role in ENERGY_ROLES
+                ]
                 return self.async_create_entry(data=new_options)
 
         schema = {}
@@ -251,10 +287,9 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
                 )
                 for point in candidates
             )
-            selected = current_roles.get(
-                role.key,
-                recommendations.get(role.key, ""),
-            )
+            selected = current_roles.get(role.key, "")
+            if not selected and role.key not in configured_roles:
+                selected = recommendations.get(role.key, "")
             if selected and selected not in {
                 point.id for point in candidates
             }:

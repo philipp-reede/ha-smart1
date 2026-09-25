@@ -56,11 +56,15 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
   und konfigurierte Verschattungszeiträume
 - Optionale statische Diagnosen für aktive Wechselrichter-Bussysteme und ihre
   dokumentierten Herstellerprotokolle
+- Automatische Wiederholung und Wiederherstellung, wenn optionale
+  Wechselrichter-, Modulfeld- oder Bus-Topologie beim Start vorübergehend nicht
+  verfügbar ist
 - Ladezustand der Batterie aus dem strukturierten smart1 `SOC`-Signal
 - Exakte PV-Produktion aus dem dokumentierten kumulativen PV-Endpunkt
 - Energy-Dashboard-Statistiken für Netz, Batterie, Wallbox, Wärmepumpe und
   Zusatzheizung
-- Automatischer historischer Import im Hintergrund
+- Automatischer historischer Import im Hintergrund mit persistenter
+  Nachholung nach längeren Home-Assistant- oder Portal-Ausfällen
 - Redigierte Home-Assistant-Diagnosen ohne API-Schlüssel, Anlagen-IDs,
   Messpunkt-IDs oder Messwerte
 
@@ -226,11 +230,14 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Historische Energiewerte außerhalb der PV-Anlage werden aus
   5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
   verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
-- Die Backfill-Prüfungen ab Version 0.6.4 verhindern, dass unvollständige
-  Erstimporte neue dauerhafte Lücken erzeugen. Bereits vorhandene historische
-  Lücken können nicht automatisch rekonstruiert werden, weil sich ein Tag ohne
-  Portaldaten nicht zuverlässig von einem früher fehlgeschlagenen Abruf
-  unterscheiden lässt.
+- Eine persistente Abdeckung je Statistik setzt fehlgeschlagene oder
+  unterbrochene Historienabrufe fort und repariert bei älteren Installationen
+  einmalig das unterstützte Zeitfenster. Ein erfolgreicher Abruf ohne Daten
+  bleibt unbekannt statt null. Innerhalb des unterstützten 365-Tage-Fensters
+  wird der Tag in einer begrenzten Round-Robin-Prüfung einzeln erneut
+  abgefragt; verspätete Portaldaten können so ohne erneuten Jahresimport
+  nachgeholt werden. Außerhalb dieses Fensters ist keine Wiederherstellung
+  möglich.
 - Ungewöhnliche Messpunktnamen oder Schnittstellen-Metadaten können zusätzliche
   Zuordnungsregeln erfordern.
 - Die Integration ist ausschließlich lesend und kann weder das EMS noch

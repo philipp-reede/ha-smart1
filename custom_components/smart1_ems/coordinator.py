@@ -75,6 +75,7 @@ class Smart1Coordinator(DataUpdateCoordinator):
         try:
             pv_energy_today = await self.api.get_pv_cumulative_energy(
                 target_date=today,
+                missing_ok=True,
             )
             pv_cumulative_authoritative = True
         except (ClientError, Smart1ApiError, TimeoutError) as err:

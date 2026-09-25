@@ -168,6 +168,16 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertIsNone(value)
         self.assertTrue(api.missing_ok)
 
+    def test_optional_pv_not_found_does_not_log_an_error(self) -> None:
+        api = Smart1Api(CsvSession("", status=404), "redacted", "42")
+
+        with self.assertNoLogs(api_module._LOGGER, level="ERROR"):
+            value = asyncio.run(
+                api.get_pv_cumulative_energy(missing_ok=True)
+            )
+
+        self.assertIsNone(value)
+
     def test_inverter_metadata_endpoint_is_optional(self) -> None:
         api = RecordingSmart1Api(
             [

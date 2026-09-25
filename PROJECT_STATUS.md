@@ -52,7 +52,8 @@
   temporarily inconclusive during startup, existing PV history is protected.
   A later successful poll persists the capability before requesting one reload,
   so another transient failure during that reload cannot hide PV again
-- A failure of optional PV cumulative data no longer blocks live values
+- A failure of optional PV cumulative data no longer blocks live values.
+  Expected HTTP or embedded 404 responses remain debug-only during polling
 - Physical inverters are discovered from the documented metadata endpoint and
   represented as separate Home Assistant devices
 - The detailed photovoltaic endpoint supplies per-string AC/DC power and DC
@@ -67,6 +68,10 @@
   safely
 - Missing or failed inverter endpoints do not block linear entities, PV totals
   or Energy Dashboard statistics; transient failures retain the latest sample
+- Inverter, module-field and bus topology requests that fail or return an
+  ambiguous schema-free response during setup are retried every 15 minutes.
+  A conclusive recovery is carried through one guarded reload, while explicit
+  optional 404 responses end recovery without creating a reload loop
 - Obsolete inverter, PV-string, module-field and bus entities are removed only
   after the corresponding optional endpoint returns an authoritative known
   topology; missing endpoints, unknown schemas and request failures never
@@ -133,8 +138,18 @@
   the portal's exact daily total
 - An Options Flow lets the user explicitly map grid, battery, wallbox, heat
   pump and auxiliary-heater power points to derived energy roles
+- Empty role selections are persisted as explicit choices, so reopening the
+  Options Flow or saving an unrelated change cannot silently restore automatic
+  recommendations
 - Selected roles are integrated into source-specific external kWh statistics
   with the same 365-day import and three-day refresh behavior
+- Each active storage schema persists its latest contiguous successfully
+  checked history day. Normal catch-up records the successful prefix after any
+  created rows are confirmed in Recorder, so the six-hour repair resumes at
+  the first unchecked day after an interruption or long offline period.
+  Existing completion markers without coverage trigger exactly one supported
+  365-day validation, which can fill older inner gaps when the portal still
+  exposes their data
 - Derived power history is split into UTC-aligned hourly energy statistics;
   existing daily statistics migrate in place without changing statistic IDs
 - Daily-only or non-monotonic derived statistics are repaired under the same
@@ -145,12 +160,15 @@
   history and statistics from other integrations are not cleared
 - A role without replacement samples no longer blocks repairs for other roles
   and its successful empty repair is persisted instead of starting another
-  annual scan six hours later. Transient detailed-history requests are retried
-  before any repair is accepted as complete
-- Since version 0.6.4, an initial PV or derived-energy backfill is written only
-  after the complete requested history range has been fetched. Temporary daily
-  request failures are retried and an incomplete initial import is deferred
-  instead of being stored as a permanent partial baseline
+  annual scan six hours later. No-data days remain in a bounded queue and one
+  old day is retried per statistic and day in round-robin order. Transient
+  detailed-history requests are retried before any repair is accepted as
+  complete
+- Since version 0.6.4, an initial, destructive or schema-replacement PV or
+  derived-energy backfill is written only after the complete requested history
+  range has been fetched. Temporary daily request failures are retried and an
+  incomplete replacement is deferred instead of being stored as a permanent
+  partial baseline
 - Successful initial backfills now persist their schema completion even when
   the portal returns no samples. Legitimate PV daily fallbacks also persist the
   completed hourly schema, preventing repeated year-long repair sweeps while
@@ -177,6 +195,11 @@
   wider historical window continues to refresh every six hours. A pending
   initial repair is neither restarted nor cleared by a current-day refresh;
   other completed roles can still receive their short refresh independently
+- Coverage advances through the contiguous successfully checked prefix; a
+  later request failure leaves the first unchecked date for the next repair.
+  Prefixes with rows advance only after Recorder confirmation. Successful
+  no-data days advance coverage and are retained for bounded, rotating
+  single-day rechecks
 - Destructive history rebuilds wait for Recorder's per-operation completion
   callback before completion state is written. Replacement batches are prepared
   and validated first, then queued immediately behind the clear without an
@@ -264,10 +287,10 @@
   can rebuild them, removes orphaned shared IDs independently of that owner's
   current capabilities, and starts isolated histories for the other entries;
   unavailable older shared history cannot be recovered
-- The version 0.6.4 backfill protection is preventive. Existing historical
-  gaps are not rebuilt automatically because a date for which the portal
-  supplied no data cannot be distinguished reliably from an earlier failed
-  fetch
+- History recovery is bounded to the supported 365-day window. Successful
+  no-data days remain unknown and are retried individually in rotation; data
+  that has aged out of that window, or is no longer exposed by the portal,
+  cannot be recovered
 - Naive portal timestamps contain no daylight-saving-time fold marker and
   their response order is not assumed to be meaningful. Distinct repeated-hour
   profiles are assigned by minimizing adjacent power changes and using nearby

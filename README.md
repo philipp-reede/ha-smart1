@@ -57,13 +57,16 @@ battery, wallbox, heat pump and auxiliary heating.
   and configured shadow intervals
 - Optional static diagnostics for active inverter bus systems and their
   documented manufacturer protocols
+- Automatic retry and recovery when optional inverter, module-field or bus
+  topology is temporarily unavailable during setup
 - Live power, energy, temperature, percentage and diagnostic sensors where the
   portal exposes suitable points
 - Battery state of charge detected from the structured smart1 `SOC` signal
 - Exact PV production from the documented cumulative photovoltaic endpoint
 - Energy Dashboard statistics for grid import/export, battery charge/discharge,
   wallbox, heat pump and auxiliary-heater consumption
-- Automatic background import of up to 365 days of history
+- Automatic background import of up to 365 days of history, with persistent
+  catch-up after longer Home Assistant or portal outages
 - Redacted Home Assistant diagnostics without API keys, plant IDs, linear IDs or
   measurement values
 
@@ -236,10 +239,12 @@ redact credentials, identifiers and measurements.
 - Non-PV historical energy is derived rather than read from native cumulative
   meter totals because the tested installation does not expose usable linear
   cumulative data.
-- The version 0.6.4 backfill checks prevent incomplete initial imports from
-  creating new permanent gaps. Existing historical gaps cannot be rebuilt
-  automatically because a portal no-data day cannot be distinguished reliably
-  from an earlier failed fetch.
+- Persistent per-statistic coverage resumes failed or interrupted history
+  requests and performs one supported-window repair for older installations.
+  A successful no-data response remains unknown rather than becoming zero.
+  Within the supported 365-day window it is retained for bounded round-robin
+  rechecks, one old day at a time, so late portal data can be recovered without
+  repeating a full backfill; data outside that window cannot be recovered.
 - Device classification is based on structured interface metadata and known
   smart1 naming conventions; unusual installations may require additional
   mapping rules.

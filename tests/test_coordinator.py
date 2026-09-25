@@ -85,13 +85,20 @@ Smart1ApiError = coordinator_module.Smart1ApiError
 class LiveOnlyApi:
     def __init__(self) -> None:
         self.target_dates = []
+        self.pv_missing_ok = None
 
     async def get_latest_linear_values(self, linear_ids, *, target_date=None):
         self.target_dates.append(target_date)
         return {linear_id: 123.0 for linear_id in linear_ids}
 
-    async def get_pv_cumulative_energy(self, *, target_date=None):
+    async def get_pv_cumulative_energy(
+        self,
+        *,
+        target_date=None,
+        missing_ok=False,
+    ):
         self.target_dates.append(target_date)
+        self.pv_missing_ok = missing_ok
         raise ClientError("No PV data")
 
 
@@ -108,8 +115,14 @@ class InverterApi(LiveOnlyApi):
 
 
 class EmptySuccessfulPvApi(LiveOnlyApi):
-    async def get_pv_cumulative_energy(self, *, target_date=None):
+    async def get_pv_cumulative_energy(
+        self,
+        *,
+        target_date=None,
+        missing_ok=False,
+    ):
         self.target_dates.append(target_date)
+        self.pv_missing_ok = missing_ok
         return 0.0
 
     async def get_latest_pv_string_samples(self, **kwargs):
@@ -126,7 +139,13 @@ class SecretOptionalErrorApi(LiveOnlyApi):
         super().__init__()
         self.api_key = api_key
 
-    async def get_pv_cumulative_energy(self, *, target_date=None):
+    async def get_pv_cumulative_energy(
+        self,
+        *,
+        target_date=None,
+        missing_ok=False,
+    ):
+        self.pv_missing_ok = missing_ok
         raise ClientError(
             f"Request failed for https://example.test/?apikey={self.api_key}"
         )
@@ -350,6 +369,7 @@ class Smart1CoordinatorTest(unittest.TestCase):
         self.assertFalse(data["pv_cumulative_authoritative"])
         self.assertEqual(data["pv_strings"], {})
         self.assertFalse(data["pv_strings_authoritative"])
+        self.assertTrue(coordinator.api.pv_missing_ok)
 
     def test_optional_pv_failure_keeps_live_values(self) -> None:
         api = LiveOnlyApi()
@@ -361,6 +381,7 @@ class Smart1CoordinatorTest(unittest.TestCase):
         self.assertIsNone(data["pv_energy_today"])
         self.assertFalse(data["pv_cumulative_authoritative"])
         self.assertEqual(data["pv_strings"], {})
+        self.assertTrue(api.pv_missing_ok)
         self.assertEqual(api.target_dates, [date(2026, 8, 4)] * 2)
 
     def test_optional_inverter_values_are_returned(self) -> None:
@@ -395,6 +416,7 @@ class Smart1CoordinatorTest(unittest.TestCase):
 
         self.assertEqual(data["pv_energy_today"], 0.0)
         self.assertTrue(data["pv_cumulative_authoritative"])
+        self.assertTrue(coordinator.api.pv_missing_ok)
         self.assertEqual(data["pv_strings"], {})
         self.assertFalse(data["pv_strings_authoritative"])
 
