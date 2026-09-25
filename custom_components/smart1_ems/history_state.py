@@ -12,7 +12,7 @@ HISTORY_DATA_PRESENCE_KEY = "history_data_presence"
 LEGACY_HISTORY_REBUILD_KEY = "legacy_history_rebuild"
 
 PV_DAILY_HISTORY_SCHEMA_VERSION = 2
-PV_HISTORY_SCHEMA_VERSION = 3
+PV_HISTORY_SCHEMA_VERSION = 4
 DERIVED_HISTORY_SCHEMA_VERSION = 1
 
 
@@ -60,6 +60,14 @@ class Smart1HistoryState:
         """Return whether a full import completed for this schema."""
         return self._versions.get(statistic_id, 0) >= schema_version
 
+    def is_current_schema(
+        self,
+        statistic_id: str,
+        schema_version: int,
+    ) -> bool:
+        """Return whether this is the statistic's active storage schema."""
+        return self._versions.get(statistic_id, 0) == schema_version
+
     def data_presence(
         self,
         statistic_id: str,
@@ -80,13 +88,13 @@ class Smart1HistoryState:
         """Persist a completed import without rewriting unchanged entries."""
         current_version = self._versions.get(statistic_id, 0)
         if (
-            current_version >= schema_version
+            current_version == schema_version
             and self._data_presence.get(statistic_id, {}).get(schema_version)
             is has_data
         ):
             return
 
-        self._versions[statistic_id] = max(current_version, schema_version)
+        self._versions[statistic_id] = schema_version
         self._data_presence.setdefault(statistic_id, {})[schema_version] = (
             has_data
         )

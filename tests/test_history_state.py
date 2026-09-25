@@ -59,17 +59,18 @@ class Smart1HistoryStateTest(unittest.TestCase):
 
         self.assertFalse(state.is_complete("smart1_ems:pv", 2))
         state.mark_complete("smart1_ems:pv", 2, has_data=False)
-        state.mark_complete("smart1_ems:pv", 1, has_data=False)
+        state.mark_complete("smart1_ems:pv", 2, has_data=False)
 
         self.assertTrue(state.is_complete("smart1_ems:pv", 2))
-        self.assertEqual(len(manager.calls), 2)
+        self.assertTrue(state.is_current_schema("smart1_ems:pv", 2))
+        self.assertEqual(len(manager.calls), 1)
         self.assertEqual(
             entry.data[HISTORY_SCHEMA_VERSIONS_KEY],
             {"smart1_ems:pv": 2},
         )
         self.assertEqual(
             entry.data[HISTORY_DATA_PRESENCE_KEY],
-            {"smart1_ems:pv": {"1": False, "2": False}},
+            {"smart1_ems:pv": {"2": False}},
         )
         self.assertIs(
             state.data_presence("smart1_ems:pv", 2),
@@ -77,7 +78,7 @@ class Smart1HistoryStateTest(unittest.TestCase):
         )
         self.assertEqual(entry.data["api_key"], "secret")
 
-    def test_data_presence_is_scoped_to_each_schema_version(self) -> None:
+    def test_schema_switch_preserves_presence_per_schema_version(self) -> None:
         manager = _ConfigEntries()
         hass = types.SimpleNamespace(config_entries=manager)
         entry = types.SimpleNamespace(data={})
@@ -86,12 +87,13 @@ class Smart1HistoryStateTest(unittest.TestCase):
         state.mark_complete("smart1_ems:pv", 3, has_data=True)
         state.mark_complete("smart1_ems:pv", 2, has_data=False)
 
-        self.assertTrue(state.is_complete("smart1_ems:pv", 3))
-        self.assertIs(state.data_presence("smart1_ems:pv", 3), True)
+        self.assertFalse(state.is_complete("smart1_ems:pv", 3))
+        self.assertTrue(state.is_current_schema("smart1_ems:pv", 2))
+        self.assertIs(state.data_presence("smart1_ems:pv", 3), None)
         self.assertIs(state.data_presence("smart1_ems:pv", 2), False)
         self.assertEqual(
             entry.data[HISTORY_SCHEMA_VERSIONS_KEY],
-            {"smart1_ems:pv": 3},
+            {"smart1_ems:pv": 2},
         )
         self.assertEqual(
             entry.data[HISTORY_DATA_PRESENCE_KEY],
@@ -99,7 +101,16 @@ class Smart1HistoryStateTest(unittest.TestCase):
         )
         self.assertEqual(len(manager.calls), 2)
 
+        state.mark_complete("smart1_ems:pv", 3, has_data=True)
+        self.assertTrue(state.is_current_schema("smart1_ems:pv", 3))
+        self.assertIs(state.data_presence("smart1_ems:pv", 3), True)
+        self.assertIs(state.data_presence("smart1_ems:pv", 2), False)
+        self.assertEqual(len(manager.calls), 3)
+
         reloaded_state = Smart1HistoryState(hass, entry)
+        self.assertTrue(
+            reloaded_state.is_current_schema("smart1_ems:pv", 3)
+        )
         self.assertIs(
             reloaded_state.data_presence("smart1_ems:pv", 3),
             True,
@@ -108,6 +119,10 @@ class Smart1HistoryStateTest(unittest.TestCase):
             reloaded_state.data_presence("smart1_ems:pv", 2),
             False,
         )
+
+        state.mark_complete("smart1_ems:pv", 2, has_data=False)
+        self.assertTrue(state.is_current_schema("smart1_ems:pv", 2))
+        self.assertEqual(len(manager.calls), 4)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -73,94 +73,169 @@ def _utc_candidates(
     return (fold_zero,)
 
 
-def _sequence_is_descending(
-    timestamps: list[datetime],
+def _normalize_ambiguous_samples(
+    samples: list[tuple[datetime, float]],
+    local_tz: ZoneInfo,
+) -> list[tuple[datetime, float]]:
+    """Resolve ambiguous wall times from their row-order-independent multiset.
+
+    Exact duplicate rows alone are not evidence that both sides of a
+    daylight-saving-time fold are present. Distinct values at one wall time do
+    prove that the hour repeated. A dense full-hour sequence of duplicates is
+    also accepted so two genuinely identical fold profiles remain usable.
+    """
+    ambiguous_values: defaultdict[datetime, list[float]] = defaultdict(list)
+    non_ambiguous_samples: list[tuple[datetime, float]] = []
+    support_by_date: defaultdict[date, list[datetime]] = defaultdict(list)
+    non_ambiguous_counts: defaultdict[
+        tuple[date, datetime, float], int
+    ] = defaultdict(int)
+
+    for timestamp, value in samples:
+        candidates = _utc_candidates(timestamp, local_tz)
+        if timestamp.tzinfo is None and len(candidates) > 1:
+            ambiguous_values[timestamp].append(value)
+            continue
+
+        non_ambiguous_samples.append((timestamp, value))
+        utc_timestamp = candidates[0]
+        local_date = utc_timestamp.astimezone(local_tz).date()
+        support_by_date[local_date].append(utc_timestamp)
+        non_ambiguous_counts[(local_date, utc_timestamp, value)] += 1
+
+    groups_by_date: defaultdict[
+        date, dict[datetime, list[float]]
+    ] = defaultdict(dict)
+    for timestamp, values in ambiguous_values.items():
+        groups_by_date[timestamp.date()][timestamp] = values
+
+    dates_with_non_ambiguous_duplicates = {
+        local_date
+        for (local_date, _timestamp, _value), count in (
+            non_ambiguous_counts.items()
+        )
+        if count > 1
+    }
+
+    normalized = list(non_ambiguous_samples)
+    for local_date, date_groups in groups_by_date.items():
+        fold_confirmed = any(
+            len(set(values)) > 1 for values in date_groups.values()
+        ) or _has_dense_fold_coverage(
+            date_groups,
+            support_by_date[local_date],
+            local_date in dates_with_non_ambiguous_duplicates,
+            local_tz,
+        )
+
+        single_fold_index = _canonical_single_fold_index(
+            list(date_groups),
+            support_by_date[local_date],
+            local_tz,
+        )
+        for timestamp, values in sorted(date_groups.items()):
+            candidates = _utc_candidates(timestamp, local_tz)
+            unique_values = sorted(set(values))
+            normalized_value = sum(unique_values) / len(unique_values)
+
+            if fold_confirmed and (
+                len(unique_values) > 1 or len(values) > 1
+            ):
+                normalized.extend(
+                    (candidate, normalized_value)
+                    for candidate in candidates
+                )
+                continue
+
+            normalized.append(
+                (candidates[single_fold_index], normalized_value)
+            )
+
+    return normalized
+
+
+def _has_dense_fold_coverage(
+    groups: dict[datetime, list[float]],
+    support: list[datetime],
+    has_non_ambiguous_duplicates: bool,
     local_tz: ZoneInfo,
 ) -> bool:
-    """Return whether the CSV rows are predominantly newest-first."""
-    wall_times = [
-        (
-            timestamp
-            if timestamp.tzinfo is None
-            else timestamp.astimezone(local_tz).replace(tzinfo=None)
-        )
-        for timestamp in timestamps
-    ]
-    ascending_steps = sum(
-        current > previous
-        for previous, current in zip(
-            wall_times,
-            wall_times[1:],
-            strict=False,
-        )
+    """Return whether duplicates densely cover a complete repeated hour."""
+    repeated = sorted(
+        timestamp for timestamp, values in groups.items() if len(values) > 1
     )
-    descending_steps = sum(
-        current < previous
-        for previous, current in zip(
-            wall_times,
-            wall_times[1:],
-            strict=False,
-        )
+    if (
+        len(repeated) < 4
+        or not support
+        or has_non_ambiguous_duplicates
+    ):
+        return False
+
+    candidates = _utc_candidates(repeated[0], local_tz)
+    if len(candidates) < 2:
+        return False
+    fold_duration = candidates[1] - candidates[0]
+    if repeated[-1] - repeated[0] < fold_duration - MAX_SAMPLE_GAP:
+        return False
+
+    return all(
+        current - previous <= MAX_SAMPLE_GAP
+        for previous, current in zip(repeated, repeated[1:], strict=False)
     )
-    if ascending_steps != descending_steps:
-        return descending_steps > ascending_steps
-    return len(wall_times) > 1 and wall_times[-1] < wall_times[0]
+
+
+def _canonical_single_fold_index(
+    wall_times: list[datetime],
+    support: list[datetime],
+    local_tz: ZoneInfo,
+) -> int:
+    """Choose one fold deterministically when only one sample is evidenced."""
+    if not wall_times:
+        return 0
+
+    candidate_count = len(_utc_candidates(wall_times[0], local_tz))
+
+    def score(fold_index: int) -> tuple[int, int, float, int]:
+        timeline = sorted(
+            set(support)
+            | {
+                _utc_candidates(timestamp, local_tz)[fold_index]
+                for timestamp in wall_times
+            }
+        )
+        deltas = [
+            (current - previous).total_seconds()
+            for previous, current in zip(
+                timeline,
+                timeline[1:],
+                strict=False,
+            )
+            if current > previous
+        ]
+        valid = [
+            delta
+            for delta in deltas
+            if delta <= MAX_SAMPLE_GAP.total_seconds()
+        ]
+        return (
+            -len(valid),
+            len(deltas) - len(valid),
+            sum(deltas),
+            fold_index,
+        )
+
+    return min(range(candidate_count), key=score)
 
 
 def _resolve_utc_timestamps(
     timestamps: list[datetime],
     local_tz: ZoneInfo,
 ) -> tuple[datetime, ...]:
-    """Resolve naive ambiguous timestamps while preserving CSV row order."""
-    if not timestamps:
-        return ()
-
+    """Return UTC timestamps after canonical fold normalization."""
     candidate_rows = [
         _utc_candidates(timestamp, local_tz) for timestamp in timestamps
     ]
-    if all(len(candidates) == 1 for candidates in candidate_rows):
-        return tuple(candidates[0] for candidates in candidate_rows)
-
-    descending = _sequence_is_descending(timestamps, local_tz)
-    states: list[tuple[int, float, tuple[datetime, ...]]] = [
-        (0, 0.0, (candidate,)) for candidate in candidate_rows[0]
-    ]
-
-    for candidates in candidate_rows[1:]:
-        next_states: list[tuple[int, float, tuple[datetime, ...]]] = []
-        for candidate in candidates:
-            transitions = []
-            for violations, elapsed, path in states:
-                directional_delta = (
-                    path[-1] - candidate
-                    if descending
-                    else candidate - path[-1]
-                ).total_seconds()
-                transitions.append(
-                    (
-                        violations + (directional_delta < 0),
-                        elapsed + abs(directional_delta),
-                        (*path, candidate),
-                    )
-                )
-            next_states.append(
-                min(
-                    transitions,
-                    key=lambda state: (state[0], state[1]),
-                )
-            )
-        states = next_states
-
-    return min(
-        states,
-        key=lambda state: (
-            state[0],
-            state[1],
-            -state[2][-1].timestamp()
-            if descending
-            else state[2][-1].timestamp(),
-        ),
-    )[2]
+    return tuple(candidates[0] for candidates in candidate_rows)
 
 
 def integrate_power_rows(
@@ -183,6 +258,7 @@ def integrate_power_rows(
 
         parsed_samples.append((timestamp, value))
 
+    parsed_samples = _normalize_ambiguous_samples(parsed_samples, local_tz)
     resolved_timestamps = _resolve_utc_timestamps(
         [timestamp for timestamp, _value in parsed_samples],
         local_tz,
