@@ -149,7 +149,16 @@ def recommend_energy_roles(points: list[Smart1Point]) -> dict[str, str]:
     return recommendations
 
 
-def statistic_id_for_role(role_key: str, point_id: str) -> str:
+def statistic_id_for_role(
+    role_key: str,
+    point_id: str,
+    statistics_namespace: str = "",
+) -> str:
     """Return a stable statistic ID that changes when its source changes."""
     source_hash = sha256(point_id.encode()).hexdigest()[:8]
-    return f"{DOMAIN}:{role_key}_{source_hash}"
+    base_id = f"{DOMAIN}:{role_key}_{source_hash}"
+    return (
+        base_id
+        if not statistics_namespace
+        else f"{base_id}_{statistics_namespace}"
+    )

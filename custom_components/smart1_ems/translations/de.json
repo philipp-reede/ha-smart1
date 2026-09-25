@@ -61,6 +61,9 @@
     },
     "error": {
       "duplicate_energy_point": "Jeder Messpunkt kann nur einer Energierolle zugeordnet werden."
+    },
+    "abort": {
+      "not_loaded": "Der smart1-EMS-Eintrag ist nicht geladen. Aktiviere ihn oder behebe den Einrichtungsfehler, bevor du diese Optionen änderst."
     }
   },
   "entity": {

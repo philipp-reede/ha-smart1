@@ -41,24 +41,126 @@ def _row_value(row: Mapping[str, Any]) -> float | None:
         return None
 
 
-def _row_timestamp(
-    row: Mapping[str, Any],
-    local_tz: ZoneInfo,
-) -> datetime | None:
-    """Return one smart1 timestamp normalized to UTC."""
+def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    """Parse one smart1 timestamp without discarding offset information."""
     raw_timestamp = row.get("Timestamp")
     if not raw_timestamp:
         return None
 
     try:
-        timestamp = datetime.fromisoformat(str(raw_timestamp).strip('"'))
+        return datetime.fromisoformat(str(raw_timestamp).strip('"'))
     except ValueError:
         return None
 
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=local_tz)
 
-    return timestamp.astimezone(timezone.utc)
+def _utc_candidates(
+    timestamp: datetime,
+    local_tz: ZoneInfo,
+) -> tuple[datetime, ...]:
+    """Return possible UTC instants for one parsed timestamp."""
+    if timestamp.tzinfo is not None:
+        return (timestamp.astimezone(timezone.utc),)
+
+    fold_zero = timestamp.replace(tzinfo=local_tz, fold=0).astimezone(
+        timezone.utc
+    )
+    fold_one = timestamp.replace(tzinfo=local_tz, fold=1).astimezone(
+        timezone.utc
+    )
+    if fold_zero < fold_one:
+        # A backward clock change makes the local timestamp ambiguous.
+        return (fold_zero, fold_one)
+    return (fold_zero,)
+
+
+def _sequence_is_descending(
+    timestamps: list[datetime],
+    local_tz: ZoneInfo,
+) -> bool:
+    """Return whether the CSV rows are predominantly newest-first."""
+    wall_times = [
+        (
+            timestamp
+            if timestamp.tzinfo is None
+            else timestamp.astimezone(local_tz).replace(tzinfo=None)
+        )
+        for timestamp in timestamps
+    ]
+    ascending_steps = sum(
+        current > previous
+        for previous, current in zip(
+            wall_times,
+            wall_times[1:],
+            strict=False,
+        )
+    )
+    descending_steps = sum(
+        current < previous
+        for previous, current in zip(
+            wall_times,
+            wall_times[1:],
+            strict=False,
+        )
+    )
+    if ascending_steps != descending_steps:
+        return descending_steps > ascending_steps
+    return len(wall_times) > 1 and wall_times[-1] < wall_times[0]
+
+
+def _resolve_utc_timestamps(
+    timestamps: list[datetime],
+    local_tz: ZoneInfo,
+) -> tuple[datetime, ...]:
+    """Resolve naive ambiguous timestamps while preserving CSV row order."""
+    if not timestamps:
+        return ()
+
+    candidate_rows = [
+        _utc_candidates(timestamp, local_tz) for timestamp in timestamps
+    ]
+    if all(len(candidates) == 1 for candidates in candidate_rows):
+        return tuple(candidates[0] for candidates in candidate_rows)
+
+    descending = _sequence_is_descending(timestamps, local_tz)
+    states: list[tuple[int, float, tuple[datetime, ...]]] = [
+        (0, 0.0, (candidate,)) for candidate in candidate_rows[0]
+    ]
+
+    for candidates in candidate_rows[1:]:
+        next_states: list[tuple[int, float, tuple[datetime, ...]]] = []
+        for candidate in candidates:
+            transitions = []
+            for violations, elapsed, path in states:
+                directional_delta = (
+                    path[-1] - candidate
+                    if descending
+                    else candidate - path[-1]
+                ).total_seconds()
+                transitions.append(
+                    (
+                        violations + (directional_delta < 0),
+                        elapsed + abs(directional_delta),
+                        (*path, candidate),
+                    )
+                )
+            next_states.append(
+                min(
+                    transitions,
+                    key=lambda state: (state[0], state[1]),
+                )
+            )
+        states = next_states
+
+    return min(
+        states,
+        key=lambda state: (
+            state[0],
+            state[1],
+            -state[2][-1].timestamp()
+            if descending
+            else state[2][-1].timestamp(),
+        ),
+    )[2]
 
 
 def integrate_power_rows(
@@ -68,16 +170,28 @@ def integrate_power_rows(
 ) -> PowerIntegrationResult:
     """Integrate one point's W samples into kWh using the trapezoidal rule."""
     samples: dict[datetime, float] = {}
+    parsed_samples: list[tuple[datetime, float]] = []
 
     for row in rows:
         if row.get("LinearId") != linear_id:
             continue
 
-        timestamp = _row_timestamp(row, local_tz)
+        timestamp = _row_timestamp(row)
         value = _row_value(row)
         if timestamp is None or value is None:
             continue
 
+        parsed_samples.append((timestamp, value))
+
+    resolved_timestamps = _resolve_utc_timestamps(
+        [timestamp for timestamp, _value in parsed_samples],
+        local_tz,
+    )
+    for timestamp, (_parsed_timestamp, value) in zip(
+        resolved_timestamps,
+        parsed_samples,
+        strict=True,
+    ):
         samples[timestamp] = value
 
     ordered_samples = sorted(samples.items())

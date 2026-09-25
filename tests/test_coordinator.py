@@ -149,6 +149,34 @@ class FailingApiErrorApi:
         )
 
 
+class EmptyLinearIdsApi(LiveOnlyApi):
+    def __init__(
+        self,
+        error_code: str | None = None,
+        *,
+        device_id: str = "plant-1",
+        plants: list[dict[str, str]] | None = None,
+    ) -> None:
+        super().__init__()
+        self.error_code = error_code
+        self.device_id = device_id
+        self.plants = (
+            [{"DeviceId": " plant-1 "}] if plants is None else plants
+        )
+        self.auth_probe_calls = 0
+        self.live_calls = 0
+
+    async def get_plants(self):
+        self.auth_probe_calls += 1
+        if self.error_code is not None:
+            raise Smart1ApiError(self.error_code)
+        return self.plants
+
+    async def get_latest_linear_values(self, *args, **kwargs):
+        self.live_calls += 1
+        raise AssertionError("Empty point lists must use the auth probe")
+
+
 class Smart1CoordinatorTest(unittest.TestCase):
     def test_coordinator_is_linked_to_config_entry(self) -> None:
         entry = object()
@@ -185,6 +213,70 @@ class Smart1CoordinatorTest(unittest.TestCase):
                 self.assertNotIn(api_key, str(raised.exception))
                 self.assertIsNone(raised.exception.__cause__)
                 self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_empty_linear_ids_use_required_auth_probe(self) -> None:
+        api = EmptyLinearIdsApi()
+        coordinator = Smart1Coordinator(None, api, [], [])
+
+        data = asyncio.run(coordinator._async_update_data())
+
+        self.assertEqual(data["live"], {})
+        self.assertEqual(api.auth_probe_calls, 1)
+        self.assertEqual(api.live_calls, 0)
+
+    def test_empty_linear_ids_auth_failure_requests_reauthentication(
+        self,
+    ) -> None:
+        for error_code in ("401", "403"):
+            with self.subTest(error_code=error_code):
+                api = EmptyLinearIdsApi(error_code)
+                coordinator = Smart1Coordinator(None, api, [], [])
+
+                with self.assertRaises(ConfigEntryAuthFailed) as raised:
+                    asyncio.run(coordinator._async_update_data())
+
+                self.assertEqual(
+                    str(raised.exception),
+                    f"smart1 API error {error_code}",
+                )
+                self.assertEqual(api.auth_probe_calls, 1)
+                self.assertEqual(api.live_calls, 0)
+
+    def test_empty_linear_ids_missing_plant_requests_reauthentication(
+        self,
+    ) -> None:
+        for plants in (
+            [],
+            [{"DeviceId": "other-plant"}],
+            [{"DeviceId": "other-plant"}, {"DeviceName": "No ID"}],
+        ):
+            with self.subTest(plants=plants):
+                api = EmptyLinearIdsApi(plants=plants)
+                coordinator = Smart1Coordinator(None, api, [], [])
+
+                with self.assertRaises(ConfigEntryAuthFailed) as raised:
+                    asyncio.run(coordinator._async_update_data())
+
+                self.assertEqual(
+                    str(raised.exception),
+                    "smart1 installation is no longer accessible",
+                )
+                self.assertNotIn(api.device_id, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(raised.exception.__suppress_context__)
+                self.assertEqual(api.auth_probe_calls, 1)
+                self.assertEqual(api.live_calls, 0)
+
+    def test_empty_linear_ids_probe_failure_remains_update_failed(self) -> None:
+        api = EmptyLinearIdsApi("500")
+        coordinator = Smart1Coordinator(None, api, [], [])
+
+        with self.assertRaises(UpdateFailed) as raised:
+            asyncio.run(coordinator._async_update_data())
+
+        self.assertEqual(str(raised.exception), "smart1 API error 500")
+        self.assertEqual(api.auth_probe_calls, 1)
+        self.assertEqual(api.live_calls, 0)
 
     def test_non_auth_api_failures_remain_update_failed(self) -> None:
         api_key = "fake-api-key-must-not-leak"

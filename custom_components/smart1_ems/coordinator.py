@@ -40,10 +40,30 @@ class Smart1Coordinator(DataUpdateCoordinator):
         today = dt_util.now().date()
 
         try:
-            live_values = await self.api.get_latest_linear_values(
-                self.linear_ids,
-                target_date=today,
-            )
+            if self.linear_ids:
+                live_values = await self.api.get_latest_linear_values(
+                    self.linear_ids,
+                    target_date=today,
+                )
+            else:
+                # An empty point list would otherwise skip the only required
+                # request and allow authentication failures from optional PV
+                # endpoints to go unnoticed indefinitely.
+                plants = await self.api.get_plants()
+                expected_device_id = str(self.api.device_id).strip()
+                if not expected_device_id or not any(
+                    isinstance(plant.get("DeviceId"), str)
+                    and plant["DeviceId"].strip() == expected_device_id
+                    for plant in plants
+                ):
+                    # A still-valid key can remain usable for another account
+                    # or installation after access to this entry was revoked.
+                    # Treat that exactly like rejected credentials so Home
+                    # Assistant starts the existing reauthentication flow.
+                    raise ConfigEntryAuthFailed(
+                        "smart1 installation is no longer accessible"
+                    ) from None
+                live_values = {}
         except (ClientError, Smart1ApiError, TimeoutError) as err:
             if is_auth_error(err):
                 raise ConfigEntryAuthFailed(describe_api_error(err)) from None

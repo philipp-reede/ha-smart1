@@ -11,14 +11,15 @@ permissions:
 
 jobs:
   test:
+    name: Unit tests
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -36,16 +37,16 @@ jobs:
           python -m json.tool custom_components/smart1_ems/translations/de.json >/dev/null
 
   home-assistant-import:
-    name: Home Assistant 2026.9.3 import smoke test
+    name: Home Assistant import smoke test
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 

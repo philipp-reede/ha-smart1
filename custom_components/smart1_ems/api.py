@@ -5,7 +5,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from urllib.parse import quote
 
 import aiohttp
@@ -26,6 +26,26 @@ from .pv import parse_pv_cumulative_energy
 _LOGGER = logging.getLogger(__name__)
 
 AUTH_ERROR_CODES = frozenset({"401", "403"})
+
+
+def _latest_row_timestamp(row: dict[str, str]) -> datetime | None:
+    """Return a comparable timestamp for one detailed linear row."""
+    raw_timestamp = row.get("Timestamp")
+    if not raw_timestamp:
+        return None
+
+    timestamp_text = str(raw_timestamp).strip().strip('"')
+    if timestamp_text.endswith("Z"):
+        timestamp_text = f"{timestamp_text[:-1]}+00:00"
+
+    try:
+        timestamp = datetime.fromisoformat(timestamp_text)
+    except ValueError:
+        return None
+
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    return timestamp
 
 
 def _redact_secret(value: str, secret: str) -> str:
@@ -211,6 +231,18 @@ class Smart1Api:
         )
         return parse_inverters(rows)
 
+    async def get_inverters_with_probe(
+        self,
+        *,
+        missing_ok: bool = False,
+    ) -> tuple[list[Smart1Inverter], dict[str, object]]:
+        """Return inverters and privacy-safe metadata about the raw response."""
+        result = await self._get_csv_result(
+            f"/inverters/{self.device_id}",
+            missing_ok=missing_ok,
+        )
+        return parse_inverters(result.rows), result.diagnostics()
+
     async def get_module_fields(
         self,
         *,
@@ -222,6 +254,18 @@ class Smart1Api:
             missing_ok=missing_ok,
         )
         return parse_module_fields(rows)
+
+    async def get_module_fields_with_probe(
+        self,
+        *,
+        missing_ok: bool = False,
+    ) -> tuple[list[Smart1ModuleField], dict[str, object]]:
+        """Return module fields and privacy-safe raw response metadata."""
+        result = await self._get_csv_result(
+            f"/modulfields/{self.device_id}",
+            missing_ok=missing_ok,
+        )
+        return parse_module_fields(result.rows), result.diagnostics()
 
     async def get_buses(
         self,
@@ -333,6 +377,7 @@ class Smart1Api:
         )
 
         values = {linear_id: None for linear_id in linear_ids}
+        selected_timestamps: dict[str, datetime | None] = {}
 
         for row in rows:
             linear_id = row.get("LinearId")
@@ -351,14 +396,32 @@ class Smart1Api:
                 continue
 
             try:
-                values[linear_id] = float(str(raw).replace(",", "."))
-
+                value = float(str(raw).replace(",", "."))
             except ValueError:
                 _LOGGER.warning(
                     "Cannot parse value '%s' for %s",
                     raw,
                     linear_id,
                 )
+                continue
+
+            timestamp = _latest_row_timestamp(row)
+            if linear_id not in selected_timestamps:
+                values[linear_id] = value
+                selected_timestamps[linear_id] = timestamp
+                continue
+
+            previous_timestamp = selected_timestamps[linear_id]
+            if timestamp is not None and (
+                previous_timestamp is None or timestamp >= previous_timestamp
+            ):
+                values[linear_id] = value
+                selected_timestamps[linear_id] = timestamp
+            elif timestamp is None and previous_timestamp is None:
+                # Older portal variants may omit or return an invalid timestamp.
+                # Preserve their historical behavior by keeping the last valid
+                # numeric row only when neither row can be ordered by time.
+                values[linear_id] = value
 
         return values
 

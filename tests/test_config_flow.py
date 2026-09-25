@@ -236,6 +236,9 @@ class _OptionsFlowWithReload:
     def async_create_entry(self, *, data: dict, **kwargs) -> dict:
         return {"type": "create_entry", "data": data}
 
+    def async_abort(self, *, reason: str) -> dict:
+        return {"type": "abort", "reason": reason}
+
 
 class _ClientError(Exception):
     pass
@@ -419,7 +422,11 @@ class Smart1ConfigFlowTest(unittest.TestCase):
         self.assertEqual(result["title"], "Home")
         self.assertEqual(
             result["data"],
-            {"api_key": "new-key", "device_id": "plant-1"},
+            {
+                "api_key": "new-key",
+                "device_id": "plant-1",
+                "statistics_namespace": "8aac131a20",
+            },
         )
         self.assertEqual(result["unique_id"], "plant-1")
 
@@ -760,6 +767,19 @@ class Smart1OptionsFlowTest(unittest.TestCase):
             {"base": "duplicate_energy_point"},
         )
 
+    def test_unloaded_entry_aborts_without_runtime_data(self) -> None:
+        for hass_data in ({}, {DOMAIN: {}}):
+            with self.subTest(hass_data=hass_data):
+                flow = self._flow()
+                flow.hass.data = hass_data
+
+                result = asyncio.run(flow.async_step_init())
+
+                self.assertEqual(
+                    result,
+                    {"type": "abort", "reason": "not_loaded"},
+                )
+
     def test_distinct_energy_points_preserve_unrelated_options(self) -> None:
         flow = self._flow({
             "active_linear_ids": ["point-import"],
@@ -868,10 +888,14 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(entry.unique_id, "plant-1")
         self.assertEqual(entry.version, 1)
-        self.assertEqual(entry.minor_version, 2)
+        self.assertEqual(entry.minor_version, 3)
         self.assertEqual(
             entry.data,
-            {"api_key": "preserved-key", "device_id": "plant-1"},
+            {
+                "api_key": "preserved-key",
+                "device_id": "plant-1",
+                "statistics_namespace": "",
+            },
         )
         self.assertEqual(
             entry.options,
@@ -882,10 +906,14 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
     def test_migration_is_idempotent_for_current_entry(self) -> None:
         entry = _ConfigEntry(
             entry_id="entry-1",
-            data={"api_key": "key", "device_id": "plant-1"},
+            data={
+                "api_key": "key",
+                "device_id": "plant-1",
+                "statistics_namespace": "",
+            },
             unique_id="plant-1",
             version=1,
-            minor_version=2,
+            minor_version=3,
         )
 
         result, manager = self._migrate(entry)
@@ -964,7 +992,7 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(entry.unique_id, "plant-1")
-        self.assertEqual(entry.minor_version, 2)
+        self.assertEqual(entry.minor_version, 3)
         self.assertEqual(len(manager.update_calls), 1)
 
     def test_migration_prefers_existing_unique_id_owner(self) -> None:
@@ -987,7 +1015,7 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(entry.unique_id, "plant-1")
-        self.assertEqual(entry.minor_version, 2)
+        self.assertEqual(entry.minor_version, 3)
         self.assertEqual(len(manager.update_calls), 1)
 
     def test_migration_prefers_active_entry_over_disabled_duplicate(self) -> None:
@@ -1011,8 +1039,131 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(entry.unique_id, "plant-1")
-        self.assertEqual(entry.minor_version, 2)
+        self.assertEqual(entry.minor_version, 3)
         self.assertEqual(len(manager.update_calls), 1)
+
+    def test_migration_scopes_additional_legacy_installation(self) -> None:
+        entry = _ConfigEntry(
+            entry_id="entry-2",
+            data={"api_key": "key-2", "device_id": "plant-2"},
+            unique_id="plant-2",
+            version=1,
+            minor_version=2,
+        )
+        legacy_owner = _ConfigEntry(
+            entry_id="entry-1",
+            data={"api_key": "key-1", "device_id": "plant-1"},
+            unique_id="plant-1",
+            version=1,
+            minor_version=2,
+        )
+
+        result, manager = self._migrate(entry, [legacy_owner])
+
+        self.assertTrue(result)
+        self.assertEqual(entry.minor_version, 3)
+        self.assertEqual(
+            entry.data["statistics_namespace"],
+            "138a5dd174",
+        )
+        self.assertIs(legacy_owner.data["legacy_history_rebuild"], True)
+        self.assertEqual(len(manager.update_calls), 2)
+
+    def test_multi_install_migration_flags_legacy_owner_owner_first(self) -> None:
+        integration = self._load_integration()
+        owner = _ConfigEntry(
+            entry_id="entry-1",
+            data={"api_key": "key-1", "device_id": "plant-1"},
+            unique_id="plant-1",
+            version=1,
+            minor_version=2,
+        )
+        sibling = _ConfigEntry(
+            entry_id="entry-2",
+            data={"api_key": "key-2", "device_id": "plant-2"},
+            unique_id="plant-2",
+            version=1,
+            minor_version=2,
+        )
+        manager = _ConfigEntriesManager([owner, sibling])
+        hass = types.SimpleNamespace(config_entries=manager)
+
+        self.assertTrue(
+            asyncio.run(integration.async_migrate_entry(hass, owner))
+        )
+        self.assertTrue(
+            asyncio.run(integration.async_migrate_entry(hass, sibling))
+        )
+
+        self.assertEqual(owner.data["statistics_namespace"], "")
+        self.assertIs(owner.data["legacy_history_rebuild"], True)
+        self.assertNotIn("legacy_history_rebuild", sibling.data)
+        self.assertNotEqual(sibling.data["statistics_namespace"], "")
+
+    def test_multi_install_migration_flags_legacy_owner_owner_last(self) -> None:
+        integration = self._load_integration()
+        owner = _ConfigEntry(
+            entry_id="entry-1",
+            data={"api_key": "key-1", "device_id": "plant-1"},
+            unique_id="plant-1",
+            version=1,
+            minor_version=2,
+        )
+        sibling = _ConfigEntry(
+            entry_id="entry-2",
+            data={"api_key": "key-2", "device_id": "plant-2"},
+            unique_id="plant-2",
+            version=1,
+            minor_version=2,
+        )
+        manager = _ConfigEntriesManager([owner, sibling])
+        hass = types.SimpleNamespace(config_entries=manager)
+
+        self.assertTrue(
+            asyncio.run(integration.async_migrate_entry(hass, sibling))
+        )
+        self.assertIs(owner.data["legacy_history_rebuild"], True)
+        self.assertTrue(
+            asyncio.run(integration.async_migrate_entry(hass, owner))
+        )
+
+        self.assertEqual(owner.data["statistics_namespace"], "")
+        self.assertIs(owner.data["legacy_history_rebuild"], True)
+        self.assertNotIn("legacy_history_rebuild", sibling.data)
+        self.assertNotEqual(sibling.data["statistics_namespace"], "")
+
+    def test_modern_scoped_entry_does_not_force_legacy_owner_rebuild(
+        self,
+    ) -> None:
+        integration = self._load_integration()
+        owner = _ConfigEntry(
+            entry_id="entry-1",
+            data={"api_key": "key-1", "device_id": "plant-1"},
+            unique_id="plant-1",
+            version=1,
+            minor_version=2,
+        )
+        modern_sibling = _ConfigEntry(
+            entry_id="entry-2",
+            data={
+                "api_key": "key-2",
+                "device_id": "plant-2",
+                "statistics_namespace": "138a5dd174",
+            },
+            unique_id="plant-2",
+            version=1,
+            minor_version=3,
+        )
+        manager = _ConfigEntriesManager([owner, modern_sibling])
+        hass = types.SimpleNamespace(config_entries=manager)
+
+        self.assertTrue(
+            asyncio.run(integration.async_migrate_entry(hass, owner))
+        )
+
+        self.assertEqual(owner.data["statistics_namespace"], "")
+        self.assertNotIn("legacy_history_rebuild", owner.data)
+        self.assertNotIn("legacy_history_rebuild", modern_sibling.data)
 
 
 if __name__ == "__main__":

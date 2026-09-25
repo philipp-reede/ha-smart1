@@ -79,6 +79,7 @@ update_coordinator.CoordinatorEntity = CoordinatorEntity
 class FakeEntityRegistry:
     def __init__(self) -> None:
         self.entities = {}
+        self.registry_entries = []
         self.removed = []
 
     def async_get_entity_id(self, domain, platform, unique_id):
@@ -86,6 +87,26 @@ class FakeEntityRegistry:
 
     def async_remove(self, entity_id) -> None:
         self.removed.append(entity_id)
+
+    def add_entry(
+        self,
+        entity_id,
+        unique_id,
+        *,
+        config_entry_id="entry-1",
+        domain="sensor",
+        platform="smart1_ems",
+    ) -> None:
+        self.entities[(domain, platform, unique_id)] = entity_id
+        self.registry_entries.append(
+            types.SimpleNamespace(
+                config_entry_id=config_entry_id,
+                domain=domain,
+                entity_id=entity_id,
+                platform=platform,
+                unique_id=unique_id,
+            )
+        )
 
 
 class FakeDeviceRegistry:
@@ -117,6 +138,13 @@ sys.modules["homeassistant.helpers.device_registry"] = device_registry
 
 entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
 entity_registry.async_get = lambda hass: hass.entity_registry
+entity_registry.async_entries_for_config_entry = (
+    lambda registry, entry_id: [
+        entry
+        for entry in registry.registry_entries
+        if entry.config_entry_id == entry_id
+    ]
+)
 sys.modules["homeassistant.helpers.entity_registry"] = entity_registry
 
 custom_components = sys.modules.setdefault(
@@ -461,9 +489,7 @@ class InverterSensorTest(unittest.TestCase):
                     metric,
                 )
                 entity_id = f"sensor.unused_{string_id}_{metric.key}"
-                self.entity_registry.entities[
-                    ("sensor", "smart1_ems", unique_id)
-                ] = entity_id
+                self.entity_registry.add_entry(entity_id, unique_id)
                 inactive_entity_ids.append(entity_id)
 
         hass = types.SimpleNamespace(
@@ -475,6 +501,7 @@ class InverterSensorTest(unittest.TestCase):
                         "devices": [],
                         "discovery": types.SimpleNamespace(has_pv=False),
                         "inverters": [inverter],
+                        "inverter_discovery_authoritative": True,
                     }
                 }
             },
@@ -494,6 +521,271 @@ class InverterSensorTest(unittest.TestCase):
             set(self.entity_registry.removed),
             set(inactive_entity_ids),
         )
+
+    def test_setup_removes_only_stale_owned_topology_after_authoritative_discovery(
+        self,
+    ) -> None:
+        stale_ids = {
+            "sensor.old_string": (
+                "smart1_entry-1_inverter_2_1_string_3_ac_power_w"
+            ),
+            "sensor.old_temperature": (
+                "smart1_entry-1_inverter_2_2_temperature"
+            ),
+            "sensor.old_module": (
+                "smart1_entry-1_module_field_old_tilt_degrees"
+            ),
+            "sensor.old_module_capacity": (
+                "smart1_entry-1_module_field_old_installed_capacity_w"
+            ),
+            "sensor.old_bus": (
+                "smart1_entry-1_inverter_bus_3_configuration"
+            ),
+        }
+        for entity_id, unique_id in stale_ids.items():
+            self.entity_registry.add_entry(entity_id, unique_id)
+
+        preserved_ids = {
+            "sensor.linear": "smart1_entry-1_counter_1_live",
+            "sensor.future_topology": (
+                "smart1_entry-1_inverter_2_1_future_metric"
+            ),
+        }
+        for entity_id, unique_id in preserved_ids.items():
+            self.entity_registry.add_entry(entity_id, unique_id)
+        self.entity_registry.add_entry(
+            "sensor.other_entry",
+            "smart1_other-entry_inverter_2_1_temperature",
+            config_entry_id="other-entry",
+        )
+        self.entity_registry.add_entry(
+            "sensor.other_platform",
+            "smart1_entry-1_inverter_2_1_temperature",
+            platform="other_integration",
+        )
+
+        hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": types.SimpleNamespace(
+                            data={"pv_strings": {}}
+                        ),
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": True,
+                        "module_field_discovery_authoritative": True,
+                        "bus_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(
+            set(self.entity_registry.removed),
+            set(stale_ids),
+        )
+
+    def test_setup_preserves_stale_topology_when_discovery_is_not_authoritative(
+        self,
+    ) -> None:
+        stale_ids = {
+            "sensor.old_string": (
+                "smart1_entry-1_inverter_2_1_string_3_ac_power_w"
+            ),
+            "sensor.old_module": (
+                "smart1_entry-1_module_field_old_tilt_degrees"
+            ),
+            "sensor.old_bus": (
+                "smart1_entry-1_inverter_bus_3_configuration"
+            ),
+        }
+        for entity_id, unique_id in stale_ids.items():
+            self.entity_registry.add_entry(entity_id, unique_id)
+
+        hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": types.SimpleNamespace(
+                            data={"pv_strings": {}}
+                        ),
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [],
+                        "module_fields": [],
+                        "buses": [],
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(self.entity_registry.removed, [])
+
+    def test_module_capacity_waits_for_authoritative_inverter_discovery(
+        self,
+    ) -> None:
+        module_field = module_field_module.Smart1ModuleField(
+            id="Modulfield_1",
+            reference="1",
+            name="West",
+            tilt_degrees=23.0,
+            azimuth_degrees=65.0,
+        )
+        capacity_unique_id = sensor_module._module_field_unique_id(
+            "entry-1",
+            module_field,
+            sensor_module.MODULE_FIELD_METRICS[0],
+        )
+        self.entity_registry.add_entry(
+            "sensor.module_capacity",
+            capacity_unique_id,
+        )
+
+        hass = types.SimpleNamespace(
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": types.SimpleNamespace(
+                            data={"pv_strings": {}}
+                        ),
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [],
+                        "module_fields": [module_field],
+                        "buses": [],
+                        "inverter_discovery_authoritative": False,
+                        "module_field_discovery_authoritative": True,
+                        "bus_discovery_authoritative": False,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(self.entity_registry.removed, [])
+
+    def test_authoritative_discovery_preserves_current_topology(self) -> None:
+        bus = bus_module.Smart1BusSystem(
+            id="Bus2",
+            number=2,
+            configured="ok",
+        )
+        module_field = module_field_module.Smart1ModuleField(
+            id="Modulfield_1",
+            reference="1",
+            tilt_degrees=23.0,
+            azimuth_degrees=65.0,
+        )
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            string_count=1,
+            string_capacities_w=(5000.0,),
+            string_module_fields=("1",),
+        )
+        current_ids = {
+            sensor_module._bus_configuration_unique_id("entry-1", bus),
+            sensor_module._inverter_temperature_unique_id(
+                "entry-1",
+                inverter,
+            ),
+        }
+        current_ids.update(
+            sensor_module._inverter_string_unique_id(
+                "entry-1",
+                inverter,
+                1,
+                metric,
+            )
+            for metric in sensor_module.INVERTER_STRING_METRICS
+        )
+        current_ids.update(
+            sensor_module._module_field_unique_id(
+                "entry-1",
+                module_field,
+                metric,
+            )
+            for metric in sensor_module.MODULE_FIELD_METRICS
+        )
+        for index, unique_id in enumerate(current_ids):
+            self.entity_registry.add_entry(f"sensor.current_{index}", unique_id)
+
+        coordinator = types.SimpleNamespace(
+            data={
+                "pv_strings": {
+                    (2, 1, 1): inverter_module.Smart1PvStringSample(
+                        bus=2,
+                        address=1,
+                        string_id=1,
+                        timestamp="2026-08-05 12:05:00",
+                        ac_power_w=1200.0,
+                        dc_power_w=1300.0,
+                        dc_voltage_v=500.0,
+                        inverter_temperature_c=41.0,
+                    )
+                }
+            }
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                        "module_fields": [module_field],
+                        "buses": [bus],
+                        "inverter_discovery_authoritative": True,
+                        "module_field_discovery_authoritative": True,
+                        "bus_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(self.entity_registry.removed, [])
 
     def test_setup_uses_metadata_before_detailed_rows_are_available(self) -> None:
         inverter = inverter_module.Smart1Inverter(

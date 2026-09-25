@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 from zoneinfo import ZoneInfo
 
 
@@ -89,6 +89,37 @@ history = importlib.import_module("custom_components.smart1_ems.history")
 derived_history = importlib.import_module(
     "custom_components.smart1_ems.derived_history"
 )
+
+
+class _HistoryState:
+    def __init__(self) -> None:
+        self.completed: dict[str, int] = {}
+        self.has_data: dict[tuple[str, int], bool] = {}
+
+    def is_complete(self, statistic_id: str, schema_version: int) -> bool:
+        return self.completed.get(statistic_id, 0) >= schema_version
+
+    def data_presence(
+        self,
+        statistic_id: str,
+        schema_version: int,
+    ) -> bool | None:
+        if not self.is_complete(statistic_id, schema_version):
+            return None
+        return self.has_data.get((statistic_id, schema_version))
+
+    def mark_complete(
+        self,
+        statistic_id: str,
+        schema_version: int,
+        *,
+        has_data: bool,
+    ) -> None:
+        self.completed[statistic_id] = max(
+            self.completed.get(statistic_id, 0),
+            schema_version,
+        )
+        self.has_data[(statistic_id, schema_version)] = has_data
 
 
 class Smart1HistoryTest(unittest.TestCase):
@@ -413,6 +444,37 @@ class Smart1HistoryTest(unittest.TestCase):
 
         self.assertEqual(result, [(midnight, 0.0), (noon, 116.71)])
 
+    def test_daily_fallback_zeroes_stale_hourly_distribution(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        midnight = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        noon = datetime(2026, 8, 3, 12, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        one_pm = datetime(2026, 8, 3, 13, tzinfo=local_tz).astimezone(
+            timezone.utc
+        )
+        records = [
+            {"start": noon.timestamp(), "state": 4.0, "sum": 4.0},
+            {"start": one_pm.timestamp(), "state": 6.0, "sum": 10.0},
+        ]
+
+        merged = history.merge_hourly_pv_energy(
+            records,
+            [(midnight, 10.0)],
+            date(2026, 8, 3),
+            date(2026, 8, 3),
+            local_tz,
+        )
+        statistics_result = history.build_hourly_pv_statistics(merged, 0.0)
+
+        self.assertEqual(
+            merged,
+            [(midnight, 10.0), (noon, 0.0), (one_pm, 0.0)],
+        )
+        self.assertEqual(statistics_result[-1]["sum"], 10.0)
+
     def test_pv_import_migrates_daily_total_under_same_statistic_id(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
         midnight = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
@@ -537,6 +599,477 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertEqual(
             importer.diagnostic_status["last_result"],
             "incomplete_fetch",
+        )
+
+    def test_empty_pv_backfill_is_persisted_and_not_repeated(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_daily_energy = AsyncMock(return_value=([], True))
+
+        asyncio.run(importer.async_import())
+        asyncio.run(importer.async_import())
+        asyncio.run(importer.async_import(1, repair=False))
+
+        self.assertTrue(
+            state.is_complete(
+                importer.statistic_id,
+                importer.schema_version,
+            )
+        )
+        self.assertIs(
+            state.data_presence(
+                importer.statistic_id,
+                importer.schema_version,
+            ),
+            False,
+        )
+        self.assertEqual(
+            importer._fetch_daily_energy.await_args_list,
+            [
+                call(
+                    today - history.timedelta(days=history.HISTORY_DAYS - 1),
+                    today,
+                ),
+                call(
+                    today - history.timedelta(days=history.REFRESH_DAYS - 1),
+                    today,
+                ),
+                call(today, today),
+            ],
+        )
+
+    def test_missing_pv_statistics_trigger_one_full_rebuild(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+            history_state=state,
+        )
+        state.mark_complete(
+            importer.statistic_id,
+            importer.schema_version,
+            has_data=True,
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_daily_energy = AsyncMock(return_value=([], True))
+
+        asyncio.run(importer.async_import())
+        asyncio.run(importer.async_import())
+
+        self.assertEqual(
+            importer._fetch_daily_energy.await_args_list,
+            [
+                call(
+                    today - history.timedelta(days=history.HISTORY_DAYS - 1),
+                    today,
+                ),
+                call(
+                    today - history.timedelta(days=history.REFRESH_DAYS - 1),
+                    today,
+                ),
+            ],
+        )
+        self.assertIs(
+            state.data_presence(
+                importer.statistic_id,
+                importer.schema_version,
+            ),
+            False,
+        )
+
+    def test_pv_empty_marker_changes_when_data_appears(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_daily_energy = AsyncMock(
+            side_effect=[([], True), ([(today, 2.5)], False)]
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock()
+        )
+
+        with (
+            patch.object(
+                history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(history, "async_add_external_statistics"),
+        ):
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import())
+
+        self.assertIs(
+            state.data_presence(
+                importer.statistic_id,
+                importer.schema_version,
+            ),
+            True,
+        )
+
+    def test_daily_pv_fallback_completes_schema_migration_once(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        midnight = datetime.combine(
+            today,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        legacy_record = {
+            "start": midnight.timestamp(),
+            "state": 10.0,
+            "sum": 10.0,
+        }
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+            types.SimpleNamespace(id="pv"),
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[legacy_record]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=([(midnight, 10.0)], True, 0, 1)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock()
+        )
+
+        with (
+            patch.object(
+                history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(history, "async_add_external_statistics"),
+        ):
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import())
+
+        first_start = importer._fetch_hourly_energy.await_args_list[0].args[0]
+        second_start = importer._fetch_hourly_energy.await_args_list[1].args[0]
+        self.assertEqual(
+            first_start,
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+        )
+        self.assertEqual(
+            second_start,
+            today - history.timedelta(days=history.REFRESH_DAYS - 1),
+        )
+        self.assertFalse(importer.diagnostic_status["migration_required"])
+
+    def test_new_power_profile_upgrades_completed_daily_history(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        midnight = datetime.combine(
+            today,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        state = _HistoryState()
+        statistic_id = history.pv_statistic_id()
+        state.mark_complete(
+            statistic_id,
+            history.PV_DAILY_HISTORY_SCHEMA_VERSION,
+            has_data=True,
+        )
+        importer = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            types.SimpleNamespace(id="pv"),
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": midnight.timestamp(),
+                    "state": 10.0,
+                    "sum": 10.0,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=([(midnight, 10.0)], True, 0, 1)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock()
+        )
+
+        with (
+            patch.object(
+                history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(history, "async_add_external_statistics"),
+        ):
+            asyncio.run(importer.async_import())
+
+        self.assertEqual(
+            importer._fetch_hourly_energy.await_args.args[0],
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+        )
+        self.assertTrue(
+            state.is_complete(
+                statistic_id,
+                history.PV_HISTORY_SCHEMA_VERSION,
+            )
+        )
+
+    def test_pv_statistic_id_can_be_scoped_per_installation(self) -> None:
+        first = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(),
+            types.SimpleNamespace(),
+            statistics_namespace="installation-a",
+        )
+        second = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(),
+            types.SimpleNamespace(),
+            statistics_namespace="installation-b",
+        )
+
+        self.assertEqual(
+            first.statistic_id,
+            f"{history.PV_STATISTIC_ID}_installation-a",
+        )
+        self.assertNotEqual(first.statistic_id, second.statistic_id)
+
+    def test_forced_pv_rebuild_clears_legacy_statistic_after_full_fetch(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        noon = datetime.combine(
+            today,
+            datetime.min.time().replace(hour=12),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        state = _HistoryState()
+        importer = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            types.SimpleNamespace(id="pv"),
+            history_state=state,
+            force_initial_rebuild=True,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {"start": noon.timestamp(), "state": 99.0, "sum": 99.0}
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=([(noon, 1.0)], True, 1, 0)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(history, "async_add_external_statistics"),
+        ):
+            asyncio.run(importer.async_import())
+
+        self.assertEqual(
+            importer._fetch_hourly_energy.await_args.args[0],
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+        )
+        self.assertEqual(importer._fetch_hourly_energy.await_args.args[3], {})
+        recorder_instance.async_clear_statistics.assert_called_once_with(
+            [importer.statistic_id]
+        )
+        self.assertTrue(
+            state.is_complete(importer.statistic_id, importer.schema_version)
+        )
+
+    def test_single_entry_adopts_valid_hourly_pv_history(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        existing_start = datetime.combine(
+            today - history.timedelta(days=4),
+            datetime.min.time().replace(hour=12),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        state = _HistoryState()
+        importer = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            types.SimpleNamespace(id="pv"),
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": existing_start.timestamp(),
+                    "state": 1.0,
+                    "sum": 10.0,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=([], True, 0, 0)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+        )
+
+        with patch.object(
+            history,
+            "get_instance",
+            return_value=recorder_instance,
+        ):
+            asyncio.run(importer.async_import())
+
+        self.assertEqual(
+            importer._fetch_hourly_energy.await_args.args[0],
+            today - history.timedelta(days=history.REFRESH_DAYS - 1),
+        )
+        recorder_instance.async_clear_statistics.assert_not_called()
+        self.assertTrue(
+            state.is_complete(importer.statistic_id, importer.schema_version)
+        )
+
+    def test_forced_empty_pv_rebuild_clears_and_marks_complete(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        midnight = datetime.combine(
+            today,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        state = _HistoryState()
+        importer = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            history_state=state,
+            force_initial_rebuild=True,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": midnight.timestamp(),
+                    "state": 99.0,
+                    "sum": 99.0,
+                }
+            ]
+        )
+        importer._fetch_daily_energy = AsyncMock(return_value=([], True))
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(history, "async_add_external_statistics") as add_stats,
+        ):
+            asyncio.run(importer.async_import())
+
+        importer._fetch_daily_energy.assert_awaited_once_with(
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+            today,
+        )
+        recorder_instance.async_clear_statistics.assert_called_once_with(
+            [importer.statistic_id]
+        )
+        add_stats.assert_not_called()
+        self.assertTrue(
+            state.is_complete(importer.statistic_id, importer.schema_version)
+        )
+
+    def test_forced_pv_rebuild_keeps_legacy_data_on_incomplete_fetch(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        state = _HistoryState()
+        importer = history.Smart1PvHistoryImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            history_state=state,
+            force_initial_rebuild=True,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": datetime.now(timezone.utc).timestamp(),
+                    "state": 99.0,
+                    "sum": 99.0,
+                }
+            ]
+        )
+        importer._fetch_daily_energy = AsyncMock(return_value=([], False))
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(history, "async_add_external_statistics") as add_stats,
+        ):
+            asyncio.run(importer.async_import())
+
+        importer._fetch_daily_energy.assert_awaited_once_with(
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+            today,
+        )
+        recorder_instance.async_clear_statistics.assert_not_called()
+        add_stats.assert_not_called()
+        self.assertFalse(
+            state.is_complete(importer.statistic_id, importer.schema_version)
         )
 
     def test_derived_import_fetches_all_selected_points_together(self) -> None:
@@ -1088,6 +1621,433 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertEqual(
             importer.diagnostic_status["last_result"],
             "repair_pending",
+        )
+
+    def test_empty_derived_backfill_is_persisted_and_not_repeated(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=({"grid_import": []}, True)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock(),
+            async_clear_statistics=Mock(),
+        )
+
+        with patch.object(
+            derived_history,
+            "get_instance",
+            return_value=recorder_instance,
+        ):
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import(1, repair=False))
+
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            "grid",
+        )
+        self.assertTrue(
+            state.is_complete(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            )
+        )
+        self.assertIs(
+            state.data_presence(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            ),
+            False,
+        )
+        self.assertEqual(
+            [
+                awaited.args[0]
+                for awaited in importer._fetch_hourly_energy.await_args_list
+            ],
+            [
+                today - history.timedelta(days=history.HISTORY_DAYS - 1),
+                today - history.timedelta(days=history.REFRESH_DAYS - 1),
+                today,
+            ],
+        )
+
+    def test_missing_derived_statistics_trigger_one_full_rebuild(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            history_state=state,
+        )
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            "grid",
+        )
+        state.mark_complete(
+            statistic_id,
+            derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            has_data=True,
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=({"grid_import": []}, True)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock(),
+            async_clear_statistics=Mock(),
+        )
+
+        with patch.object(
+            derived_history,
+            "get_instance",
+            return_value=recorder_instance,
+        ):
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import())
+
+        self.assertEqual(
+            [
+                awaited.args[0]
+                for awaited in importer._fetch_hourly_energy.await_args_list
+            ],
+            [
+                today - history.timedelta(days=history.HISTORY_DAYS - 1),
+                today - history.timedelta(days=history.REFRESH_DAYS - 1),
+            ],
+        )
+        self.assertIs(
+            state.data_presence(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            ),
+            False,
+        )
+
+    def test_derived_empty_marker_changes_when_data_appears(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        hour_start = datetime.combine(
+            today,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_hourly_energy = AsyncMock(
+            side_effect=[
+                ({"grid_import": []}, True),
+                ({"grid_import": [(hour_start, 0.25)]}, False),
+            ]
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock(),
+            async_clear_statistics=Mock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ),
+        ):
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import())
+
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            "grid",
+        )
+        self.assertIs(
+            state.data_presence(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            ),
+            True,
+        )
+
+    def test_derived_statistic_id_uses_installation_namespace(self) -> None:
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            statistics_namespace="installation-a",
+        )
+        hour_start = datetime(2026, 8, 3, tzinfo=timezone.utc)
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=({"grid_import": [(hour_start, 0.25)]}, True)
+        )
+
+        with patch.object(
+            derived_history,
+            "async_add_external_statistics",
+        ) as add_statistics:
+            asyncio.run(importer.async_import())
+
+        self.assertTrue(
+            add_statistics.call_args.kwargs["metadata"]["statistic_id"].endswith(
+                "_installation-a"
+            )
+        )
+
+    def test_forced_empty_derived_rebuild_clears_and_marks_complete(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        hour_start = datetime.now(timezone.utc).replace(
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            history_state=state,
+            force_initial_rebuild=True,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": hour_start.timestamp(),
+                    "state": 99.0,
+                    "sum": 99.0,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=({"grid_import": []}, True)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_stats,
+        ):
+            asyncio.run(importer.async_import())
+
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            "grid",
+        )
+        importer._fetch_hourly_energy.assert_awaited_once_with(
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+            today,
+            local_tz,
+        )
+        recorder_instance.async_clear_statistics.assert_called_once_with(
+            [statistic_id]
+        )
+        add_stats.assert_not_called()
+        self.assertTrue(
+            state.is_complete(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            )
+        )
+
+    def test_single_entry_adopts_valid_hourly_derived_history(self) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        existing_start = datetime.combine(
+            today - history.timedelta(days=4),
+            datetime.min.time().replace(hour=12),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": existing_start.timestamp(),
+                    "state": 1.0,
+                    "sum": 10.0,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=({"grid_import": []}, True)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+        )
+
+        with patch.object(
+            derived_history,
+            "get_instance",
+            return_value=recorder_instance,
+        ):
+            asyncio.run(importer.async_import())
+
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            "grid",
+        )
+        self.assertEqual(
+            importer._fetch_hourly_energy.await_args.args[0],
+            today - history.timedelta(days=history.REFRESH_DAYS - 1),
+        )
+        recorder_instance.async_clear_statistics.assert_not_called()
+        self.assertTrue(
+            state.is_complete(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            )
+        )
+
+    def test_forced_derived_rebuild_keeps_legacy_data_on_incomplete_fetch(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        hour_start = datetime.now(timezone.utc).replace(
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            history_state=state,
+            force_initial_rebuild=True,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": hour_start.timestamp(),
+                    "state": 99.0,
+                    "sum": 99.0,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=({"grid_import": []}, False)
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_stats,
+        ):
+            asyncio.run(importer.async_import())
+
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            "grid",
+        )
+        importer._fetch_hourly_energy.assert_awaited_once_with(
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+            today,
+            local_tz,
+        )
+        recorder_instance.async_clear_statistics.assert_not_called()
+        add_stats.assert_not_called()
+        self.assertFalse(
+            state.is_complete(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            )
         )
 
     def test_current_day_derived_refresh_skips_uninitialized_role(
