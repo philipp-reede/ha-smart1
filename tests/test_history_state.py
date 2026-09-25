@@ -24,6 +24,7 @@ HISTORY_EMPTY_RETRY_CURSORS_KEY = (
     history_state.HISTORY_EMPTY_RETRY_CURSORS_KEY
 )
 HISTORY_EMPTY_RETRY_RUNS_KEY = history_state.HISTORY_EMPTY_RETRY_RUNS_KEY
+HISTORY_SOURCE_TIME_ZONES_KEY = history_state.HISTORY_SOURCE_TIME_ZONES_KEY
 Smart1HistoryState = history_state.Smart1HistoryState
 scoped_statistic_id = history_state.scoped_statistic_id
 statistics_namespace_for_device = history_state.statistics_namespace_for_device
@@ -335,6 +336,10 @@ class Smart1HistoryStateTest(unittest.TestCase):
                     removed_id: {"1": "2026-08-25"},
                     retained_id: {"4": "2026-09-25"},
                 },
+                HISTORY_SOURCE_TIME_ZONES_KEY: {
+                    removed_id: "Asia/Kathmandu",
+                    retained_id: "Europe/Berlin",
+                },
             }
         )
         state = Smart1HistoryState(hass, entry)
@@ -351,6 +356,14 @@ class Smart1HistoryStateTest(unittest.TestCase):
             entry.data[HISTORY_DATA_PRESENCE_KEY],
         )
         self.assertNotIn(removed_id, entry.data[HISTORY_COVERAGE_KEY])
+        self.assertNotIn(
+            removed_id,
+            entry.data[HISTORY_SOURCE_TIME_ZONES_KEY],
+        )
+        self.assertEqual(
+            entry.data[HISTORY_SOURCE_TIME_ZONES_KEY][retained_id],
+            "Europe/Berlin",
+        )
         self.assertEqual(
             entry.data[HISTORY_SCHEMA_VERSIONS_KEY][retained_id],
             4,
@@ -384,6 +397,61 @@ class Smart1HistoryStateTest(unittest.TestCase):
             2,
         )
         self.assertEqual(len(manager.calls), 1)
+
+    def test_source_timezone_is_committed_atomically_with_scan_state(
+        self,
+    ) -> None:
+        statistic_id = "smart1_ems:pv_production"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(data={})
+        state = Smart1HistoryState(hass, entry)
+
+        self.assertIsNone(state.source_time_zone(statistic_id))
+        self.assertTrue(
+            state.commit_scan_if_unchanged(
+                statistic_id,
+                5,
+                has_data=True,
+                expected_version=0,
+                checked_through=date(2026, 9, 25),
+                empty_days=set(),
+                nonempty_days={date(2026, 9, 25)},
+                oldest_supported=date(2025, 9, 26),
+                source_time_zone="Asia/Kathmandu",
+            )
+        )
+        self.assertEqual(
+            state.source_time_zone(statistic_id),
+            "Asia/Kathmandu",
+        )
+        self.assertEqual(
+            entry.data[HISTORY_SOURCE_TIME_ZONES_KEY],
+            {statistic_id: "Asia/Kathmandu"},
+        )
+
+        reloaded = Smart1HistoryState(hass, entry)
+        self.assertEqual(
+            reloaded.source_time_zone(statistic_id),
+            "Asia/Kathmandu",
+        )
+        self.assertFalse(
+            reloaded.commit_scan_if_unchanged(
+                statistic_id,
+                5,
+                has_data=True,
+                expected_version=0,
+                checked_through=date(2026, 9, 25),
+                empty_days=set(),
+                nonempty_days=set(),
+                oldest_supported=date(2025, 9, 26),
+                source_time_zone="Europe/Berlin",
+            )
+        )
+        self.assertEqual(
+            reloaded.source_time_zone(statistic_id),
+            "Asia/Kathmandu",
+        )
 
     def test_late_completion_requires_unchanged_generation(self) -> None:
         statistic_id = "smart1_ems:pv_production"

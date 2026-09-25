@@ -477,6 +477,90 @@ class PowerIntegrationTest(unittest.TestCase):
                 ):
                     self.assertAlmostEqual(energy, reference_energy)
 
+    def test_streamed_days_match_continuous_dst_integration(self) -> None:
+        first_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "0")
+            for minute in range(0, 60, 5)
+        ]
+        second_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "2000")
+            for minute in range(0, 60, 5)
+        ]
+        interleaved = [
+            sample
+            for pair in zip(first_fold, second_fold, strict=True)
+            for sample in pair
+        ]
+        shuffled = list(interleaved)
+        Random(23).shuffle(shuffled)
+        second_day = [
+            row("2026-10-26 00:00:00", "2000"),
+            row("2026-10-26 00:05:00", "2000"),
+        ]
+
+        for index, fold_rows in enumerate(
+            (
+                [*first_fold, *second_fold],
+                interleaved,
+                shuffled,
+                list(reversed(interleaved)),
+            )
+        ):
+            with self.subTest(order=index):
+                first_day = [
+                    row("2026-10-25 01:55:00", "0"),
+                    *fold_rows,
+                    row("2026-10-25 03:00:00", "2000"),
+                    row("2026-10-25 23:55:00", "2000"),
+                ]
+                reference = power_integration.integrate_power_rows(
+                    [*first_day, *second_day],
+                    "pv",
+                    ZoneInfo("Europe/Berlin"),
+                )
+                first_samples = power_integration.normalize_power_rows(
+                    first_day,
+                    "pv",
+                    ZoneInfo("Europe/Berlin"),
+                )
+                second_samples = power_integration.normalize_power_rows(
+                    list(reversed(second_day)),
+                    "pv",
+                    ZoneInfo("Europe/Berlin"),
+                )
+                streamed = (
+                    power_integration.integrate_power_samples(first_samples),
+                    power_integration.integrate_power_samples(
+                        (first_samples[-1], second_samples[0])
+                    ),
+                    power_integration.integrate_power_samples(second_samples),
+                )
+                streamed_hourly: dict[datetime, float] = {}
+                for integration in streamed:
+                    for start, energy in integration.hourly_energy_kwh:
+                        streamed_hourly[start] = (
+                            streamed_hourly.get(start, 0.0) + energy
+                        )
+
+                self.assertEqual(
+                    sum(item.integrated_intervals for item in streamed),
+                    reference.integrated_intervals,
+                )
+                self.assertEqual(
+                    sum(item.skipped_gaps for item in streamed),
+                    reference.skipped_gaps,
+                )
+                self.assertAlmostEqual(
+                    sum(item.energy_kwh for item in streamed),
+                    reference.energy_kwh,
+                )
+                self.assertEqual(
+                    set(streamed_hourly),
+                    {start for start, _energy in reference.hourly_energy_kwh},
+                )
+                for start, energy in reference.hourly_energy_kwh:
+                    self.assertAlmostEqual(streamed_hourly[start], energy)
+
 
 if __name__ == "__main__":
     unittest.main()
