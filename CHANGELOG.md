@@ -6,21 +6,46 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Repair detected daily or non-monotonic derived-energy statistics with
+  non-destructive upserts instead of clearing the complete statistic, so a
+  partial replacement cannot delete valid history outside the returned data
+- Persist successful empty derived-energy repairs and preserve their existing
+  rows, preventing another 365-day request sweep every six hours
 - Stop completed sparse derived-energy statistics from being mistaken for
-  legacy daily data and rebuilt over 365 days every six hours, while retaining
-  the full rebuild for decreasing cumulative sums
+  legacy daily data while retaining the full-window repair for decreasing
+  cumulative sums
 - Replace stale derived-energy hours with zero-value tombstones when a
   successfully refreshed local day no longer contains those hours
 - Track the currently active photovoltaic history schema so temporary switches
   between hourly and daily storage trigger one complete hourly repair instead
   of leaving older midnight buckets behind
-- Preserve both occurrences of ambiguous daylight-saving-time samples when
-  naive portal rows are interleaved by local wall time
+- Continue cumulative photovoltaic sums from the last Recorder value before a
+  full 365-day schema-repair window instead of restarting them at zero
+- Preserve distinct power profiles and both UTC occurrences of complete
+  ambiguous daylight-saving-time samples when naive portal rows are grouped,
+  interleaved, reversed, shuffled or duplicated
+- Normalize systematically duplicated CSV responses without letting one
+  isolated support-row duplicate collapse an evidenced repeated hour
+- Remove orphaned unscoped multi-plant statistics independently of the legacy
+  owner's currently detected PV and Energy-role capabilities
+
+### Reliability
+
+- Wait for Recorder's operation-specific clear callback with a bounded timeout
+  before deleting state or writing replacement statistics
+- Keep Recorder metadata discovery for legacy cleanup best-effort so a
+  temporary lookup failure cannot block live entities and is retried after a
+  later setup
+- Limit 15-minute current-day refreshes to the recent Recorder rows required
+  for their baseline while retaining the full lookback for six-hour repairs
 
 ### Testing
 
 - Cover recovery from an incomplete initial 365-day derived-history fetch on
   the next successful attempt
+- Cover partial and empty derived repairs, photovoltaic baseline continuity,
+  multi-plant orphan cleanup, Recorder clear callbacks and distinct DST-fold
+  profiles, including isolated and response-wide duplicate rows
 
 ## [0.7.1] - 2026-09-25
 

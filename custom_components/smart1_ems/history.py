@@ -35,14 +35,16 @@ from .history_state import (
 )
 from .point import Smart1Point
 from .power_integration import PowerIntegrationResult, integrate_power_rows
+from .recorder_helpers import async_clear_statistics
 
 _LOGGER = logging.getLogger(__name__)
 
 HISTORY_DAYS = 365
 REFRESH_DAYS = 3
+MAX_HOURLY_RECORDS_PER_DAY = 25
 PV_STATISTIC_ID = f"{DOMAIN}:pv_production"
 PV_FETCH_ATTEMPTS = 3
-PV_STATISTICS_LOOKBACK = HISTORY_DAYS * 25
+PV_STATISTICS_LOOKBACK = HISTORY_DAYS * MAX_HOURLY_RECORDS_PER_DAY
 
 
 def pv_statistic_id(statistics_namespace: str = "") -> str:
@@ -161,19 +163,41 @@ def determine_hourly_pv_import_window(
     *,
     initial_backfill_complete: bool = False,
     force_initial_rebuild: bool = False,
+    force_full_refresh: bool = False,
 ) -> tuple[date, float]:
     """Return the hourly PV refresh window and preceding cumulative sum."""
+    full_start = today - timedelta(days=HISTORY_DAYS - 1)
     if force_initial_rebuild:
-        return today - timedelta(days=HISTORY_DAYS - 1), 0.0
+        return full_start, 0.0
     if not records:
         if initial_backfill_complete:
             return today - timedelta(days=refresh_days - 1), 0.0
-        return today - timedelta(days=HISTORY_DAYS - 1), 0.0
-    if not initial_backfill_complete and needs_hourly_pv_migration(
-        records,
-        local_tz,
+        return full_start, 0.0
+    if force_full_refresh or (
+        not initial_backfill_complete
+        and needs_hourly_pv_migration(records, local_tz)
     ):
-        return today - timedelta(days=HISTORY_DAYS - 1), 0.0
+        preceding = [
+            record
+            for record in records
+            if record.get("sum") is not None
+            and _statistics_date(record, local_tz) < full_start
+        ]
+        if preceding:
+            baseline = max(preceding, key=_statistics_start)
+            return full_start, float(baseline["sum"])
+
+        boundary = [
+            record
+            for record in records
+            if record.get("sum") is not None
+            and record.get("state") is not None
+            and _statistics_date(record, local_tz) == full_start
+        ]
+        if boundary:
+            first = min(boundary, key=_statistics_start)
+            return full_start, float(first["sum"]) - float(first["state"])
+        return full_start, 0.0
     return determine_import_window(
         records,
         today,
@@ -375,12 +399,15 @@ class Smart1PvHistoryImporter:
                 has_data=has_data,
             )
 
-    async def _existing_statistics(self) -> list[Mapping[str, Any]]:
+    async def _existing_statistics(
+        self,
+        record_count: int = PV_STATISTICS_LOOKBACK,
+    ) -> list[Mapping[str, Any]]:
         """Return enough recent records to establish a refresh baseline."""
         result = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics,
             self.hass,
-            PV_STATISTICS_LOOKBACK,
+            record_count,
             self.statistic_id,
             True,
             {"state", "sum"},
@@ -543,7 +570,12 @@ class Smart1PvHistoryImporter:
             self._last_refresh_days = refresh_days
             local_tz = ZoneInfo(self.hass.config.time_zone)
             today = datetime.now(local_tz).date()
-            records = await self._existing_statistics()
+            record_count = (
+                PV_STATISTICS_LOOKBACK
+                if repair
+                else (refresh_days + 1) * MAX_HOURLY_RECORDS_PER_DAY
+            )
+            records = await self._existing_statistics(record_count)
             initial_backfill_complete = self._is_complete()
             # A completed non-empty backfill must be recreated if its recorder
             # rows later disappear. Only an explicitly empty successful
@@ -605,9 +637,8 @@ class Smart1PvHistoryImporter:
                 local_tz,
                 refresh_days,
                 initial_backfill_complete=initial_backfill_complete,
-                force_initial_rebuild=(
-                    forced_initial_rebuild or switching_from_daily_schema
-                ),
+                force_initial_rebuild=forced_initial_rebuild,
+                force_full_refresh=switching_from_daily_schema,
             )
 
             if self.pv_power_point is None:
@@ -671,8 +702,16 @@ class Smart1PvHistoryImporter:
 
             recorder = get_instance(self.hass)
             if forced_initial_rebuild:
-                recorder.async_clear_statistics([self.statistic_id])
-                await recorder.async_block_till_done()
+                if not await async_clear_statistics(
+                    recorder,
+                    [self.statistic_id],
+                ):
+                    _LOGGER.warning(
+                        "Timed out while clearing smart1 PV history before "
+                        "a required rebuild"
+                    )
+                    self._last_result = "clear_timeout"
+                    return
                 records = []
                 baseline_sum = 0.0
 
@@ -695,7 +734,7 @@ class Smart1PvHistoryImporter:
             if not statistics:
                 _LOGGER.debug("No smart1 PV history available for import")
                 if fetch_completed and not initial_backfill_complete:
-                    self._mark_complete(has_data=False)
+                    self._mark_complete(has_data=bool(records))
                     self._migration_required = False
                 self._last_result = "no_data"
                 return
@@ -725,7 +764,6 @@ class Smart1PvHistoryImporter:
                 )
             )
             if completion_needs_update:
-                await recorder.async_block_till_done()
                 self._mark_complete(has_data=True)
                 self._migration_required = False
 

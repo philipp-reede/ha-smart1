@@ -9,7 +9,7 @@ import re
 import sys
 import types
 import unittest
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -112,6 +112,7 @@ class Smart1SetupTest(unittest.TestCase):
 
             def __init__(self, *args, **kwargs) -> None:
                 type(self).instance = self
+                self.statistic_id = "smart1_ems:pv_production"
                 self.async_import = AsyncMock()
 
         class FakeDerivedImporter:
@@ -132,6 +133,43 @@ class Smart1SetupTest(unittest.TestCase):
                 return FakeDiscoveryResult()
 
         scheduled: list[tuple[object, timedelta]] = []
+        recorder_metadata = [
+            {
+                "source": "smart1_ems",
+                "statistic_id": (
+                    "smart1_ems:heat_pump_consumption_feedface"
+                ),
+            },
+            {
+                "source": "smart1_ems",
+                "statistic_id": (
+                    "smart1_ems:heat_pump_consumption_feedface_0123456789"
+                ),
+            },
+            {
+                "source": "other_integration",
+                "statistic_id": "smart1_ems:grid_import_cafebabe",
+            },
+        ]
+
+        def clear_statistics(statistic_ids, *, on_done) -> None:
+            recorder_metadata[:] = [
+                item
+                for item in recorder_metadata
+                if item.get("statistic_id") not in statistic_ids
+            ]
+            on_done()
+
+        recorder = types.SimpleNamespace(
+            async_clear_statistics=Mock(side_effect=clear_statistics),
+        )
+
+        async def list_statistic_ids(_hass, _statistic_ids):
+            return list(recorder_metadata)
+
+        async_list_statistic_ids = AsyncMock(
+            side_effect=list_statistic_ids,
+        )
 
         def async_track_time_interval(hass, callback, interval):
             scheduled.append((callback, interval))
@@ -141,6 +179,8 @@ class Smart1SetupTest(unittest.TestCase):
         homeassistant.__path__ = []
         helpers = _module("homeassistant.helpers")
         helpers.__path__ = []
+        components = _module("homeassistant.components")
+        components.__path__ = []
         custom_components = _module("custom_components")
         custom_components.__path__ = [str(ROOT / "custom_components")]
         smart1_package = _module("custom_components.smart1_ems")
@@ -151,6 +191,15 @@ class Smart1SetupTest(unittest.TestCase):
         modules = {
             "aiohttp": _module("aiohttp", ClientError=ClientError),
             "homeassistant": homeassistant,
+            "homeassistant.components": components,
+            "homeassistant.components.recorder": _module(
+                "homeassistant.components.recorder",
+                get_instance=lambda hass: recorder,
+            ),
+            "homeassistant.components.recorder.statistics": _module(
+                "homeassistant.components.recorder.statistics",
+                async_list_statistic_ids=async_list_statistic_ids,
+            ),
             "homeassistant.config_entries": _module(
                 "homeassistant.config_entries",
                 ConfigEntry=object,
@@ -203,9 +252,15 @@ class Smart1SetupTest(unittest.TestCase):
                 "custom_components.smart1_ems.energy_roles",
                 ENERGY_ROLES_BY_KEY={},
                 energy_candidates=lambda devices, role: [],
+                statistic_id_for_role=(
+                    lambda role_key, point_id, statistics_namespace="": (
+                        f"smart1_ems:{role_key}_{point_id}"
+                    )
+                ),
             ),
             "custom_components.smart1_ems.history": _module(
                 "custom_components.smart1_ems.history",
+                PV_STATISTIC_ID="smart1_ems:pv_production",
                 Smart1PvHistoryImporter=FakeHistoryImporter,
             ),
         }
@@ -227,10 +282,17 @@ class Smart1SetupTest(unittest.TestCase):
         entry.async_create_background_task = async_create_background_task
         entry.async_on_unload = async_on_unload
 
+        configured_entries = [entry]
+
+        def async_update_entry(target, *, data) -> None:
+            target.data = dict(data)
+
         hass = types.SimpleNamespace(
             data={},
             config_entries=types.SimpleNamespace(
                 async_forward_entry_setups=AsyncMock(),
+                async_entries=lambda domain: list(configured_entries),
+                async_update_entry=async_update_entry,
             ),
         )
 
@@ -344,13 +406,184 @@ class Smart1SetupTest(unittest.TestCase):
                             raised.exception.__suppress_context__
                         )
 
+                # A multi-installation legacy owner may have neither PV nor
+                # selected derived roles. It must still remove shared history
+                # written by a scoped sibling and by a previously deselected
+                # role, while leaving scoped state untouched.
+                initial_unload_callbacks = list(entry.unload_callbacks)
+                entry.background_coroutines.clear()
+                entry.unload_callbacks.clear()
+                scheduled.clear()
+                FakeDiscoveryResult.has_pv = False
+                integration.ENERGY_ROLES_BY_KEY["grid_import"] = object()
+                integration.ENERGY_ROLES_BY_KEY[
+                    "heat_pump_consumption"
+                ] = object()
+                sibling = types.SimpleNamespace(
+                    data={},
+                    options={
+                        "energy_roles": {
+                            "grid_import": "sibling-power",
+                        }
+                    },
+                )
+                configured_entries[:] = [entry, sibling]
+                legacy_role_id = "smart1_ems:grid_import_deadbeef"
+                scoped_role_id = f"{legacy_role_id}_0123456789"
+                entry.data = {
+                    "api_key": "redacted",
+                    "device_id": "plant-1",
+                    "statistics_namespace": "",
+                    "legacy_history_rebuild": True,
+                    "history_schema_versions": {
+                        legacy_role_id: 1,
+                        scoped_role_id: 1,
+                    },
+                    "history_data_presence": {
+                        legacy_role_id: {"1": True},
+                        scoped_role_id: {"1": True},
+                    },
+                }
+                entry.options = {}
+
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                self.assertNotIn(
+                    "history_importers",
+                    hass.data["smart1_ems"][entry.entry_id],
+                )
+                self.assertEqual(len(entry.background_coroutines), 1)
+                cleanup_task, task_name = entry.background_coroutines[0]
+                self.assertEqual(task_name, "smart1 EMS history import")
+                await cleanup_task
+
+                recorder.async_clear_statistics.assert_called_once_with(
+                    [
+                        "smart1_ems:grid_import_deadbeef",
+                        "smart1_ems:grid_import_sibling-power",
+                        "smart1_ems:heat_pump_consumption_feedface",
+                        "smart1_ems:pv_production",
+                    ],
+                    on_done=ANY,
+                )
+                self.assertEqual(scheduled, [])
+                self.assertEqual(entry.unload_callbacks, [])
+                self.assertEqual(
+                    entry.data["history_schema_versions"],
+                    {scoped_role_id: 1},
+                )
+                self.assertEqual(
+                    entry.data["history_data_presence"],
+                    {scoped_role_id: {"1": True}},
+                )
+                self.assertEqual(
+                    entry.data["legacy_orphan_cleanup_ids"],
+                    [
+                        "smart1_ems:grid_import_deadbeef",
+                        "smart1_ems:grid_import_sibling-power",
+                        "smart1_ems:heat_pump_consumption_feedface",
+                        "smart1_ems:pv_production",
+                    ],
+                )
+                async_list_statistic_ids.assert_awaited_once_with(hass, None)
+
+                # The Recorder scan is cheap and intentionally repeated on
+                # setup so a cancelled rebuild cannot hide an ID that was
+                # managed during the first scan and deselected afterwards.
+                entry.background_coroutines.clear()
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                self.assertEqual(len(entry.background_coroutines), 1)
+                repeated_scan, _task_name = entry.background_coroutines[0]
+                await repeated_scan
+                recorder.async_clear_statistics.assert_called_once()
+                self.assertEqual(async_list_statistic_ids.await_count, 2)
+
+                # A rebuild may enqueue rows and then be cancelled before its
+                # schema marker is persisted. Recorder metadata must rearm
+                # cleanup even though this ID was cleared previously.
+                reappeared_id = (
+                    "smart1_ems:heat_pump_consumption_feedface"
+                )
+                recorder_metadata.append(
+                    {
+                        "source": "smart1_ems",
+                        "statistic_id": reappeared_id,
+                    }
+                )
+                entry.background_coroutines.clear()
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                reappeared_cleanup, _task_name = (
+                    entry.background_coroutines[0]
+                )
+                await reappeared_cleanup
+                self.assertEqual(
+                    recorder.async_clear_statistics.call_args_list[-1].args[0],
+                    [reappeared_id],
+                )
+
+                # If a previously cleaned role is later rebuilt, its schema
+                # marker rearms cleanup when the role is deselected again.
+                rebuilt_id = "smart1_ems:grid_import_sibling-power"
+                entry.data["history_schema_versions"] = {rebuilt_id: 1}
+                entry.data["history_data_presence"] = {
+                    rebuilt_id: {"1": True}
+                }
+                entry.background_coroutines.clear()
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                self.assertEqual(len(entry.background_coroutines), 1)
+                cleanup_task, _task_name = entry.background_coroutines[0]
+                await cleanup_task
+                self.assertEqual(
+                    recorder.async_clear_statistics.call_args_list[-1].args[0],
+                    [rebuilt_id],
+                )
+                self.assertNotIn(
+                    rebuilt_id,
+                    entry.data["history_schema_versions"],
+                )
+
+                # Recorder maintenance must remain best effort: a transient
+                # metadata-query failure cannot block live entities, escape
+                # the background task, or suppress a later setup retry.
+                entry.background_coroutines.clear()
+                async_list_statistic_ids.side_effect = RuntimeError(
+                    "database unavailable"
+                )
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                failed_scan, _task_name = entry.background_coroutines[0]
+                await failed_scan
+                self.assertEqual(
+                    recorder.async_clear_statistics.call_count,
+                    3,
+                )
+                async_list_statistic_ids.side_effect = list_statistic_ids
+
+                FakeDiscoveryResult.has_pv = True
+                entry.unload_callbacks[:] = initial_unload_callbacks
+
         asyncio.run(run_setup_and_callbacks())
 
         self.assertIn("entry-1", hass.data["smart1_ems"])
         self.assertEqual(len(entry.unload_callbacks), 2)
-        hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
-            entry,
-            ["sensor"],
+        self.assertEqual(
+            hass.config_entries.async_forward_entry_setups.await_args_list,
+            [
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
+            ],
         )
 
 

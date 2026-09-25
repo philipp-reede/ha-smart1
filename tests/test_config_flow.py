@@ -841,6 +841,7 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
             ),
             "custom_components.smart1_ems.history": _module(
                 "custom_components.smart1_ems.history",
+                PV_STATISTIC_ID="smart1_ems:pv_production",
                 Smart1PvHistoryImporter=object,
             ),
         })
@@ -849,6 +850,11 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
         api_module.sanitize_api_error_code = lambda code: str(code)
         energy_module = modules["custom_components.smart1_ems.energy_roles"]
         energy_module.ENERGY_ROLES_BY_KEY = {}
+        energy_module.statistic_id_for_role = (
+            lambda role_key, point_id, statistics_namespace="": (
+                f"smart1_ems:{role_key}_{point_id}"
+            )
+        )
 
         module_name = "custom_components.smart1_ems.entrypoint_migration_test"
         loader = SourceFileLoader(

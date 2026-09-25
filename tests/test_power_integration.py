@@ -172,6 +172,28 @@ class PowerIntegrationTest(unittest.TestCase):
             ],
         )
 
+    def test_duplicate_support_row_does_not_collapse_identical_folds(
+        self,
+    ) -> None:
+        rows = [
+            row(f"2026-10-25 02:{minute:02d}:00", "1000")
+            for _fold in range(2)
+            for minute in range(0, 60, 5)
+        ]
+        after = row("2026-10-25 03:00:00", "1000")
+        rows.extend((after, dict(after)))
+
+        result = power_integration.integrate_power_rows(
+            rows,
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+
+        self.assertEqual(result.sample_count, 25)
+        self.assertEqual(result.integrated_intervals, 24)
+        self.assertEqual(result.covered_seconds, 2 * 60 * 60)
+        self.assertAlmostEqual(result.energy_kwh, 2.0)
+
     def test_keeps_interleaved_naive_fall_dst_rows_in_either_direction(
         self,
     ) -> None:
@@ -207,7 +229,9 @@ class PowerIntegrationTest(unittest.TestCase):
                     expected_hour_starts,
                 )
 
-    def test_exact_duplicates_do_not_invent_a_second_fold_hour(self) -> None:
+    def test_partial_exact_duplicates_do_not_invent_second_fold_hour(
+        self,
+    ) -> None:
         rows = [
             row("2026-10-25 02:00:00", "1000"),
             row("2026-10-25 02:05:00", "1000"),
@@ -233,6 +257,38 @@ class PowerIntegrationTest(unittest.TestCase):
         self.assertEqual(actual.sample_count, 2)
         self.assertEqual(actual.covered_seconds, 5 * 60)
         self.assertAlmostEqual(actual.energy_kwh, 1 / 12)
+
+    def test_systematic_duplicates_do_not_invent_second_fold_hour(
+        self,
+    ) -> None:
+        rows = [
+            row("2026-10-25 01:55:00", "1000"),
+            *[
+                row(f"2026-10-25 02:{minute:02d}:00", "1000")
+                for minute in range(0, 60, 5)
+            ],
+            row("2026-10-25 03:00:00", "1000"),
+        ]
+        duplicated_rows = [
+            duplicate
+            for sample in rows
+            for duplicate in (sample, dict(sample))
+        ]
+
+        expected = power_integration.integrate_power_rows(
+            rows,
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+        actual = power_integration.integrate_power_rows(
+            duplicated_rows,
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual.sample_count, 14)
+        self.assertAlmostEqual(actual.energy_kwh, 1.0)
 
     def test_partial_fold_is_independent_of_row_order(self) -> None:
         rows = [
@@ -329,6 +385,97 @@ class PowerIntegrationTest(unittest.TestCase):
                     strict=True,
                 ):
                     self.assertAlmostEqual(energy, expected_energy)
+
+    def test_distinct_fold_profiles_match_offset_aware_reference(self) -> None:
+        before = row("2026-10-25 01:55:00", "0")
+        first_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "0")
+            for minute in range(0, 60, 5)
+        ]
+        second_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "2000")
+            for minute in range(0, 60, 5)
+        ]
+        after = row("2026-10-25 03:00:00", "2000")
+        reference_rows = [
+            row("2026-10-25T01:55:00+02:00", "0"),
+            *[
+                row(
+                    f"2026-10-25T02:{minute:02d}:00+02:00",
+                    "0",
+                )
+                for minute in range(0, 60, 5)
+            ],
+            *[
+                row(
+                    f"2026-10-25T02:{minute:02d}:00+01:00",
+                    "2000",
+                )
+                for minute in range(0, 60, 5)
+            ],
+            row("2026-10-25T03:00:00+01:00", "2000"),
+        ]
+        interleaved = [
+            sample
+            for pair in zip(first_fold, second_fold, strict=True)
+            for sample in pair
+        ]
+        shuffled = list(interleaved)
+        Random(7).shuffle(shuffled)
+        duplicated = [
+            duplicate
+            for sample in interleaved
+            for duplicate in (sample, dict(sample))
+        ]
+        inputs = (
+            [before, *first_fold, *second_fold, after],
+            [before, *interleaved, after],
+            [before, *shuffled, after],
+            [before, *duplicated, after],
+        )
+        reference = power_integration.integrate_power_rows(
+            reference_rows,
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+
+        self.assertAlmostEqual(reference.energy_kwh, 2 + 1 / 12)
+        for index, rows_to_integrate in enumerate(inputs):
+            with self.subTest(order=index):
+                result = power_integration.integrate_power_rows(
+                    rows_to_integrate,
+                    "pv",
+                    ZoneInfo("Europe/Berlin"),
+                )
+                self.assertEqual(result.sample_count, reference.sample_count)
+                self.assertEqual(
+                    result.integrated_intervals,
+                    reference.integrated_intervals,
+                )
+                self.assertEqual(
+                    result.covered_seconds,
+                    reference.covered_seconds,
+                )
+                self.assertAlmostEqual(
+                    result.energy_kwh,
+                    reference.energy_kwh,
+                )
+                self.assertEqual(
+                    [start for start, _energy in result.hourly_energy_kwh],
+                    [
+                        start
+                        for start, _energy in reference.hourly_energy_kwh
+                    ],
+                )
+                for (_start, energy), (
+                    _reference_start,
+                    reference_energy,
+                ) in zip(
+                    result.hourly_energy_kwh,
+                    reference.hourly_energy_kwh,
+                    strict=True,
+                ):
+                    self.assertAlmostEqual(energy, reference_energy)
 
 
 if __name__ == "__main__":
