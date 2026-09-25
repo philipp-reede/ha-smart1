@@ -4123,7 +4123,7 @@ class Smart1HistoryTest(unittest.TestCase):
             },
         )
 
-        result, completed, checked_through = asyncio.run(
+        result, completed, checked_through, nonempty_days = asyncio.run(
             importer._fetch_hourly_energy(
                 date(2026, 8, 3),
                 date(2026, 8, 3),
@@ -4138,6 +4138,13 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertTrue(completed)
         self.assertEqual(checked_through, date(2026, 8, 3))
         self.assertEqual(
+            nonempty_days,
+            {
+                "grid_import": {date(2026, 8, 3)},
+                "wallbox_consumption": {date(2026, 8, 3)},
+            },
+        )
+        self.assertEqual(
             result["grid_import"][0][0],
             datetime(2026, 8, 2, 22, 0, tzinfo=timezone.utc),
         )
@@ -4145,6 +4152,92 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertAlmostEqual(
             result["wallbox_consumption"][0][1],
             1 / 12,
+        )
+
+    def test_fractional_offset_retry_reconstructs_both_boundary_hours(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        retry_date = date(2026, 1, 3)
+
+        class BoundaryApi:
+            def __init__(self) -> None:
+                self.calls: list[date] = []
+
+            async def get_linear_detailed_rows(
+                self,
+                _linear_ids,
+                *,
+                target_date,
+                missing_ok,
+            ):
+                self.calls.append(target_date)
+                self.assert_missing_ok = missing_ok
+                samples = {
+                    date(2026, 1, 2): (
+                        ("2026-01-02 23:45", "1000"),
+                        ("2026-01-02 23:55", "1000"),
+                    ),
+                    retry_date: (
+                        ("2026-01-03 00:00", "2000"),
+                        ("2026-01-03 00:10", "2000"),
+                        ("2026-01-03 23:45", "3000"),
+                        ("2026-01-03 23:55", "3000"),
+                    ),
+                    date(2026, 1, 4): (
+                        ("2026-01-04 00:00", "4000"),
+                        ("2026-01-04 00:10", "4000"),
+                    ),
+                }
+                return [
+                    {
+                        "LinearId": "grid",
+                        "Timestamp": timestamp,
+                        "Value1": value,
+                    }
+                    for timestamp, value in samples.get(target_date, ())
+                ]
+
+        api = BoundaryApi()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(),
+            api,
+            {"grid_import": types.SimpleNamespace(id="grid")},
+        )
+
+        result, completed, checked_through, nonempty_days = asyncio.run(
+            importer._fetch_hourly_energy(
+                retry_date,
+                retry_date,
+                local_tz,
+                include_following_boundary=True,
+            )
+        )
+
+        self.assertEqual(
+            api.calls,
+            [date(2026, 1, 2), retry_date, date(2026, 1, 4)],
+        )
+        self.assertTrue(api.assert_missing_ok)
+        self.assertTrue(completed)
+        self.assertEqual(checked_through, retry_date)
+        self.assertEqual(
+            nonempty_days["grid_import"],
+            {date(2026, 1, 2), retry_date, date(2026, 1, 4)},
+        )
+        self.assertEqual(len(result["grid_import"]), 2)
+        self.assertAlmostEqual(result["grid_import"][0][1], 0.5)
+        self.assertAlmostEqual(result["grid_import"][1][1], 7 / 6)
+
+    def test_transition_day_requires_only_fractional_boundary_context(
+        self,
+    ) -> None:
+        self.assertEqual(
+            derived_history._boundary_context_dates(
+                date(2026, 4, 5),
+                ZoneInfo("Australia/Lord_Howe"),
+            ),
+            {date(2026, 4, 6)},
         )
 
     def test_derived_import_retries_a_transient_daily_failure(self) -> None:
@@ -4181,7 +4274,7 @@ class Smart1HistoryTest(unittest.TestCase):
             "sleep",
             new=AsyncMock(),
         ) as sleep:
-            result, completed, checked_through = asyncio.run(
+            result, completed, checked_through, nonempty_days = asyncio.run(
                 importer._fetch_hourly_energy(
                     date(2026, 8, 3),
                     date(2026, 8, 3),
@@ -4191,6 +4284,10 @@ class Smart1HistoryTest(unittest.TestCase):
 
         self.assertTrue(completed)
         self.assertEqual(checked_through, date(2026, 8, 3))
+        self.assertEqual(
+            nonempty_days,
+            {"grid_import": {date(2026, 8, 3)}},
+        )
         self.assertEqual(api.calls, 2)
         sleep.assert_awaited_once_with(1)
         self.assertTrue(result["grid_import"])
@@ -4227,7 +4324,7 @@ class Smart1HistoryTest(unittest.TestCase):
                 level="WARNING",
             ) as captured,
         ):
-            result, completed, checked_through = asyncio.run(
+            result, completed, checked_through, nonempty_days = asyncio.run(
                 importer._fetch_hourly_energy(
                     date(2026, 8, 3),
                     date(2026, 8, 3),
@@ -4238,6 +4335,7 @@ class Smart1HistoryTest(unittest.TestCase):
         logs = "\n".join(captured.output)
         self.assertFalse(completed)
         self.assertIsNone(checked_through)
+        self.assertEqual(nonempty_days, {"grid_import": set()})
         self.assertEqual(result, {"grid_import": []})
         self.assertEqual(api.calls, derived_history.FETCH_ATTEMPTS)
         self.assertNotIn(api_key, logs)
@@ -5745,6 +5843,77 @@ class Smart1HistoryTest(unittest.TestCase):
             )
         )
 
+    def test_forced_fractional_rebuild_starts_at_zero_after_clear(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        today = datetime.now(local_tz).date()
+        hour_start = datetime.combine(
+            today,
+            datetime.min.time().replace(hour=12),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc).replace(minute=0)
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Asia/Kathmandu")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                )
+            },
+            history_state=state,
+            force_initial_rebuild=True,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": hour_start.timestamp(),
+                    "state": 99.0,
+                    "sum": 100.0,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=(
+                {"grid_import": [(hour_start, 1.0)]},
+                True,
+                today,
+                {"grid_import": {today}},
+            )
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(
+                side_effect=_complete_statistics_clear
+            ),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+            patch.object(
+                derived_history,
+                "statistics_are_persisted",
+                return_value=True,
+            ),
+        ):
+            asyncio.run(importer.async_import())
+
+        imported = add_statistics.call_args.kwargs["statistics"]
+        self.assertEqual(imported[0]["state"], 1.0)
+        self.assertEqual(imported[0]["sum"], 1.0)
+
     def test_completed_derived_isolation_flag_does_not_force_again(
         self,
     ) -> None:
@@ -6454,6 +6623,343 @@ class Smart1HistoryTest(unittest.TestCase):
 
         self.assertEqual(merged, [(noon, 5.0), (one_pm, 0.0)])
         self.assertEqual(statistics_result[-1]["sum"], 5.0)
+
+    def test_fractional_boundary_fragments_are_added_without_sum_jump(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        target_date = date(2026, 1, 3)
+        shared_hour = datetime(2026, 1, 2, 18, tzinfo=timezone.utc)
+        existing = [
+            {
+                "start": shared_hour.timestamp(),
+                "state": 1 / 6,
+                "sum": 10 + 1 / 6,
+            }
+        ]
+        fetched = [
+            (shared_hour, 1 / 6),
+            (shared_hour, 1 / 3),
+        ]
+
+        merged = derived_history.merge_hourly_energy(
+            existing,
+            fetched,
+            target_date,
+            target_date,
+            local_tz,
+            replacement_dates={target_date},
+        )
+        baseline = derived_history.baseline_before_first_hour(
+            existing,
+            merged,
+            0.0,
+        )
+        statistics_result = derived_history.build_hourly_energy_statistics(
+            merged,
+            baseline,
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertAlmostEqual(merged[0][1], 0.5)
+        self.assertAlmostEqual(baseline, 10.0)
+        self.assertAlmostEqual(
+            statistics_result[0]["sum"] - baseline,
+            statistics_result[0]["state"],
+        )
+        self.assertAlmostEqual(statistics_result[0]["sum"], 10.5)
+
+    def test_fractional_partial_boundary_preserves_existing_both_directions(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        right_day = date(2026, 1, 3)
+        left_day = right_day - history.timedelta(days=1)
+        shared_hour = datetime(2026, 1, 2, 18, tzinfo=timezone.utc)
+        existing = [
+            {
+                "start": shared_hour.timestamp(),
+                "state": 0.5,
+                "sum": 10.5,
+            }
+        ]
+
+        for source_days, partial_energy, replacement_day in (
+            ({left_day}, 1 / 6, left_day),
+            ({right_day}, 1 / 3, right_day),
+        ):
+            preserve_hours = derived_history.incomplete_boundary_hours(
+                existing,
+                source_days,
+                right_day,
+                right_day,
+                local_tz,
+            )
+            merged = derived_history.merge_hourly_energy(
+                existing,
+                [(shared_hour, partial_energy)],
+                right_day,
+                right_day,
+                local_tz,
+                replacement_dates={replacement_day},
+                preserve_hours=preserve_hours,
+            )
+
+            self.assertEqual(preserve_hours, {shared_hour})
+            self.assertEqual(merged, [(shared_hour, 0.5)])
+
+    def test_fractional_v2_empty_context_migrates_once_without_clear(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        today = datetime.now(local_tz).date()
+        initial_start = today - history.timedelta(
+            days=history.HISTORY_DAYS - 1
+        )
+        boundary_start = datetime.combine(
+            initial_start,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc).replace(minute=0)
+        recent_start = datetime.combine(
+            today,
+            datetime.min.time().replace(hour=12),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc).replace(minute=0)
+        point = types.SimpleNamespace(id="grid", name="Bezug")
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Asia/Kathmandu")
+            ),
+            types.SimpleNamespace(),
+            {"grid_import": point},
+            history_state=state,
+        )
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            point.id,
+        )
+        state.mark_complete(
+            statistic_id,
+            derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            has_data=True,
+            checked_through=today,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": boundary_start.timestamp(),
+                    "state": 0.25,
+                    "sum": 10.25,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            side_effect=[
+                (
+                    {"grid_import": [(boundary_start, 0.5)]},
+                    True,
+                    today,
+                    {"grid_import": {initial_start}},
+                ),
+                (
+                    {"grid_import": [(recent_start, 0.5)]},
+                    True,
+                    today,
+                    {"grid_import": {today}},
+                ),
+            ]
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+            patch.object(
+                derived_history,
+                "statistics_are_persisted",
+                return_value=True,
+            ),
+        ):
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import())
+
+        self.assertEqual(
+            state.completed[statistic_id],
+            derived_history.DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION,
+        )
+        first_import = add_statistics.call_args_list[0].kwargs["statistics"]
+        self.assertAlmostEqual(first_import[0]["state"], 0.25)
+        self.assertAlmostEqual(first_import[0]["sum"], 10.25)
+        self.assertEqual(
+            importer._fetch_hourly_energy.await_args_list[0].args[:2],
+            (initial_start, today),
+        )
+        self.assertEqual(
+            importer._fetch_hourly_energy.await_args_list[1].args[:2],
+            (
+                today - history.timedelta(days=history.REFRESH_DAYS - 1),
+                today,
+            ),
+        )
+        recorder_instance.async_clear_statistics.assert_not_called()
+
+    def test_fresh_fractional_import_keeps_new_boundary_without_context(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        today = datetime.now(local_tz).date()
+        initial_start = today - history.timedelta(
+            days=history.HISTORY_DAYS - 1
+        )
+        boundary_start = datetime.combine(
+            initial_start,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc).replace(minute=0)
+        point = types.SimpleNamespace(id="grid", name="Bezug")
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Asia/Kathmandu")
+            ),
+            types.SimpleNamespace(),
+            {"grid_import": point},
+            history_state=state,
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=(
+                {"grid_import": [(boundary_start, 1 / 3)]},
+                True,
+                today,
+                {"grid_import": {initial_start}},
+            )
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+            patch.object(
+                derived_history,
+                "statistics_are_persisted",
+                return_value=True,
+            ),
+        ):
+            asyncio.run(importer.async_import())
+
+        imported = add_statistics.call_args.kwargs["statistics"]
+        self.assertEqual(imported[0]["start"], boundary_start)
+        self.assertAlmostEqual(imported[0]["state"], 1 / 3)
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            point.id,
+        )
+        self.assertEqual(
+            state.completed[statistic_id],
+            derived_history.DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION,
+        )
+
+    def test_fractional_main_refresh_updates_current_closing_boundary(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        today = datetime.now(local_tz).date()
+        closing_boundary_start = datetime.combine(
+            today + history.timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc).replace(minute=0)
+        point = types.SimpleNamespace(id="grid", name="Bezug")
+        state = _HistoryState()
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Asia/Kathmandu")
+            ),
+            types.SimpleNamespace(),
+            {"grid_import": point},
+            history_state=state,
+        )
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            point.id,
+        )
+        state.mark_complete(
+            statistic_id,
+            derived_history.DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION,
+            has_data=True,
+            checked_through=today,
+        )
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": closing_boundary_start.timestamp(),
+                    "state": 0.1,
+                    "sum": 1.1,
+                }
+            ]
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=(
+                {"grid_import": [(closing_boundary_start, 0.2)]},
+                True,
+                today,
+                {"grid_import": {today}},
+            )
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+            patch.object(
+                derived_history,
+                "statistics_are_persisted",
+                return_value=True,
+            ),
+        ):
+            asyncio.run(importer.async_import())
+
+        imported = add_statistics.call_args.kwargs["statistics"]
+        closing_record = next(
+            record
+            for record in imported
+            if record["start"] == closing_boundary_start
+        )
+        self.assertAlmostEqual(closing_record["state"], 0.2)
+        self.assertAlmostEqual(closing_record["sum"], 1.2)
 
     def test_hourly_statistics_keep_cumulative_sum(self) -> None:
         starts = [
@@ -7774,6 +8280,144 @@ class Smart1HistoryTest(unittest.TestCase):
         self.assertNotIn(old_day, state.empty_days.get(key, set()))
         self.assertEqual(state.empty_retry_cursors[key], old_day)
         self.assertEqual(state.empty_retry_runs[key], today)
+
+    def test_fractional_retry_with_empty_context_imports_safe_hours(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Asia/Kathmandu")
+        today = datetime.now(local_tz).date()
+        old_day = today - history.timedelta(days=30)
+        recent_day = today - history.timedelta(days=1)
+
+        def _start(target_date: date, hour: int = 12) -> datetime:
+            return datetime.combine(
+                target_date,
+                datetime.min.time().replace(hour=hour),
+                tzinfo=local_tz,
+            ).astimezone(timezone.utc).replace(minute=0)
+
+        state = _HistoryState()
+        state.enable_empty_retry = True
+        point = types.SimpleNamespace(id="grid", name="Bezug")
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Asia/Kathmandu")
+            ),
+            types.SimpleNamespace(),
+            {"grid_import": point},
+            history_state=state,
+        )
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            point.id,
+        )
+        schema_version = (
+            derived_history.DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION
+        )
+        state.mark_complete(
+            statistic_id,
+            schema_version,
+            has_data=True,
+            checked_through=today,
+        )
+        key = (statistic_id, schema_version)
+        state.empty_days[key] = {old_day}
+        boundary_start = datetime.combine(
+            old_day,
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc).replace(minute=0)
+        closing_boundary_start = datetime.combine(
+            old_day + history.timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc).replace(minute=0)
+        interior_start = _start(old_day)
+        importer._existing_statistics = AsyncMock(
+            return_value=[
+                {
+                    "start": boundary_start.timestamp(),
+                    "state": 0.5,
+                    "sum": 5.5,
+                },
+                {
+                    "start": closing_boundary_start.timestamp(),
+                    "state": 0.75,
+                    "sum": 8.25,
+                },
+                {
+                    "start": _start(recent_day).timestamp(),
+                    "state": 1.0,
+                    "sum": 10.0,
+                }
+            ]
+        )
+        main_result = (
+            {"grid_import": []},
+            True,
+            today,
+            {"grid_import": set()},
+        )
+        retry_result = (
+            {
+                "grid_import": [
+                    (boundary_start, 0.25),
+                    (interior_start, 2.0),
+                    (closing_boundary_start, 0.25),
+                ]
+            },
+            True,
+            old_day,
+            {"grid_import": {old_day}},
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            side_effect=[main_result, retry_result, main_result]
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+            async_block_till_done=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+            patch.object(
+                derived_history,
+                "statistics_are_persisted",
+                return_value=True,
+            ),
+        ):
+            asyncio.run(importer.async_import())
+            asyncio.run(importer.async_import())
+
+        first_import = add_statistics.call_args_list[0].kwargs["statistics"]
+        imported_states = {
+            item["start"]: item["state"] for item in first_import
+        }
+        # The stored combined boundary survives because the neighbouring
+        # source day was empty, while the independent interior hour is safely
+        # recovered instead of discarding the whole retry day.
+        self.assertEqual(imported_states[boundary_start], 0.5)
+        self.assertEqual(imported_states[closing_boundary_start], 0.75)
+        self.assertEqual(imported_states[interior_start], 2.0)
+        # The day remains in the bounded queue because its two stored boundary
+        # buckets could not yet be reconstructed from both source days.
+        self.assertIn(old_day, state.empty_days.get(key, set()))
+        self.assertEqual(state.empty_retry_cursors[key], old_day)
+        self.assertEqual(state.empty_retry_runs[key], today)
+        self.assertEqual(importer._fetch_hourly_energy.await_count, 3)
+        self.assertTrue(
+            importer._fetch_hourly_energy.await_args_list[1].kwargs[
+                "include_following_boundary"
+            ]
+        )
 
     def test_partial_derived_prefix_advances_coverage_per_role(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")

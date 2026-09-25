@@ -242,6 +242,14 @@ five-minute power values. This is deliberately opt-in:
   any derived statistic is created.
 - Each date is fetched once for all selected points and integrated with the
   calibrated trapezoidal method.
+- In time zones whose UTC offset is not a whole number of hours, local midnight
+  splits a UTC-hour bucket across two API dates. Those fragments are combined
+  before import. A single-day retry loads its adjacent context dates and only
+  replaces a shared boundary bucket when both fragments are known; otherwise
+  an existing combined bucket is preserved and the retry stays in the bounded
+  rotation. The dedicated fractional-offset schema performs one supported-
+  window repair without clearing older Recorder history. Whole-hour zones keep
+  the preceding schema and do not repeat that annual import.
 - Gaps longer than 15 minutes are excluded rather than estimated.
 - Statistics use kWh and a source-specific ID. Changing the selected source
   creates a new statistic instead of combining incompatible histories.

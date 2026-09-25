@@ -30,6 +30,11 @@ PV_HISTORY_SCHEMA_VERSION = 5
 # role is marked complete at version 2 after the successful 365-day check, so
 # it returns to the normal short refresh window instead of rebuilding forever.
 DERIVED_HISTORY_SCHEMA_VERSION = 2
+# Version 3 is required only in time zones whose UTC offset is not a whole
+# number of hours.  Older imports could overwrite the two local-day fragments
+# that share one UTC-hour bucket there.  Whole-hour zones keep version 2 and do
+# not incur an unrelated 365-day rebuild.
+DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION = 3
 
 
 def statistics_namespace_for_device(device_id: str) -> str:

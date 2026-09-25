@@ -47,7 +47,7 @@
     "step": {
       "init": {
         "title": "Abgeleitete Energie konfigurieren",
-        "description": "Wähle für jede gewünschte Energierolle einen Leistungsmesspunkt aus. Die vorgeschlagenen Messpunkte entsprechen der erkannten Anlage. Mit — bleibt eine Rolle deaktiviert. Die Energie wird aus den 5-Minuten-Leistungswerten berechnet und als externe Statistik importiert.",
+        "description": "Wähle für jede gewünschte Energierolle einen Leistungsmesspunkt aus. Die vorgeschlagenen Messpunkte entsprechen der erkannten Anlage. Eine mit ⚠ markierte gespeicherte Quelle ist derzeit nicht verfügbar und bleibt ausgewählt, bis du sie ausdrücklich ersetzt oder deaktivierst. Mit — bleibt eine Rolle deaktiviert. Die Energie wird aus den 5-Minuten-Leistungswerten berechnet und als externe Statistik importiert.",
         "data": {
           "grid_import": "Netzbezug",
           "grid_export": "Netzeinspeisung",
@@ -60,7 +60,8 @@
       }
     },
     "error": {
-      "duplicate_energy_point": "Jeder Messpunkt kann nur einer Energierolle zugeordnet werden."
+      "duplicate_energy_point": "Jeder Messpunkt kann nur einer Energierolle zugeordnet werden.",
+      "invalid_energy_point": "Wähle einen verfügbaren Messpunkt aus oder behalte die zuvor gespeicherte Quelle bei."
     },
     "abort": {
       "not_loaded": "Der smart1-EMS-Eintrag ist nicht geladen. Aktiviere ihn oder behebe den Einrichtungsfehler, bevor du diese Optionen änderst."

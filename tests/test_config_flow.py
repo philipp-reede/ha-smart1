@@ -846,6 +846,137 @@ class Smart1OptionsFlowTest(unittest.TestCase):
             },
         )
 
+    def test_unavailable_saved_source_is_preserved_on_unchanged_save(
+        self,
+    ) -> None:
+        flow = self._flow({
+            "energy_roles": {"grid_import": "missing-import"},
+            "energy_roles_configured": [
+                "grid_import",
+                "grid_export",
+                "battery_charge",
+            ],
+        })
+
+        form = asyncio.run(flow.async_step_init())
+
+        self.assertEqual(
+            self._defaults(form),
+            {
+                "grid_import": "missing-import",
+                "grid_export": "",
+                "battery_charge": "",
+            },
+        )
+        grid_import_selector = next(iter(form["data_schema"].schema.values()))
+        self.assertIn(
+            {
+                "value": "missing-import",
+                "label": "⚠ missing-import",
+            },
+            grid_import_selector.config.options["options"],
+        )
+
+        result = asyncio.run(
+            flow.async_step_init(self._defaults(form))
+        )
+
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(
+            result["data"]["energy_roles"],
+            {"grid_import": "missing-import"},
+        )
+
+    def test_unavailable_saved_source_requires_explicit_change(self) -> None:
+        options = {
+            "energy_roles": {"grid_import": "missing-import"},
+            "energy_roles_configured": [
+                "grid_import",
+                "grid_export",
+                "battery_charge",
+            ],
+        }
+
+        changed = asyncio.run(self._flow(options).async_step_init({
+            "grid_import": "missing-import",
+            "grid_export": "point-export",
+            "battery_charge": "",
+        }))
+        self.assertEqual(
+            changed["data"]["energy_roles"],
+            {
+                "grid_import": "missing-import",
+                "grid_export": "point-export",
+            },
+        )
+
+        cleared = asyncio.run(self._flow(options).async_step_init({
+            "grid_import": "",
+            "grid_export": "",
+            "battery_charge": "",
+        }))
+        self.assertEqual(cleared["data"]["energy_roles"], {})
+
+        replaced = asyncio.run(self._flow(options).async_step_init({
+            "grid_import": "point-import",
+            "grid_export": "",
+            "battery_charge": "",
+        }))
+        self.assertEqual(
+            replaced["data"]["energy_roles"],
+            {"grid_import": "point-import"},
+        )
+
+    def test_manipulated_unknown_energy_source_is_rejected(self) -> None:
+        flow = self._flow({
+            "energy_roles": {"grid_import": "missing-import"},
+            "energy_roles_configured": [
+                "grid_import",
+                "grid_export",
+                "battery_charge",
+            ],
+        })
+
+        result = asyncio.run(flow.async_step_init({
+            "grid_import": "injected-id",
+            "grid_export": "",
+            "battery_charge": "",
+        }))
+
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(
+            result["errors"],
+            {"base": "invalid_energy_point"},
+        )
+
+    def test_returned_saved_source_uses_normal_candidate_label(self) -> None:
+        flow = self._flow({
+            "energy_roles": {"grid_import": "point-import"},
+            "energy_roles_configured": [
+                "grid_import",
+                "grid_export",
+                "battery_charge",
+            ],
+        })
+
+        form = asyncio.run(flow.async_step_init())
+        grid_import_selector = next(iter(form["data_schema"].schema.values()))
+
+        self.assertIn(
+            {
+                "value": "point-import",
+                "label": "Grid import (grid)",
+            },
+            grid_import_selector.config.options["options"],
+        )
+        self.assertNotIn(
+            {
+                "value": "point-import",
+                "label": "⚠ Grid import (grid)",
+            },
+            grid_import_selector.config.options["options"],
+        )
+
     def test_duplicate_energy_point_is_rejected(self) -> None:
         flow = self._flow()
 
