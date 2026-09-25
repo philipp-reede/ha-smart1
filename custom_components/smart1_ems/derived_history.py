@@ -39,7 +39,10 @@ from .history_state import (
 )
 from .point import Smart1Point
 from .power_integration import integrate_power_rows
-from .recorder_helpers import async_clear_statistics
+from .recorder_helpers import (
+    async_clear_statistics,
+    validate_energy_statistics_imports,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,18 +91,60 @@ def _has_decreasing_sum(records: list[Mapping[str, Any]]) -> bool:
     )
 
 
+def _supported_history_records(
+    records: list[Mapping[str, Any]],
+    today: date,
+    local_tz: ZoneInfo,
+) -> tuple[list[Mapping[str, Any]], Mapping[str, Any] | None]:
+    """Return the repairable window and its one cumulative predecessor."""
+    full_start = today - timedelta(days=HISTORY_DAYS - 1)
+    window_records = [
+        record
+        for record in records
+        if full_start
+        <= _statistics_start(record).astimezone(local_tz).date()
+        <= today
+    ]
+    preceding = [
+        record
+        for record in records
+        if record.get("sum") is not None
+        and _statistics_start(record).astimezone(local_tz).date()
+        < full_start
+    ]
+    predecessor = max(preceding, key=_statistics_start) if preceding else None
+    return window_records, predecessor
+
+
 def needs_hourly_rebuild(
     records: list[Mapping[str, Any]],
+    today: date,
     local_tz: ZoneInfo,
     *,
     initial_backfill_complete: bool = False,
 ) -> bool:
-    """Return whether derived statistics must be cleared and rebuilt."""
-    return bool(records) and (
-        _has_decreasing_sum(records)
+    """Return whether supported derived history requires a full repair."""
+    if not records:
+        return False
+
+    window_records, predecessor = _supported_history_records(
+        records,
+        today,
+        local_tz,
+    )
+    if not window_records:
+        return not initial_backfill_complete
+
+    sum_records = (
+        [predecessor, *window_records]
+        if predecessor is not None
+        else window_records
+    )
+    return (
+        _has_decreasing_sum(sum_records)
         or (
             not initial_backfill_complete
-            and not _has_hourly_resolution(records, local_tz)
+            and not _has_hourly_resolution(window_records, local_tz)
         )
     )
 
@@ -128,19 +173,17 @@ def determine_hourly_import_window(
         return initial_start, 0.0
     if needs_hourly_rebuild(
         records,
+        today,
         local_tz,
         initial_backfill_complete=initial_backfill_complete,
     ):
-        preceding = [
-            record
-            for record in records
-            if record.get("sum") is not None
-            and _statistics_start(record).astimezone(local_tz).date()
-            < initial_start
-        ]
-        if preceding:
-            baseline = max(preceding, key=_statistics_start)
-            return initial_start, float(baseline["sum"])
+        _window_records, predecessor = _supported_history_records(
+            records,
+            today,
+            local_tz,
+        )
+        if predecessor is not None:
+            return initial_start, float(predecessor["sum"])
 
         boundary = [
             record
@@ -430,6 +473,7 @@ class Smart1DerivedEnergyImporter:
                 for role_key, records in records_by_role.items()
                 if needs_hourly_rebuild(
                     records,
+                    today,
                     local_tz,
                     initial_backfill_complete=(
                         role_key in complete_roles
@@ -524,30 +568,8 @@ class Smart1DerivedEnergyImporter:
                 self._roles_without_replacement = ()
                 self._cleared_rebuild_roles = ()
 
-            recorder = get_instance(self.hass)
-            if forced_rebuild_roles:
-                rebuild_statistic_ids = [
-                    statistic_ids[role_key]
-                    for role_key in sorted(forced_rebuild_roles)
-                ]
-                if not await async_clear_statistics(
-                    recorder,
-                    rebuild_statistic_ids,
-                ):
-                    _LOGGER.warning(
-                        "Timed out while clearing smart1 derived energy "
-                        "statistics before a required rebuild"
-                    )
-                    self._last_result = "clear_timeout"
-                    return
-                self._cleared_rebuild_roles = tuple(
-                    sorted(forced_rebuild_roles)
-                )
-                _LOGGER.info(
-                    "Cleared %d smart1 derived energy statistics before rebuild",
-                    len(rebuild_statistic_ids),
-                )
-
+            statistics_by_role: dict[str, list[StatisticData]] = {}
+            metadata_by_role: dict[str, StatisticMetaData] = {}
             roles_with_statistics: set[str] = set()
             for role_key, point in self.role_points.items():
                 if role_key not in refreshable_roles:
@@ -576,25 +598,99 @@ class Smart1DerivedEnergyImporter:
                     continue
 
                 role = ENERGY_ROLES_BY_KEY[role_key]
-                async_add_external_statistics(
-                    hass=self.hass,
-                    metadata=StatisticMetaData(
-                        mean_type=StatisticMeanType.NONE,
-                        has_sum=True,
-                        name=f"{role.name} ({point.name})",
-                        source=DOMAIN,
-                        statistic_id=statistic_ids[role_key],
-                        unit_class=EnergyConverter.UNIT_CLASS,
-                        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-                    ),
-                    statistics=statistics,
+                statistics_by_role[role_key] = statistics
+                metadata_by_role[role_key] = StatisticMetaData(
+                    mean_type=StatisticMeanType.NONE,
+                    has_sum=True,
+                    name=f"{role.name} ({point.name})",
+                    source=DOMAIN,
+                    statistic_id=statistic_ids[role_key],
+                    unit_class=EnergyConverter.UNIT_CLASS,
+                    unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
                 )
                 roles_with_statistics.add(role_key)
-                _LOGGER.info(
-                    "Imported %d hourly records for smart1 derived energy role %s",
-                    len(statistics),
-                    role_key,
+
+            def _enqueue_statistics(role_keys: set[str]) -> None:
+                for role_key in sorted(role_keys):
+                    if role_key not in statistics_by_role:
+                        continue
+                    statistics = statistics_by_role[role_key]
+                    async_add_external_statistics(
+                        hass=self.hass,
+                        metadata=metadata_by_role[role_key],
+                        statistics=statistics,
+                    )
+                    _LOGGER.info(
+                        "Queued %d hourly records for smart1 derived "
+                        "energy role %s",
+                        len(statistics),
+                        role_key,
+                    )
+
+            recorder = get_instance(self.hass)
+            if forced_rebuild_roles:
+                rebuild_statistic_ids = [
+                    statistic_ids[role_key]
+                    for role_key in sorted(forced_rebuild_roles)
+                ]
+                expected_versions = {
+                    role_key: (
+                        self.history_state.current_schema_version(
+                            statistic_ids[role_key]
+                        )
+                        if self.history_state
+                        else 0
+                    )
+                    for role_key in forced_rebuild_roles
+                }
+
+                def _mark_rebuild_complete() -> None:
+                    if not self.history_state:
+                        return
+                    for role_key in forced_rebuild_roles:
+                        self.history_state.mark_complete_if_unchanged(
+                            statistic_ids[role_key],
+                            DERIVED_HISTORY_SCHEMA_VERSION,
+                            has_data=role_key in roles_with_statistics,
+                            expected_version=expected_versions[role_key],
+                        )
+
+                if not await async_clear_statistics(
+                    recorder,
+                    rebuild_statistic_ids,
+                    validate_followup=lambda: (
+                        validate_energy_statistics_imports(
+                            [
+                                (
+                                    metadata_by_role[role_key],
+                                    statistics_by_role[role_key],
+                                )
+                                for role_key in sorted(forced_rebuild_roles)
+                                if role_key in statistics_by_role
+                            ]
+                        )
+                    ),
+                    enqueue_followup=lambda: _enqueue_statistics(
+                        forced_rebuild_roles
+                    ),
+                    on_done=_mark_rebuild_complete,
+                ):
+                    _LOGGER.warning(
+                        "Timed out while clearing smart1 derived energy "
+                        "statistics before a required rebuild; replacement "
+                        "data is already queued"
+                    )
+                    self._last_result = "clear_timeout"
+                    return
+                self._cleared_rebuild_roles = tuple(
+                    sorted(forced_rebuild_roles)
                 )
+                _LOGGER.info(
+                    "Cleared %d smart1 derived energy statistics before rebuild",
+                    len(rebuild_statistic_ids),
+                )
+
+            _enqueue_statistics(refreshable_roles - forced_rebuild_roles)
 
             completed_roles = (
                 initial_backfill_roles | rebuildable_roles

@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Queue complete PV and derived-energy replacement batches directly behind a
+  destructive Recorder clear before awaiting its callback, so a timeout or
+  config-entry cancellation cannot leave a delayed clear without replacement
+- Validate every replacement batch before queuing its destructive clear and
+  persist a late successful completion without allowing callbacks from an
+  unloaded config entry to overwrite a newer history schema
+- Restrict derived-energy sum-decrease detection to the supported 365-day
+  repair window plus exactly one cumulative predecessor, preventing older
+  unrepairable decreases from restarting a year-long scan every six hours
+
+### Testing
+
+- Cover delayed Recorder callbacks and their next refresh, cancellation after
+  clear submission, prevalidation failure, stale callback generations, mixed
+  non-empty and empty replacement roles, multi-role repair-window boundaries,
+  and old or future sum decreases outside the supported range
+
 ## [0.7.2] - 2026-09-25
 
 ### Fixed

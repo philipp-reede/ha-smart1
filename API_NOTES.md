@@ -218,7 +218,14 @@ five-minute power values. This is deliberately opt-in:
   supported window. Valid older rows and successful no-data dates are retained;
   a successful empty repair is marked complete so it is not repeated every six
   hours. A destructive clear is reserved for an explicit multi-installation
-  legacy migration and is accepted only after Recorder confirms completion.
+  legacy migration. Sum-decrease detection covers only the supported window
+  plus its newest cumulative predecessor, because older rows cannot be repaired
+  from the API. Complete replacement batches are queued directly behind a
+  destructive clear before its callback is awaited, preserving FIFO recovery
+  even if Recorder reports a timeout. All batches are synchronously validated
+  before the clear is queued. A late successful callback completes the schema
+  marker for the active config-entry generation, preventing another annual
+  scan without allowing an unloaded entry to overwrite newer state.
 
 These values are estimates derived from power samples, not native smart1
 meter totals. Missing coverage can therefore make them lower than the actual

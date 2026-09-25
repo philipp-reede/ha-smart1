@@ -162,6 +162,64 @@ class Smart1HistoryStateTest(unittest.TestCase):
         )
         self.assertEqual(len(manager.calls), 2)
 
+    def test_late_completion_cannot_mutate_deactivated_state(self) -> None:
+        statistic_id = "smart1_ems:pv_production"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(data={})
+        stale_state = Smart1HistoryState(hass, entry)
+        expected_version = stale_state.current_schema_version(statistic_id)
+
+        stale_state.deactivate()
+        active_state = Smart1HistoryState(hass, entry)
+        active_state.mark_complete(statistic_id, 2, has_data=False)
+
+        self.assertFalse(
+            stale_state.mark_complete_if_unchanged(
+                statistic_id,
+                4,
+                has_data=True,
+                expected_version=expected_version,
+            )
+        )
+        stale_state.mark_complete(statistic_id, 4, has_data=True)
+        stale_state.forget_statistics({statistic_id})
+        self.assertEqual(
+            entry.data[HISTORY_SCHEMA_VERSIONS_KEY][statistic_id],
+            2,
+        )
+        self.assertEqual(len(manager.calls), 1)
+
+    def test_late_completion_requires_unchanged_generation(self) -> None:
+        statistic_id = "smart1_ems:pv_production"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(data={})
+        state = Smart1HistoryState(hass, entry)
+        expected_version = state.current_schema_version(statistic_id)
+
+        self.assertTrue(
+            state.mark_complete_if_unchanged(
+                statistic_id,
+                4,
+                has_data=True,
+                expected_version=expected_version,
+            )
+        )
+        self.assertFalse(
+            state.mark_complete_if_unchanged(
+                statistic_id,
+                2,
+                has_data=False,
+                expected_version=expected_version,
+            )
+        )
+        self.assertEqual(
+            entry.data[HISTORY_SCHEMA_VERSIONS_KEY][statistic_id],
+            4,
+        )
+        self.assertEqual(len(manager.calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

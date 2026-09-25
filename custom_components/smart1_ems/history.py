@@ -35,7 +35,10 @@ from .history_state import (
 )
 from .point import Smart1Point
 from .power_integration import PowerIntegrationResult, integrate_power_rows
-from .recorder_helpers import async_clear_statistics
+from .recorder_helpers import (
+    async_clear_statistics,
+    validate_energy_statistics_imports,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -700,21 +703,6 @@ class Smart1PvHistoryImporter:
                 self._last_result = "incomplete_fetch"
                 return
 
-            recorder = get_instance(self.hass)
-            if forced_initial_rebuild:
-                if not await async_clear_statistics(
-                    recorder,
-                    [self.statistic_id],
-                ):
-                    _LOGGER.warning(
-                        "Timed out while clearing smart1 PV history before "
-                        "a required rebuild"
-                    )
-                    self._last_result = "clear_timeout"
-                    return
-                records = []
-                baseline_sum = 0.0
-
             hourly_energy = (
                 sorted(fetched_hourly_energy)
                 if forced_initial_rebuild
@@ -730,6 +718,67 @@ class Smart1PvHistoryImporter:
                 hourly_energy,
                 baseline_sum,
             )
+            metadata = StatisticMetaData(
+                mean_type=StatisticMeanType.NONE,
+                has_sum=True,
+                name="smart1 EMS PV production",
+                source=DOMAIN,
+                statistic_id=self.statistic_id,
+                unit_class=EnergyConverter.UNIT_CLASS,
+                unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+            )
+
+            def _enqueue_statistics() -> None:
+                async_add_external_statistics(
+                    hass=self.hass,
+                    metadata=metadata,
+                    statistics=statistics,
+                )
+
+            statistics_queued = False
+            recorder = get_instance(self.hass)
+            if forced_initial_rebuild:
+                expected_version = (
+                    self.history_state.current_schema_version(
+                        self.statistic_id
+                    )
+                    if self.history_state
+                    else 0
+                )
+
+                def _mark_rebuild_complete() -> None:
+                    if self.history_state and (
+                        self.history_state.mark_complete_if_unchanged(
+                            self.statistic_id,
+                            self.schema_version,
+                            has_data=bool(statistics),
+                            expected_version=expected_version,
+                        )
+                    ):
+                        self._migration_required = False
+
+                if not await async_clear_statistics(
+                    recorder,
+                    [self.statistic_id],
+                    validate_followup=lambda: (
+                        validate_energy_statistics_imports(
+                            [(metadata, statistics)]
+                        )
+                    ),
+                    enqueue_followup=(
+                        _enqueue_statistics if statistics else None
+                    ),
+                    on_done=_mark_rebuild_complete,
+                ):
+                    _LOGGER.warning(
+                        "Timed out while clearing smart1 PV history before "
+                        "a required rebuild; replacement data is already "
+                        "queued"
+                    )
+                    self._last_result = "clear_timeout"
+                    return
+                records = []
+                statistics_queued = bool(statistics)
 
             if not statistics:
                 _LOGGER.debug("No smart1 PV history available for import")
@@ -739,19 +788,8 @@ class Smart1PvHistoryImporter:
                 self._last_result = "no_data"
                 return
 
-            async_add_external_statistics(
-                hass=self.hass,
-                metadata=StatisticMetaData(
-                    mean_type=StatisticMeanType.NONE,
-                    has_sum=True,
-                    name="smart1 EMS PV production",
-                    source=DOMAIN,
-                    statistic_id=self.statistic_id,
-                    unit_class=EnergyConverter.UNIT_CLASS,
-                    unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-                ),
-                statistics=statistics,
-            )
+            if not statistics_queued:
+                _enqueue_statistics()
             _LOGGER.info(
                 "Imported %d days of smart1 PV history",
                 len(statistics),

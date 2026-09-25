@@ -305,6 +305,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "api": api,
         "coordinator": coordinator,
+        "history_state": history_state,
         "devices": devices,
         "discovery": discovery_result,
         "inverters": inverters,
@@ -650,6 +651,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
 
+    runtime_data = hass.data[DOMAIN][entry.entry_id]
+    runtime_data["history_state"].deactivate()
     hass.data[DOMAIN].pop(entry.entry_id)
     if not hass.data[DOMAIN]:
         hass.data.pop(DOMAIN)

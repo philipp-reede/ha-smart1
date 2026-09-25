@@ -127,15 +127,21 @@
   pre-migration hourly data is adopted without an unnecessary annual sweep
 - Completed sparse derived-energy statistics may legitimately contain only
   midnight buckets and retain the normal short refresh window. Decreasing
-  cumulative sums still trigger a full rebuild, and successfully refreshed
-  days zero obsolete hourly buckets before recalculating their sums
+  cumulative sums within the supported 365-day window, including the boundary
+  against its single predecessor, still trigger a full rebuild. Older and
+  future decreases outside that repairable range are ignored. Successfully
+  refreshed days zero obsolete hourly buckets before recalculating their sums
 - Current-day PV and derived statistics refresh every 15 minutes while the
   wider historical window continues to refresh every six hours. A pending
   initial repair is not restarted by every current-day refresh
 - Destructive history cleanup waits for Recorder's per-operation completion
-  callback before state is removed or replacement rows are queued. A bounded
-  timeout aborts the replacement instead of risking a clear/import race;
-  failure to inspect optional Recorder metadata does not block live sensors
+  callback before state is removed. Complete replacement batches are prepared
+  and validated first, then queued immediately behind the clear without an
+  intervening await, so a timeout or task cancellation cannot leave a delayed
+  clear without its replacement. Late completion updates only the active,
+  unchanged schema generation and therefore neither repeats annual scans nor
+  lets an unloaded entry overwrite newer state. Failure to inspect optional
+  Recorder metadata does not block live sensors
 - Five-minute power integration preserves both occurrences of naive local
   timestamps during the autumn daylight-saving-time fold; timestamps that
   already include an offset continue to be used exactly. Because naive portal
