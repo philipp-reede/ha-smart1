@@ -50,8 +50,8 @@
   row rather than cumulative measurements
 - Diagnostics can calibrate guarded five-minute power integration against the
   exact PV daily total without exporting power or energy values
-- Calibration on the reference installation produced a 0.43% difference with
-  all 288 expected five-minute samples and no skipped gaps
+- The latest calibration on the reference installation produced a 0.78%
+  difference with all 288 expected five-minute samples and no skipped gaps
 - Integration name and domain are now `smart1 EMS` and `smart1_ems`
 - The latest 365 days of documented PV daily production are imported as
   external long-term statistics in the background
@@ -98,6 +98,13 @@
 - CI also imports every integration module against pinned Home Assistant Core
   2026.9.3 on Python 3.14, while setup tests cover startup history import and
   the separate scheduled repair and current-day refresh paths
+- Version 0.6.6 was validated on the reference installation with Energy Hero
+  software 1.28.59, Home Assistant OS 18.3 and Core 2026.9.3. It started
+  without integration warnings, retained plausible device and entity
+  assignments, completed both history importers and showed no Energy Dashboard
+  anomalies. The known `via_device` removal scheduled for Home
+  Assistant 2027.8 is covered through `via_device_id` on supported versions,
+  with a compatibility path for Home Assistant 2026.7 and earlier
 - The integration is designed for the documented smart1 portal API generally;
   real-world hardware validation currently covers M-TEC Energy Hero EMS,
   Energy Heater, Energy Butler inverter/storage, M-TEC AP440 heat pump and a
@@ -127,8 +134,11 @@
 - Validate inverter-bus discovery and manufacturer protocols with additional
   EMS and inverter combinations
 - Add a configurable history range if real-world installations need it
-- Add config-entry unique IDs and an explicit reauthentication flow for API-key
-  changes as a separate config-flow improvement
+- Add config-entry unique IDs based on the plant `DeviceId`, prevent duplicate
+  configuration of one plant and add an explicit reauthentication flow for
+  API-key changes as a separate config-flow improvement
+- Add direct config-flow tests for single- and multi-plant setup, connection
+  failures, duplicate entries, reauthentication and duplicate Energy roles
 - Monitor the pending default HACS catalogue review in
   [hacs/default#10379](https://github.com/hacs/default/pull/10379) and address
   review feedback

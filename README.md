@@ -111,8 +111,16 @@ These are confirmed test combinations, not minimum version requirements.
 Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
 smart1 EMS `v0.6.1` with Home Assistant Core `2026.7.4` on `portal.smart1.eu`.
 The same installation was retested successfully with Energy Hero software
-`1.28.59` and Home Assistant Core `2026.8.3`. Version `v0.6.3` was also tested
-successfully with Home Assistant OS `18.3` and Home Assistant Core `2026.9.3`.
+`1.28.59` and Home Assistant Core `2026.8.3`. The latest reference test used
+smart1 EMS `v0.6.6`, Home Assistant OS `18.3` and Home Assistant Core
+`2026.9.3`. It confirmed stable startup without integration warnings,
+unchanged plausible device and entity assignments, all seven Energy Dashboard
+roles, completed photovoltaic and derived-energy history imports, and an
+Energy Dashboard without anomalies. The redacted diagnostic PV probe
+covered all 288 five-minute samples of the previous day without gaps and
+differed from the exact daily total by only 0.78%. The full test history is
+documented in
+[compatibility report #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5827549220).
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a

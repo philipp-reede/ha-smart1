@@ -109,9 +109,19 @@ Mindestversionen. Bericht
 [#13](https://github.com/philipp-reede/ha-smart1/issues/13) wurde mit smart1 EMS
 `v0.6.1`, Home Assistant Core `2026.7.4` und `portal.smart1.eu` erstellt. Die
 gleiche Anlage wurde anschließend mit Energy Hero Software `1.28.59` und Home
-Assistant Core `2026.8.3` erneut erfolgreich getestet. Version `v0.6.3` wurde
-auch unter Home Assistant OS `18.3` mit Home Assistant Core `2026.9.3`
-erfolgreich getestet.
+Assistant Core `2026.8.3` erneut erfolgreich getestet. Der jüngste Referenztest
+erfolgte mit smart1 EMS `v0.6.6`, Home Assistant OS `18.3` und Home Assistant
+Core `2026.9.3`. Dabei startete die Integration stabil und ohne Warnungen. Die
+bisherigen Geräte- und Entitätszuordnungen blieben unverändert plausibel, alle
+sieben Rollen des Energy Dashboards waren belegt und sowohl der PV- als auch
+der abgeleitete Energie-Historienimport wurden vollständig abgeschlossen. Im
+Energy Dashboard traten keine Auffälligkeiten auf. Die bereinigte Diagnose
+erfasste beim
+PV-Plausibilitätstest alle 288 Fünf-Minuten-Werte des Vortags ohne Lücke; die
+Abweichung zum exakten Tageswert betrug nur 0,78 %. Der vollständige
+Testverlauf ist im
+[Kompatibilitätsbericht #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5827549220)
+dokumentiert.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an

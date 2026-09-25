@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Documentation
+
+- Record the successful real-world validation of smart1 EMS `v0.6.6` with
+  Home Assistant OS `18.3`, Core `2026.9.3` and Energy Hero software `1.28.59`
+- Document the validated Energy Dashboard, history-import, inverter and
+  privacy-safe diagnostics results from the reference installation
+
 ## [0.6.6] - 2026-09-24
 
 ### Fixed
