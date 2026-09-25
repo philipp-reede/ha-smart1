@@ -35,6 +35,7 @@ class Smart1HistoryState:
     def __init__(self, hass: Any, entry: Any) -> None:
         self._hass = hass
         self._entry = entry
+        self._active = True
         raw_versions = entry.data.get(HISTORY_SCHEMA_VERSIONS_KEY, {})
         self._versions = {
             str(statistic_id): int(version)
@@ -55,6 +56,14 @@ class Smart1HistoryState:
             if isinstance(statistic_id, str)
             and isinstance(schema_versions, dict)
         } if isinstance(raw_data_presence, dict) else {}
+
+    def deactivate(self) -> None:
+        """Prevent callbacks from an unloaded entry mutating current state."""
+        self._active = False
+
+    def current_schema_version(self, statistic_id: str) -> int:
+        """Return the currently persisted schema version for a statistic."""
+        return self._versions.get(statistic_id, 0)
 
     def is_complete(self, statistic_id: str, schema_version: int) -> bool:
         """Return whether a full import completed for this schema."""
@@ -80,6 +89,8 @@ class Smart1HistoryState:
 
     def forget_statistics(self, statistic_ids: set[str]) -> None:
         """Discard completion state for Recorder statistics being removed."""
+        if not self._active:
+            return
         changed = False
         for statistic_id in statistic_ids:
             changed = self._versions.pop(statistic_id, None) is not None or changed
@@ -117,6 +128,8 @@ class Smart1HistoryState:
         has_data: bool,
     ) -> None:
         """Persist a completed import without rewriting unchanged entries."""
+        if not self._active:
+            return
         current_version = self._versions.get(statistic_id, 0)
         if (
             current_version == schema_version
@@ -147,3 +160,24 @@ class Smart1HistoryState:
                 },
             },
         )
+
+    def mark_complete_if_unchanged(
+        self,
+        statistic_id: str,
+        schema_version: int,
+        *,
+        has_data: bool,
+        expected_version: int,
+    ) -> bool:
+        """Persist late completion only for the still-active generation."""
+        if (
+            not self._active
+            or self._versions.get(statistic_id, 0) != expected_version
+        ):
+            return False
+        self.mark_complete(
+            statistic_id,
+            schema_version,
+            has_data=has_data,
+        )
+        return True
