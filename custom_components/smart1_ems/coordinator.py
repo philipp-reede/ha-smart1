@@ -3,10 +3,11 @@ import logging
 
 from aiohttp import ClientError
 
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import Smart1ApiError, describe_api_error
+from .api import Smart1ApiError, describe_api_error, is_auth_error
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ class Smart1Coordinator(DataUpdateCoordinator):
         devices,
         active_linear_ids,
         inverters=None,
+        config_entry=None,
     ):
         self.api = api
         self.devices = devices
@@ -29,6 +31,7 @@ class Smart1Coordinator(DataUpdateCoordinator):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
             update_interval=timedelta(minutes=5),
         )
@@ -42,6 +45,8 @@ class Smart1Coordinator(DataUpdateCoordinator):
                 target_date=today,
             )
         except (ClientError, Smart1ApiError, TimeoutError) as err:
+            if is_auth_error(err):
+                raise ConfigEntryAuthFailed(describe_api_error(err)) from None
             # Client exceptions can contain the request URL and API key. Do
             # not retain them as a visible chained cause in Home Assistant.
             raise UpdateFailed(describe_api_error(err)) from None

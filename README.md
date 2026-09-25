@@ -162,6 +162,11 @@ restart Home Assistant.
    the key is stored in the Home Assistant config entry.
 4. If the key has access to multiple installations, select the desired plant.
 
+Each plant can be configured only once. If the portal later rejects the stored
+key, Home Assistant opens a repair flow. The replacement key is saved only if
+it still provides access to the same plant; devices, entities and Energy
+Dashboard statistics keep their existing identities.
+
 Live entities are available after setup. The historical import starts in the
 background and also runs automatically after future Home Assistant restarts.
 Depending on portal response times, the first import can take several minutes.

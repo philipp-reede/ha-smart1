@@ -18,11 +18,29 @@
         "data": {
           "device_id": "Anlage"
         }
+      },
+      "reauth_confirm": {
+        "title": "smart1 EMS erneut verbinden",
+        "description": "Gib einen gültigen API-Schlüssel ein, der weiterhin Zugriff auf diese smart1 Anlage hat.",
+        "data": {
+          "api_key": "API-Schlüssel"
+        },
+        "data_description": {
+          "api_key": "Der API-Schlüssel wird bei der Eingabe verdeckt."
+        }
       }
     },
     "error": {
       "cannot_connect": "Verbindung zu smart1 EMS fehlgeschlagen. Prüfe den API-Schlüssel und versuche es erneut.",
-      "no_plants": "Für diesen API-Schlüssel wurden keine smart1 Anlagen gefunden."
+      "invalid_auth": "Der API-Schlüssel wurde vom smart1 Portal abgelehnt.",
+      "no_plants": "Für diesen API-Schlüssel wurden keine smart1 Anlagen gefunden.",
+      "wrong_account": "Dieser API-Schlüssel erlaubt keinen Zugriff auf die vorhandene smart1 Anlage."
+    },
+    "abort": {
+      "already_configured": "Diese smart1 Anlage ist bereits konfiguriert.",
+      "already_in_progress": "Die Einrichtung dieser smart1 Anlage läuft bereits.",
+      "reauth_successful": "Der API-Schlüssel wurde erfolgreich aktualisiert.",
+      "wrong_account": "Dieser API-Schlüssel gehört nicht zur vorhandenen smart1 Anlage."
     }
   },
   "options": {

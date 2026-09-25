@@ -25,6 +25,8 @@ from .pv import parse_pv_cumulative_energy
 
 _LOGGER = logging.getLogger(__name__)
 
+AUTH_ERROR_CODES = frozenset({"401", "403"})
+
 
 def _redact_secret(value: str, secret: str) -> str:
     """Redact a secret from text intended for logs."""
@@ -43,6 +45,14 @@ class Smart1ApiError(Exception):
     def __init__(self, code: object) -> None:
         self.code = sanitize_api_error_code(code)
         super().__init__(f"smart1 API error {self.code}")
+
+
+def is_auth_error(error: BaseException) -> bool:
+    """Return whether an API error requires new credentials."""
+    return (
+        isinstance(error, Smart1ApiError)
+        and error.code in AUTH_ERROR_CODES
+    )
 
 
 def describe_api_error(error: BaseException) -> str:

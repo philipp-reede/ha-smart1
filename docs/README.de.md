@@ -159,6 +159,12 @@ Alternativ kann das Repository manuell hinzugefügt werden:
    gespeichert.
 4. Falls mehrere Anlagen verfügbar sind, die gewünschte Anlage auswählen.
 
+Jede Anlage kann nur einmal eingerichtet werden. Lehnt das Portal den
+gespeicherten Schlüssel später ab, öffnet Home Assistant einen Reparaturdialog.
+Der Ersatzschlüssel wird nur übernommen, wenn er weiterhin Zugriff auf dieselbe
+Anlage gewährt; Geräte, Entitäten und Energy-Dashboard-Statistiken behalten ihre
+bisherigen Kennungen.
+
 Die Live-Entitäten stehen anschließend zur Verfügung. Der historische Import
 startet automatisch im Hintergrund und wird auch nach späteren Neustarts
 ausgeführt. Der erste Import kann abhängig von der Antwortzeit des Portals

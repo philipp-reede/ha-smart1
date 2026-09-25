@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Give every configured installation a stable config-entry unique ID based on
+  its smart1 `DeviceId` and prevent duplicate configuration of the same plant
+- Add a Home Assistant reauthentication flow that validates a replacement API
+  key against the existing installation before updating the stored credential
+
+### Reliability
+
+- Migrate existing entries to the new identity metadata without changing their
+  device, entity or external-statistic identifiers
+- Distinguish rejected credentials from temporary portal and network failures;
+  only HTTP/API `401` and `403` responses request reauthentication
+
+### Testing
+
+- Cover single- and multi-plant setup, modern and legacy duplicates,
+  reauthentication, config-entry migration and Energy-role option validation
+
 ### Documentation
 
 - Record the successful real-world validation of smart1 EMS `v0.6.6` with
