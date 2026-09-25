@@ -32,6 +32,8 @@ from .history import (
     HISTORY_DAYS,
     MAX_HOURLY_RECORDS_PER_DAY,
     REFRESH_DAYS,
+    history_date_range,
+    history_repair_start,
 )
 from .history_state import (
     DERIVED_HISTORY_SCHEMA_VERSION,
@@ -160,6 +162,7 @@ def determine_hourly_import_window(
     *,
     initial_backfill_complete: bool = False,
     force_initial_rebuild: bool = False,
+    required_start: date | None = None,
 ) -> tuple[date, float]:
     """Return the hourly refresh start and preceding cumulative sum.
 
@@ -172,7 +175,8 @@ def determine_hourly_import_window(
         return initial_start, 0.0
     if not records:
         if initial_backfill_complete:
-            return today - timedelta(days=refresh_days - 1), 0.0
+            refresh_start = today - timedelta(days=refresh_days - 1)
+            return min(refresh_start, required_start or refresh_start), 0.0
         return initial_start, 0.0
     if needs_hourly_rebuild(
         records,
@@ -202,6 +206,8 @@ def determine_hourly_import_window(
         return initial_start, 0.0
 
     refresh_start = today - timedelta(days=refresh_days - 1)
+    if required_start is not None:
+        refresh_start = min(refresh_start, required_start)
     preceding = [
         record
         for record in records
@@ -212,6 +218,22 @@ def determine_hourly_import_window(
     if preceding:
         baseline = max(preceding, key=_statistics_start)
         return refresh_start, float(baseline["sum"])
+
+    if required_start is not None and refresh_start == required_start:
+        following = [
+            record
+            for record in records
+            if record.get("sum") is not None
+            and record.get("state") is not None
+            and _statistics_start(record).astimezone(local_tz).date()
+            >= refresh_start
+        ]
+        if following:
+            first = min(following, key=_statistics_start)
+            return (
+                refresh_start,
+                float(first["sum"]) - float(first["state"]),
+            )
 
     oldest_date = min(
         _statistics_start(record).astimezone(local_tz).date()
@@ -330,11 +352,21 @@ class Smart1DerivedEnergyImporter:
             DERIVED_HISTORY_SCHEMA_VERSION,
         )
 
+    def _checked_through(self, statistic_id: str) -> date | None:
+        """Return the last fully queried day for one derived statistic."""
+        if not self.history_state:
+            return None
+        return self.history_state.checked_through(
+            statistic_id,
+            DERIVED_HISTORY_SCHEMA_VERSION,
+        )
+
     def _mark_complete(
         self,
         statistic_id: str,
         *,
         has_data: bool,
+        checked_through: date | None = None,
     ) -> None:
         """Persist completion of one derived statistic backfill."""
         if self.history_state:
@@ -342,7 +374,26 @@ class Smart1DerivedEnergyImporter:
                 statistic_id,
                 DERIVED_HISTORY_SCHEMA_VERSION,
                 has_data=has_data,
+                checked_through=checked_through,
             )
+
+    def _next_empty_retry_date(
+        self,
+        statistic_id: str,
+        *,
+        today: date,
+        before: date,
+    ) -> date | None:
+        """Return at most one old empty day for one role this run."""
+        if not self.history_state:
+            return None
+        return self.history_state.next_empty_retry_date(
+            statistic_id,
+            DERIVED_HISTORY_SCHEMA_VERSION,
+            oldest_supported=today - timedelta(days=HISTORY_DAYS - 1),
+            before=before,
+            today=today,
+        )
 
     def _schedule_persistence_task(self, coroutine: Any) -> None:
         """Keep a late Recorder finalizer alive until it finishes."""
@@ -366,6 +417,11 @@ class Smart1DerivedEnergyImporter:
         statistics_by_role: Mapping[str, list[StatisticData]],
         expected_marker_versions: Mapping[str, int],
         persistence_generation: int,
+        checked_through_by_role: Mapping[str, date | None] | None = None,
+        empty_days_by_role: Mapping[str, set[date]] | None = None,
+        nonempty_days_by_role: Mapping[str, set[date]] | None = None,
+        retried_days: Mapping[str, date] | None = None,
+        today: date | None = None,
     ) -> set[str]:
         """Verify queued derived imports and complete only persisted roles."""
         if not role_keys or not self.history_state:
@@ -394,11 +450,43 @@ class Smart1DerivedEnergyImporter:
             if persistence_generation != self._persistence_generation:
                 return role_key, False
 
-            marked = self.history_state.mark_complete_if_unchanged(
+            checked_through = (
+                checked_through_by_role.get(role_key)
+                if checked_through_by_role
+                else None
+            )
+            empty_days = (
+                empty_days_by_role.get(role_key, set())
+                if empty_days_by_role
+                else set()
+            )
+            nonempty_days = (
+                nonempty_days_by_role.get(role_key, set())
+                if nonempty_days_by_role
+                else set()
+            )
+            retried_day = (
+                retried_days.get(role_key) if retried_days else None
+            )
+            marked = self.history_state.commit_scan_if_unchanged(
                 statistic_ids[role_key],
                 DERIVED_HISTORY_SCHEMA_VERSION,
                 has_data=True,
                 expected_version=expected_marker_versions[role_key],
+                checked_through=checked_through,
+                empty_days=empty_days,
+                nonempty_days=nonempty_days,
+                oldest_supported=(
+                    today - timedelta(days=HISTORY_DAYS - 1)
+                    if today is not None
+                    else date.min
+                ),
+                retried_day=(
+                    retried_day
+                    if retried_day in (empty_days | nonempty_days)
+                    else None
+                ),
+                checked_on=(today if retried_day is not None else None),
             )
             if not marked:
                 marked = bool(
@@ -411,6 +499,17 @@ class Smart1DerivedEnergyImporter:
                         DERIVED_HISTORY_SCHEMA_VERSION,
                     )
                     is True
+                    and (
+                        checked_through is None
+                        or (
+                            self.history_state.checked_through(
+                                statistic_ids[role_key],
+                                DERIVED_HISTORY_SCHEMA_VERSION,
+                            )
+                            or date.min
+                        )
+                        >= checked_through
+                    )
                 )
             return role_key, marked
 
@@ -430,6 +529,11 @@ class Smart1DerivedEnergyImporter:
         statistics_by_role: Mapping[str, list[StatisticData]],
         expected_marker_versions: Mapping[str, int],
         persistence_generation: int,
+        checked_through_by_role: Mapping[str, date | None] | None = None,
+        empty_days_by_role: Mapping[str, set[date]] | None = None,
+        nonempty_days_by_role: Mapping[str, set[date]] | None = None,
+        retried_days: Mapping[str, date] | None = None,
+        today: date | None = None,
     ) -> None:
         """Finalize replacements after a delayed clear callback."""
         persisted_roles = await self._async_confirm_statistics_persistence(
@@ -439,6 +543,11 @@ class Smart1DerivedEnergyImporter:
             statistics_by_role,
             expected_marker_versions,
             persistence_generation,
+            checked_through_by_role,
+            empty_days_by_role,
+            nonempty_days_by_role,
+            retried_days,
+            today,
         )
         if persistence_generation != self._persistence_generation:
             return
@@ -489,9 +598,14 @@ class Smart1DerivedEnergyImporter:
         start_date: date,
         end_date: date,
         local_tz: ZoneInfo,
-    ) -> tuple[dict[str, list[tuple[datetime, float]]], bool]:
+    ) -> tuple[
+        dict[str, list[tuple[datetime, float]]],
+        bool,
+        date | None,
+    ]:
         """Fetch each date once and integrate selected points by UTC hour."""
         hourly_energy = {role_key: [] for role_key in self.role_points}
+        checked_through: date | None = None
         linear_ids = list(
             dict.fromkeys(point.id for point in self.role_points.values())
         )
@@ -515,7 +629,7 @@ class Smart1DerivedEnergyImporter:
                             FETCH_ATTEMPTS,
                             describe_api_error(err),
                         )
-                        return hourly_energy, False
+                        return hourly_energy, False, checked_through
                     await asyncio.sleep(2**attempt)
 
             for role_key, point in self.role_points.items():
@@ -525,9 +639,10 @@ class Smart1DerivedEnergyImporter:
                         integration.hourly_energy_kwh
                     )
 
+            checked_through = target_date
             target_date += timedelta(days=1)
 
-        return hourly_energy, True
+        return hourly_energy, True, checked_through
 
     async def async_import(
         self,
@@ -542,6 +657,13 @@ class Smart1DerivedEnergyImporter:
             return
 
         async with self._lock:
+            # Supersede pending readback finalizers from an older repair even
+            # when both runs use the same schema.  This prevents stale empty-
+            # day evidence from being committed after a newer repair found
+            # data for that day.
+            if repair:
+                self._persistence_generation += 1
+            persistence_generation = self._persistence_generation
             self._last_result = "running"
             self._last_mode = "history_repair" if repair else "current_day"
             self._last_fetch_completed = None
@@ -612,8 +734,9 @@ class Smart1DerivedEnergyImporter:
                 sorted(detected_rebuild_roles)
             )
 
-            # Adopt valid pre-marker hourly statistics without a redundant
-            # year-long import. Legacy/rebuild data still takes the full path.
+            # Adopt valid pre-marker hourly storage. The independent coverage
+            # cursor still requests one supported-window audit when needed;
+            # legacy/rebuild data takes the full replacement path below.
             for role_key, records in records_by_role.items():
                 if (
                     records
@@ -641,11 +764,17 @@ class Smart1DerivedEnergyImporter:
                     self._last_result = "repair_pending"
                     return
             forced_clear_roles = forced_rebuild_roles & rebuild_roles
-            if forced_clear_roles:
-                # Invalidate an older timed-out clear finalizer before this
-                # run performs any further network awaits.
-                self._persistence_generation += 1
-            persistence_generation = self._persistence_generation
+            required_starts = {
+                role_key: (
+                    history_repair_start(
+                        today,
+                        self._checked_through(statistic_ids[role_key]),
+                    )
+                    if repair and self.history_state
+                    else None
+                )
+                for role_key in refreshable_roles
+            }
             windows = {
                 role_key: determine_hourly_import_window(
                     records,
@@ -658,16 +787,68 @@ class Smart1DerivedEnergyImporter:
                     force_initial_rebuild=(
                         role_key in forced_rebuild_roles
                     ),
+                    required_start=required_starts[role_key],
                 )
                 for role_key, records in records_by_role.items()
                 if role_key in refreshable_roles
             }
-            start_date = min(window[0] for window in windows.values())
-            fetched_by_role, fetch_completed = await self._fetch_hourly_energy(
-                start_date,
+            main_start_date = min(window[0] for window in windows.values())
+            retry_dates = {
+                role_key: retry_date
+                for role_key in refreshable_roles
+                if repair
+                and role_key in complete_roles
+                and role_key not in rebuild_roles
+                and (
+                    retry_date := self._next_empty_retry_date(
+                        statistic_ids[role_key],
+                        today=today,
+                        before=windows[role_key][0],
+                    )
+                )
+                is not None
+            }
+            main_fetch_result = await self._fetch_hourly_energy(
+                main_start_date,
                 today,
                 local_tz,
             )
+            (
+                fetched_by_role,
+                fetch_completed,
+                *main_checked,
+            ) = main_fetch_result
+            main_checked_through = (
+                main_checked[0]
+                if main_checked
+                else (today if fetch_completed else None)
+            )
+            main_fetched_by_role = {
+                role_key: list(fetched_energy)
+                for role_key, fetched_energy in fetched_by_role.items()
+            }
+            completed_retry_roles: set[str] = set()
+            if fetch_completed:
+                for retry_date in sorted(set(retry_dates.values())):
+                    retry_fetch_result = await self._fetch_hourly_energy(
+                        retry_date,
+                        retry_date,
+                        local_tz,
+                    )
+                    (
+                        retry_fetched_by_role,
+                        retry_completed,
+                        *_retry_checked,
+                    ) = retry_fetch_result
+                    if not retry_completed:
+                        continue
+                    for role_key, role_retry_date in retry_dates.items():
+                        if role_retry_date != retry_date:
+                            continue
+                        fetched_by_role[role_key].extend(
+                            retry_fetched_by_role[role_key]
+                        )
+                        completed_retry_roles.add(role_key)
             self._last_fetch_completed = fetch_completed
             initial_backfill_roles = refreshable_roles - complete_roles
             if initial_backfill_roles and not fetch_completed:
@@ -677,6 +858,56 @@ class Smart1DerivedEnergyImporter:
                 )
                 self._last_result = "incomplete_fetch"
                 return
+
+            coverage_targets = {
+                role_key: main_checked_through
+                for role_key in refreshable_roles
+                if main_checked_through is not None
+                and main_checked_through >= windows[role_key][0]
+            }
+            empty_days_by_role: dict[str, set[date]] = {}
+            nonempty_days_by_role: dict[str, set[date]] = {}
+            nonempty_retry_roles: set[str] = set()
+            for role_key in refreshable_roles:
+                main_nonempty_days = {
+                    start.astimezone(local_tz).date()
+                    for start, _energy in main_fetched_by_role[role_key]
+                    if start.astimezone(local_tz).date()
+                    >= windows[role_key][0]
+                }
+                checked_days = (
+                    history_date_range(
+                        windows[role_key][0],
+                        main_checked_through,
+                    )
+                    if role_key in coverage_targets
+                    else set()
+                )
+                retry_nonempty_days = {
+                    start.astimezone(local_tz).date()
+                    for start, _energy in fetched_by_role[role_key]
+                    if role_key in completed_retry_roles
+                    and start.astimezone(local_tz).date()
+                    == retry_dates[role_key]
+                }
+                empty_days = checked_days - main_nonempty_days
+                if role_key in completed_retry_roles:
+                    if retry_nonempty_days:
+                        nonempty_retry_roles.add(role_key)
+                        windows[role_key] = determine_hourly_import_window(
+                            records_by_role[role_key],
+                            today,
+                            local_tz,
+                            refresh_days,
+                            initial_backfill_complete=True,
+                            required_start=retry_dates[role_key],
+                        )
+                    else:
+                        empty_days.add(retry_dates[role_key])
+                empty_days_by_role[role_key] = empty_days
+                nonempty_days_by_role[role_key] = (
+                    main_nonempty_days | retry_nonempty_days
+                )
             if rebuild_roles and not fetch_completed:
                 _LOGGER.warning(
                     "Keeping existing smart1 energy statistics because the "
@@ -781,13 +1012,22 @@ class Smart1DerivedEnergyImporter:
                     for role_key in (
                         forced_clear_roles - roles_with_statistics
                     ):
-                        self.history_state.mark_complete_if_unchanged(
+                        self.history_state.commit_scan_if_unchanged(
                             statistic_ids[role_key],
                             DERIVED_HISTORY_SCHEMA_VERSION,
                             has_data=False,
                             expected_version=(
                                 expected_marker_versions[role_key]
                             ),
+                            checked_through=(
+                                today if fetch_completed and repair else None
+                            ),
+                            empty_days=empty_days_by_role[role_key],
+                            nonempty_days=set(),
+                            oldest_supported=(
+                                today - timedelta(days=HISTORY_DAYS - 1)
+                            ),
+                            checked_on=None,
                         )
 
                 late_rebuild_roles = (
@@ -812,6 +1052,16 @@ class Smart1DerivedEnergyImporter:
                                 for role_key in late_rebuild_roles
                             },
                             persistence_generation,
+                            {
+                                role_key: (
+                                    today if fetch_completed and repair else None
+                                )
+                                for role_key in late_rebuild_roles
+                            },
+                            empty_days_by_role,
+                            nonempty_days_by_role,
+                            retry_dates,
+                            today,
                         )
                     )
 
@@ -881,6 +1131,12 @@ class Smart1DerivedEnergyImporter:
                                 statistic_ids[role_key]
                             ) is not True
                         )
+                        or (
+                            role_key in coverage_targets
+                            and repair
+                            and required_starts[role_key] is not None
+                        )
+                        or role_key in completed_retry_roles
                     )
                 }
 
@@ -892,6 +1148,18 @@ class Smart1DerivedEnergyImporter:
                     statistics_by_role,
                     expected_marker_versions,
                     persistence_generation,
+                    {
+                        role_key: (
+                            coverage_targets.get(role_key)
+                            if repair
+                            else None
+                        )
+                        for role_key in marker_update_roles
+                    },
+                    empty_days_by_role,
+                    nonempty_days_by_role,
+                    retry_dates,
+                    today,
                 )
             )
 
@@ -908,14 +1176,72 @@ class Smart1DerivedEnergyImporter:
                     # Confirmation already wrote the generation-guarded
                     # marker. Failed roles remain pending below.
                     continue
-                self._mark_complete(
+                if not self.history_state:
+                    continue
+                self.history_state.commit_scan_if_unchanged(
                     statistic_ids[role_key],
+                    DERIVED_HISTORY_SCHEMA_VERSION,
                     has_data=has_data,
+                    expected_version=expected_marker_versions[role_key],
+                    checked_through=(
+                        coverage_targets.get(role_key) if repair else None
+                    ),
+                    empty_days=empty_days_by_role[role_key],
+                    nonempty_days=nonempty_days_by_role[role_key],
+                    oldest_supported=(
+                        today - timedelta(days=HISTORY_DAYS - 1)
+                    ),
+                    retried_day=(
+                        retry_dates.get(role_key)
+                        if role_key in completed_retry_roles
+                        else None
+                    ),
+                    checked_on=(
+                        today
+                        if role_key in completed_retry_roles
+                        else None
+                    ),
                 )
             for role_key in roles_with_statistics - completed_roles:
                 if self._data_presence(statistic_ids[role_key]) is not True:
                     # Confirmation above owns this marker update as well.
                     continue
+
+            if repair:
+                for role_key in refreshable_roles - roles_with_statistics:
+                    checked_through = coverage_targets.get(role_key)
+                    if checked_through is None:
+                        continue
+                    statistic_id = statistic_ids[role_key]
+                    if role_key in completed_roles:
+                        # The completion loop above atomically persisted this.
+                        continue
+                    if not self.history_state:
+                        continue
+                    self.history_state.commit_scan_if_unchanged(
+                        statistic_id,
+                        DERIVED_HISTORY_SCHEMA_VERSION,
+                        has_data=(
+                            self._data_presence(statistic_id) is True
+                        ),
+                        expected_version=expected_marker_versions[role_key],
+                        checked_through=checked_through,
+                        empty_days=empty_days_by_role[role_key],
+                        nonempty_days=nonempty_days_by_role[role_key],
+                        oldest_supported=(
+                            today - timedelta(days=HISTORY_DAYS - 1)
+                        ),
+                        retried_day=(
+                            retry_dates.get(role_key)
+                            if role_key in completed_retry_roles
+                            else None
+                        ),
+                        checked_on=(
+                            today
+                            if role_key in completed_retry_roles
+                            else None
+                        ),
+                    )
 
             if pending_marker_roles:
                 _LOGGER.warning(
@@ -942,6 +1268,18 @@ class Smart1DerivedEnergyImporter:
                                 for role_key in pending_marker_roles
                             },
                             persistence_generation,
+                            {
+                                role_key: (
+                                    coverage_targets.get(role_key)
+                                    if repair
+                                    else None
+                                )
+                                for role_key in pending_marker_roles
+                            },
+                            empty_days_by_role,
+                            nonempty_days_by_role,
+                            retry_dates,
+                            today,
                         )
                     )
                 return

@@ -750,6 +750,102 @@ class Smart1OptionsFlowTest(unittest.TestCase):
         )
         return flow
 
+    @staticmethod
+    def _defaults(result: dict) -> dict[str, object]:
+        return {
+            field.key: field.default
+            for field in result["data_schema"].schema
+        }
+
+    def test_never_configured_roles_use_recommendations(self) -> None:
+        flow = self._flow()
+
+        result = asyncio.run(flow.async_step_init())
+
+        self.assertEqual(
+            self._defaults(result),
+            {
+                "grid_import": "point-import",
+                "grid_export": "point-export",
+                "battery_charge": "point-battery",
+            },
+        )
+
+    def test_reopening_explicitly_disabled_roles_keeps_them_disabled(
+        self,
+    ) -> None:
+        first_flow = self._flow()
+        saved = asyncio.run(first_flow.async_step_init({
+            "grid_import": "",
+            "grid_export": "",
+            "battery_charge": "",
+        }))
+        flow = self._flow(saved["data"])
+
+        result = asyncio.run(flow.async_step_init())
+
+        self.assertEqual(
+            self._defaults(result),
+            {
+                "grid_import": "",
+                "grid_export": "",
+                "battery_charge": "",
+            },
+        )
+
+    def test_roles_not_covered_by_saved_marker_remain_recommended(
+        self,
+    ) -> None:
+        flow = self._flow({
+            "energy_roles": {},
+            "energy_roles_configured": ["grid_import"],
+        })
+
+        result = asyncio.run(flow.async_step_init())
+
+        self.assertEqual(
+            self._defaults(result),
+            {
+                "grid_import": "",
+                "grid_export": "point-export",
+                "battery_charge": "point-battery",
+            },
+        )
+
+    def test_legacy_empty_options_keep_every_role_disabled(
+        self,
+    ) -> None:
+        flow = self._flow({"energy_roles": {}})
+
+        result = asyncio.run(flow.async_step_init())
+
+        self.assertEqual(
+            self._defaults(result),
+            {
+                "grid_import": "",
+                "grid_export": "",
+                "battery_charge": "",
+            },
+        )
+
+    def test_legacy_partial_options_treat_omitted_roles_as_disabled(
+        self,
+    ) -> None:
+        flow = self._flow({
+            "energy_roles": {"grid_import": "point-import"},
+        })
+
+        result = asyncio.run(flow.async_step_init())
+
+        self.assertEqual(
+            self._defaults(result),
+            {
+                "grid_import": "point-import",
+                "grid_export": "",
+                "battery_charge": "",
+            },
+        )
+
     def test_duplicate_energy_point_is_rejected(self) -> None:
         flow = self._flow()
 
@@ -803,6 +899,38 @@ class Smart1OptionsFlowTest(unittest.TestCase):
                     "grid_import": "point-import",
                     "grid_export": "point-export",
                 },
+                "energy_roles_configured": [
+                    "grid_import",
+                    "grid_export",
+                    "battery_charge",
+                ],
+            },
+        )
+
+    def test_saving_other_options_does_not_reenable_disabled_roles(
+        self,
+    ) -> None:
+        flow = self._flow({
+            "active_linear_ids": ["point-import"],
+            "energy_roles": {},
+        })
+
+        form = asyncio.run(flow.async_step_init())
+        result = asyncio.run(
+            flow.async_step_init(self._defaults(form))
+        )
+
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(
+            result["data"],
+            {
+                "active_linear_ids": ["point-import"],
+                "energy_roles": {},
+                "energy_roles_configured": [
+                    "grid_import",
+                    "grid_export",
+                    "battery_charge",
+                ],
             },
         )
 

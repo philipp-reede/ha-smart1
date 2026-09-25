@@ -65,6 +65,9 @@ class Smart1SetupTest(unittest.TestCase):
             instance = None
             linear_error = None
             linear_devices = [point]
+            inverter_error = None
+            module_field_error = None
+            bus_error = None
 
             def __init__(self, session, api_key, device_id) -> None:
                 type(self).instance = self
@@ -79,7 +82,8 @@ class Smart1SetupTest(unittest.TestCase):
                             "endpoint_result": "empty_response",
                             "response_columns": ["Inverter Id"],
                         },
-                    )
+                    ),
+                    side_effect=type(self).inverter_error,
                 )
                 self.get_module_fields_with_probe = AsyncMock(
                     return_value=(
@@ -88,7 +92,8 @@ class Smart1SetupTest(unittest.TestCase):
                             "endpoint_result": "empty_response",
                             "response_columns": ["ModulfieldId"],
                         },
-                    )
+                    ),
+                    side_effect=type(self).module_field_error,
                 )
                 self.get_buses_with_probe = AsyncMock(
                     return_value=(
@@ -97,7 +102,8 @@ class Smart1SetupTest(unittest.TestCase):
                             "endpoint_result": "empty_response",
                             "response_columns": ["BusId"],
                         },
-                    )
+                    ),
+                    side_effect=type(self).bus_error,
                 )
 
         class FakeCoordinator:
@@ -382,6 +388,197 @@ class Smart1SetupTest(unittest.TestCase):
                     importer.async_import.await_args_list,
                     [call(), call(1, repair=False)],
                 )
+
+                # Optional static topology must remain non-blocking, but a
+                # transient first failure must heal without a manual reload.
+                # Once any failed endpoint responds, reload exactly once so
+                # the sensor platform can create the recovered entities.
+                entry.background_coroutines.clear()
+                scheduled_before_retry = len(scheduled)
+                topology_error = ClientError(
+                    "Request failed for "
+                    "https://example.test/?apikey=private-topology-key"
+                )
+                FakeApi.inverter_error = topology_error
+                FakeApi.module_field_error = topology_error
+                FakeApi.bus_error = topology_error
+                hass.config_entries.async_reload.reset_mock()
+                try:
+                    self.assertTrue(
+                        await integration.async_setup_entry(hass, entry)
+                    )
+                finally:
+                    FakeApi.inverter_error = None
+                    FakeApi.module_field_error = None
+                    FakeApi.bus_error = None
+
+                retry_runtime = hass.data["smart1_ems"][entry.entry_id]
+                self.assertFalse(
+                    retry_runtime["inverter_discovery_authoritative"]
+                )
+                self.assertFalse(
+                    retry_runtime["module_field_discovery_authoritative"]
+                )
+                self.assertFalse(
+                    retry_runtime["bus_discovery_authoritative"]
+                )
+                retry_api = FakeApi.instance
+                topology_callbacks = [
+                    callback
+                    for callback, _interval in scheduled[
+                        scheduled_before_retry:
+                    ]
+                    if getattr(callback, "__name__", "")
+                    == "_async_retry_topology"
+                ]
+                self.assertEqual(len(topology_callbacks), 1)
+                with self.assertLogs(
+                    integration._LOGGER,
+                    level="DEBUG",
+                ) as topology_logs:
+                    await topology_callbacks[0]()
+                self.assertNotIn(
+                    "private-topology-key",
+                    "\n".join(topology_logs.output),
+                )
+                hass.config_entries.async_reload.assert_not_awaited()
+
+                # A successful but schema-less blank response is still
+                # ambiguous. It must neither reload nor consume the retry.
+                for topology_mock in (
+                    retry_api.get_inverters_with_probe,
+                    retry_api.get_module_fields_with_probe,
+                    retry_api.get_buses_with_probe,
+                ):
+                    topology_mock.side_effect = None
+                    topology_mock.return_value = (
+                        [],
+                        {
+                            "endpoint_result": "empty_response",
+                            "response_columns": [],
+                        },
+                    )
+                await topology_callbacks[0]()
+                await asyncio.sleep(0)
+                hass.config_entries.async_reload.assert_not_awaited()
+                self.assertTrue(
+                    integration._topology_probe_needs_retry(
+                        [],
+                        {
+                            "endpoint_result": "empty_response",
+                            "response_columns": [],
+                        },
+                        integration._INVERTER_ID_COLUMNS,
+                    )
+                )
+
+                recovered_inverter = object()
+                recovered_module_field = object()
+                recovered_bus = object()
+                retry_api.get_inverters_with_probe.side_effect = None
+                retry_api.get_inverters_with_probe.return_value = (
+                    [recovered_inverter],
+                    {
+                        "endpoint_result": "data_returned",
+                        "response_columns": ["Inverter Id"],
+                    },
+                )
+                retry_api.get_module_fields_with_probe.side_effect = None
+                retry_api.get_module_fields_with_probe.return_value = (
+                    [recovered_module_field],
+                    {
+                        "endpoint_result": "data_returned",
+                        "response_columns": ["ModulfieldId"],
+                    },
+                )
+                retry_api.get_buses_with_probe.side_effect = None
+                retry_api.get_buses_with_probe.return_value = (
+                    [recovered_bus],
+                    {
+                        "endpoint_result": "data_returned",
+                        "response_columns": ["BusId"],
+                    },
+                )
+
+                await topology_callbacks[0]()
+                await asyncio.sleep(0)
+
+                hass.config_entries.async_reload.assert_awaited_once_with(
+                    entry.entry_id
+                )
+                self.assertEqual(
+                    retry_runtime["inverters"],
+                    [recovered_inverter],
+                )
+                self.assertEqual(
+                    retry_runtime["module_fields"],
+                    [recovered_module_field],
+                )
+                self.assertEqual(retry_runtime["buses"], [recovered_bus])
+                self.assertEqual(
+                    FakeCoordinator.instance.inverters,
+                    [recovered_inverter],
+                )
+                self.assertTrue(
+                    retry_runtime["inverter_discovery_authoritative"]
+                )
+                self.assertTrue(
+                    retry_runtime["module_field_discovery_authoritative"]
+                )
+                self.assertTrue(
+                    retry_runtime["bus_discovery_authoritative"]
+                )
+
+                # Simulate the reload while every immediate portal request
+                # fails again. The in-memory handoff must be consumed instead
+                # of re-requesting metadata and scheduling another recovery
+                # reload cycle.
+                FakeApi.inverter_error = topology_error
+                FakeApi.module_field_error = topology_error
+                FakeApi.bus_error = topology_error
+                try:
+                    self.assertTrue(
+                        await integration.async_setup_entry(hass, entry)
+                    )
+                finally:
+                    FakeApi.inverter_error = None
+                    FakeApi.module_field_error = None
+                    FakeApi.bus_error = None
+                reloaded_api = FakeApi.instance
+                reloaded_api.get_inverters_with_probe.assert_not_awaited()
+                reloaded_api.get_module_fields_with_probe.assert_not_awaited()
+                reloaded_api.get_buses_with_probe.assert_not_awaited()
+                reloaded_runtime = hass.data["smart1_ems"][entry.entry_id]
+                self.assertEqual(
+                    reloaded_runtime["inverters"],
+                    [recovered_inverter],
+                )
+                self.assertNotIn(
+                    integration.TOPOLOGY_RECOVERY_CACHE_KEY,
+                    hass.data,
+                )
+
+                # The old interval callback can race with unload, but its
+                # guard must prevent both another request and reload.
+                await topology_callbacks[0]()
+                await asyncio.sleep(0)
+                hass.config_entries.async_reload.assert_awaited_once()
+                self.assertEqual(
+                    retry_api.get_inverters_with_probe.await_count,
+                    4,
+                )
+                self.assertEqual(
+                    retry_api.get_module_fields_with_probe.await_count,
+                    4,
+                )
+                self.assertEqual(
+                    retry_api.get_buses_with_probe.await_count,
+                    4,
+                )
+                for retry_background, _name in entry.background_coroutines:
+                    await retry_background
+                entry.background_coroutines.clear()
+                hass.config_entries.async_reload.reset_mock()
 
                 api_key = "fake-api-key-must-not-leak"
                 FakeApi.linear_error = ClientError(
@@ -836,6 +1033,8 @@ class Smart1SetupTest(unittest.TestCase):
         self.assertEqual(
             hass.config_entries.async_forward_entry_setups.await_args_list,
             [
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
                 call(entry, ["sensor"]),
                 call(entry, ["sensor"]),
                 call(entry, ["sensor"]),

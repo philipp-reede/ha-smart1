@@ -247,24 +247,33 @@ five-minute power values. This is deliberately opt-in:
   creates a new statistic instead of combining incompatible histories.
 - The initial import covers 365 days; the latest three days are refreshed
   every six hours.
+- Per-role coverage advances through the contiguous successfully checked
+  prefix. If a later date fails, the next repair starts at the first unchecked
+  date; prefixes that create rows advance only after Recorder persistence.
+  Initial, destructive and schema-replacement backfills remain full-range
+  atomic.
 - The separate 15-minute current-day refresh skips roles whose initial legacy
   rebuild is still pending. It can update already completed roles without
   clearing or prematurely completing the pending role.
 - Detected legacy or non-monotonic statistics are repaired by upserting the
   supported window. Valid older rows and successful no-data dates are retained;
-  a successful empty repair is marked complete so it is not repeated every six
-  hours. A destructive clear is reserved for an explicit multi-installation
-  legacy migration. Sum-decrease detection covers only the supported window
-  plus its newest cumulative predecessor, because older rows cannot be repaired
-  from the API. Complete replacement batches are queued directly behind a
-  destructive clear before its callback is awaited, preserving FIFO recovery
-  even if Recorder reports a timeout. All batches are synchronously validated
-  before the clear is queued. Completion is persisted only after every expected
-  statistic can be read back from Recorder. If the bounded foreground wait or
-  clear callback expires first, a Home Assistant-tracked background finalizer
-  continues verification. It completes only the active config-entry generation,
-  preventing another annual scan without allowing an older overlapping run or
-  unloaded entry to overwrite newer state.
+  a fully empty repair may complete the schema without restarting an annual
+  scan. Its no-data dates remain in a bounded queue and are rechecked one at a
+  time in round-robin order. A hard single-day retry failure leaves the queue
+  and cursor unchanged; a retry that yields samples is removed only after
+  Recorder persistence. A destructive clear is reserved for an explicit
+  multi-installation legacy migration. Sum-decrease detection covers only the
+  supported window plus its newest cumulative predecessor, because older rows
+  cannot be repaired from the API. Complete replacement batches are queued
+  directly behind a destructive clear before its callback is awaited,
+  preserving FIFO recovery even if Recorder reports a timeout. All batches are
+  synchronously validated before the clear is queued. Completion is persisted
+  only after every expected statistic can be read back from Recorder. If the
+  bounded foreground wait or clear callback expires first, a Home
+  Assistant-tracked background finalizer continues verification. It completes
+  only the active config-entry generation, preventing another annual scan
+  without allowing an older overlapping run or unloaded entry to overwrite
+  newer state.
 - An orphaned legacy statistic has its completion marker removed immediately
   after Recorder accepts the irreversible clear. The eventual callback records
   cleanup against the latest config-entry data without removing a completion
@@ -285,6 +294,21 @@ requests the day endpoint once per date when importing history.
 - The initial import covers the most recent 365 days.
 - The latest three days are refreshed every six hours so delayed portal data
   can be corrected.
+- The active storage schema persists the last date in the contiguous
+  successfully checked prefix. After a longer outage, repair resumes with the
+  following day instead of jumping directly to the three-day refresh window.
+  Completion markers created before this checkpoint existed receive one full
+  supported-window validation, allowing portal data for older inner gaps to be
+  imported.
+- The checkpoint advances through a contiguous successful prefix even if a
+  later date fails and, for prefixes creating rows, only after confirmed
+  Recorder persistence. The next run starts at the first unchecked date;
+  initial, destructive and schema-replacement backfills still require the
+  complete range.
+- A successful no-data response is a checked but unknown day and is preserved
+  rather than converted to zero. Such days enter a bounded supported-window
+  queue and one older day is rechecked at a time in round-robin order. A hard
+  retry failure does not advance that queue.
 - The exact daily total is distributed into UTC-aligned hourly statistics by
   scaling the integrated five-minute `pv_global` power profile. This preserves
   the documented daily production while keeping the Energy Dashboard's hourly
@@ -299,7 +323,8 @@ requests the day endpoint once per date when importing history.
   statistics remain stored.
 - Schema upgrades revalidate completion markers that previously represented an
   empty result exactly once. A successful empty response is then recorded under
-  the new schema and returns to the normal short refresh cycle.
+  the new schema and completes it without another annual scan; old no-data days
+  are still revisited individually by the bounded retry rotation.
 - PV rows produced by older releases between full UTC hours are detected even
   when their completion marker is current. After a complete 365-day fetch, the
   statistic is replaced with aligned rows; valid rows before that window and

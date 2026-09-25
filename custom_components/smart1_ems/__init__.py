@@ -41,6 +41,8 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
 HISTORY_UPDATE_INTERVAL = timedelta(hours=6)
 CURRENT_DAY_UPDATE_INTERVAL = timedelta(minutes=15)
+TOPOLOGY_RETRY_INTERVAL = timedelta(minutes=15)
+TOPOLOGY_RECOVERY_CACHE_KEY = f"{DOMAIN}_topology_recovery"
 LEGACY_ORPHAN_CLEANUP_KEY = "legacy_orphan_cleanup_ids"
 PV_CAPABILITY_CONFIRMED_KEY = "pv_capability_confirmed"
 
@@ -64,6 +66,109 @@ def _discovery_probe_is_authoritative(
         and isinstance(columns, list)
         and bool(id_columns.intersection(columns))
     )
+
+
+def _topology_response_is_conclusive(
+    values: object,
+    probe: Mapping[str, object],
+    id_columns: set[str],
+) -> bool:
+    """Return whether an optional topology response can end recovery."""
+    return bool(values) or probe.get("endpoint_result") == "not_found" or (
+        _discovery_probe_is_authoritative(dict(probe), id_columns)
+    )
+
+
+def _topology_probe_needs_retry(
+    values: object,
+    probe: Mapping[str, object],
+    id_columns: set[str],
+) -> bool:
+    """Return whether optional topology remains transient or ambiguous."""
+    return not _topology_response_is_conclusive(values, probe, id_columns)
+
+
+async def _async_retry_failed_topology(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    api: Smart1Api,
+    coordinator: Smart1Coordinator,
+    runtime_data: dict[str, object],
+    pending_endpoints: set[str],
+) -> bool:
+    """Retry failed optional topology requests and report reload necessity.
+
+    A normal response, including an optional 404, resolves that endpoint. The
+    caller reloads the entry only when the sensor platform can add recovered
+    devices or safely clean up topology that is now authoritatively absent.
+    """
+    reload_needed = False
+    endpoint_specs = {
+        "inverters": (
+            api.get_inverters_with_probe,
+            _INVERTER_ID_COLUMNS,
+            "inverter_discovery_authoritative",
+        ),
+        "module_fields": (
+            api.get_module_fields_with_probe,
+            _MODULE_FIELD_ID_COLUMNS,
+            "module_field_discovery_authoritative",
+        ),
+        "buses": (
+            api.get_buses_with_probe,
+            _BUS_ID_COLUMNS,
+            "bus_discovery_authoritative",
+        ),
+    }
+
+    for endpoint in tuple(pending_endpoints):
+        fetch, id_columns, authoritative_key = endpoint_specs[endpoint]
+        try:
+            values, probe = await fetch(missing_ok=True)
+        except (ClientError, Smart1ApiError, TimeoutError) as err:
+            _LOGGER.debug(
+                "Unable to retry smart1 %s topology: %s",
+                endpoint,
+                describe_api_error(err),
+            )
+            continue
+
+        if not _topology_response_is_conclusive(
+            values,
+            probe,
+            id_columns,
+        ):
+            # A blank HTTP-200 response without the documented ID column is
+            # not proof of an empty topology. Keep retrying until the portal
+            # returns a known schema, actual parsed objects, or an explicit
+            # optional 404.
+            continue
+
+        pending_endpoints.remove(endpoint)
+        runtime_data[endpoint] = values
+        authoritative = _discovery_probe_is_authoritative(
+            probe,
+            id_columns,
+        )
+        runtime_data[authoritative_key] = authoritative
+        endpoint_requires_reload = authoritative or bool(values)
+        reload_needed = reload_needed or endpoint_requires_reload
+        if endpoint_requires_reload:
+            # Carry the successful result across the recovery reload. Without
+            # this handoff, an alternating success/failure portal could lose
+            # the recovered data and start a new reload cycle every interval.
+            recovery_cache = hass.data.setdefault(
+                TOPOLOGY_RECOVERY_CACHE_KEY,
+                {},
+            ).setdefault(entry.entry_id, {})
+            recovery_cache[endpoint] = (list(values), dict(probe))
+        if endpoint == "inverters":
+            # Keep optional detailed polling useful until the reload runs.
+            coordinator.inverters = list(values)
+        elif endpoint == "buses":
+            runtime_data["bus_probe"] = probe
+
+    return reload_needed
 
 
 def _is_unscoped_legacy_statistic_id(statistic_id: object) -> bool:
@@ -228,66 +333,80 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # retaining a client exception that may contain the API-key URL.
         raise ConfigEntryNotReady(describe_api_error(err)) from None
 
-    try:
-        inverters, inverter_probe = await api.get_inverters_with_probe(
-            missing_ok=True
-        )
-    except (ClientError, Smart1ApiError, TimeoutError) as err:
-        # Inverter metadata and string diagnostics are optional. Installations
-        # without these endpoints must retain all existing linear entities.
-        _LOGGER.debug(
-            "Unable to discover smart1 inverters: %s",
-            describe_api_error(err),
-        )
-        inverters = []
-        inverter_probe = {
-            "endpoint_result": "request_failed",
-            "response_columns": [],
-        }
+    topology_cache_by_entry = hass.data.get(TOPOLOGY_RECOVERY_CACHE_KEY, {})
+    topology_recovery_cache = topology_cache_by_entry.get(entry.entry_id, {})
+    cached_topology_endpoints: set[str] = set()
 
-    try:
-        module_fields, module_field_probe = (
-            await api.get_module_fields_with_probe(missing_ok=True)
-        )
-    except (ClientError, Smart1ApiError, TimeoutError) as err:
-        # Module-field configuration is optional and must not affect existing
-        # live values or Energy Dashboard statistics.
-        _LOGGER.debug(
-            "Unable to discover smart1 module fields: %s",
-            describe_api_error(err),
-        )
-        module_fields = []
-        module_field_probe = {
-            "endpoint_result": "request_failed",
-            "response_columns": [],
-        }
+    if "inverters" in topology_recovery_cache:
+        inverters, inverter_probe = topology_recovery_cache["inverters"]
+        cached_topology_endpoints.add("inverters")
+    else:
+        try:
+            inverters, inverter_probe = await api.get_inverters_with_probe(
+                missing_ok=True
+            )
+        except (ClientError, Smart1ApiError, TimeoutError) as err:
+            # Inverter metadata and string diagnostics are optional.
+            _LOGGER.debug(
+                "Unable to discover smart1 inverters: %s",
+                describe_api_error(err),
+            )
+            inverters = []
+            inverter_probe = {
+                "endpoint_result": "request_failed",
+                "response_columns": [],
+            }
 
-    try:
-        buses, bus_probe = await api.get_buses_with_probe(missing_ok=True)
-    except Smart1ApiError as err:
-        # Inverter-bus configuration is optional static metadata. A missing
-        # endpoint must not affect inverter or Energy Dashboard entities.
-        _LOGGER.debug(
-            "Unable to discover smart1 inverter buses: %s",
-            describe_api_error(err),
-        )
-        buses = []
-        bus_probe = {
-            "endpoint_result": "api_error",
-            "error_code": sanitize_api_error_code(err.code),
-        }
-    except (ClientError, TimeoutError) as err:
-        # Client exceptions can contain the request URL and therefore the API
-        # key. Log and retain only their class name.
-        _LOGGER.debug(
-            "Unable to discover smart1 inverter buses (%s)",
-            describe_api_error(err),
-        )
-        buses = []
-        bus_probe = {
-            "endpoint_result": "request_failed",
-            "error_type": describe_api_error(err),
-        }
+    if "module_fields" in topology_recovery_cache:
+        module_fields, module_field_probe = topology_recovery_cache[
+            "module_fields"
+        ]
+        cached_topology_endpoints.add("module_fields")
+    else:
+        try:
+            module_fields, module_field_probe = (
+                await api.get_module_fields_with_probe(missing_ok=True)
+            )
+        except (ClientError, Smart1ApiError, TimeoutError) as err:
+            # Module fields are optional and cannot block live values.
+            _LOGGER.debug(
+                "Unable to discover smart1 module fields: %s",
+                describe_api_error(err),
+            )
+            module_fields = []
+            module_field_probe = {
+                "endpoint_result": "request_failed",
+                "response_columns": [],
+            }
+
+    if "buses" in topology_recovery_cache:
+        buses, bus_probe = topology_recovery_cache["buses"]
+        cached_topology_endpoints.add("buses")
+    else:
+        try:
+            buses, bus_probe = await api.get_buses_with_probe(missing_ok=True)
+        except Smart1ApiError as err:
+            # Inverter-bus metadata is optional and cannot block live values.
+            _LOGGER.debug(
+                "Unable to discover smart1 inverter buses: %s",
+                describe_api_error(err),
+            )
+            buses = []
+            bus_probe = {
+                "endpoint_result": "api_error",
+                "error_code": sanitize_api_error_code(err.code),
+            }
+        except (ClientError, TimeoutError) as err:
+            # Client exceptions can contain the API-key-bearing request URL.
+            _LOGGER.debug(
+                "Unable to discover smart1 inverter buses (%s)",
+                describe_api_error(err),
+            )
+            buses = []
+            bus_probe = {
+                "endpoint_result": "request_failed",
+                "error_type": describe_api_error(err),
+            }
 
     discovery = Smart1Discovery()
     discovery_result = discovery.analyze(devices)
@@ -348,7 +467,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         discovery_result.to_dict(),
     )
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+    runtime_data = {
         "api": api,
         "coordinator": coordinator,
         "history_state": history_state,
@@ -366,6 +485,78 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
         "bus_discovery_authoritative": bus_discovery_authoritative,
     }
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime_data
+
+    pending_topology_endpoints = {
+        endpoint
+        for endpoint, values, probe, id_columns in (
+            (
+                "inverters",
+                inverters,
+                inverter_probe,
+                _INVERTER_ID_COLUMNS,
+            ),
+            (
+                "module_fields",
+                module_fields,
+                module_field_probe,
+                _MODULE_FIELD_ID_COLUMNS,
+            ),
+            ("buses", buses, bus_probe, _BUS_ID_COLUMNS),
+        )
+        if endpoint not in cached_topology_endpoints
+        and _topology_probe_needs_retry(values, probe, id_columns)
+    }
+    if pending_topology_endpoints:
+        topology_reload_requested = False
+        topology_retry_in_progress = False
+
+        async def _async_retry_topology(_now=None) -> None:
+            """Recover optional static topology without a reload loop."""
+            nonlocal topology_reload_requested, topology_retry_in_progress
+            if (
+                topology_reload_requested
+                or topology_retry_in_progress
+                or not pending_topology_endpoints
+                or hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                is not runtime_data
+            ):
+                return
+            topology_retry_in_progress = True
+            try:
+                reload_needed = await _async_retry_failed_topology(
+                    hass,
+                    entry,
+                    api,
+                    coordinator,
+                    runtime_data,
+                    pending_topology_endpoints,
+                )
+            finally:
+                topology_retry_in_progress = False
+            if (
+                not reload_needed
+                or hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                is not runtime_data
+            ):
+                return
+
+            # One recovered endpoint is enough to reload: waiting for every
+            # independent optional endpoint would let one persistent failure
+            # suppress valid inverter, module-field or bus entities forever.
+            topology_reload_requested = True
+            hass.async_create_task(
+                hass.config_entries.async_reload(entry.entry_id),
+                "smart1 EMS recovered topology reload",
+            )
+
+        entry.async_on_unload(
+            async_track_time_interval(
+                hass,
+                _async_retry_topology,
+                TOPOLOGY_RETRY_INTERVAL,
+            )
+        )
 
     if not discovery_result.has_pv:
         pv_reload_requested = False
@@ -558,6 +749,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Consume a recovery handoff only after the platform setup succeeded. If
+    # the reload fails earlier, the next Home Assistant retry must still use
+    # the topology that already succeeded instead of re-requesting it.
+    if cached_topology_endpoints:
+        current_cache_by_entry = hass.data.get(
+            TOPOLOGY_RECOVERY_CACHE_KEY,
+            {},
+        )
+        current_entry_cache = current_cache_by_entry.get(entry.entry_id, {})
+        for endpoint in cached_topology_endpoints:
+            cached_result = topology_recovery_cache.get(endpoint)
+            if current_entry_cache.get(endpoint) is cached_result:
+                current_entry_cache.pop(endpoint, None)
+        if not current_entry_cache:
+            current_cache_by_entry.pop(entry.entry_id, None)
+        if not current_cache_by_entry:
+            hass.data.pop(TOPOLOGY_RECOVERY_CACHE_KEY, None)
     return True
 
 

@@ -6,6 +6,29 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Persist the latest contiguous successfully checked day for each photovoltaic
+  and derived energy statistic, resume catch-up imports after longer outages,
+  and perform one full supported-window validation for existing schema markers
+  that predate coverage tracking, so inner and trailing history gaps are
+  repaired instead of being skipped by the normal three-day refresh
+- Advance normal history coverage through every contiguous successfully checked
+  prefix and, when that prefix creates rows, only after confirmed Recorder
+  persistence. A later request failure resumes at the first unchecked day,
+  while initial, destructive and schema-replacement backfills remain
+  all-or-nothing
+- Track successful no-data days within the supported window and revisit them
+  one at a time in bounded round-robin order, allowing late portal data beyond
+  the three-day refresh window to be recovered without restarting a full
+  365-day scan
+- Preserve explicitly disabled Energy Dashboard roles across later Options
+  Flow visits and unrelated option changes, including entries saved by older
+  releases without an explicit per-role configuration marker
+- Retry transient or ambiguous inverter, module-field and bus topology probes
+  every 15 minutes, carry a successful result safely across one reload, and
+  avoid both permanently missing entities and recovery reload loops
+- Treat the optional cumulative photovoltaic endpoint as missing-capable during
+  live polling, preventing expected HTTP or embedded 404 responses from
+  producing recurring error logs
 - Read the complete existing PV statistic before a whole-ID alignment or
   profile rebuild clears Recorder, so installations with more than 9,125
   hourly rows retain all valid history outside the supported repair window
@@ -69,6 +92,13 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
+- Cover persisted PV and derived-energy catch-up after a month-long gap,
+  one-time repair of pre-coverage inner gaps, successful-prefix checkpointing
+  after incomplete fetches, bounded round-robin retries of old no-data days,
+  and delayed Recorder persistence
+- Cover explicitly disabled and partially configured legacy Energy roles,
+  ambiguous empty topology responses, transient recovery across reload and
+  quiet optional PV 404 responses
 - Cover destructive PV rebuilds with 10,000 existing hourly rows, clean
   multi-installation isolation plus later schema changes, topology and
   zero-production PV evidence, delayed capability promotion, empty and partial

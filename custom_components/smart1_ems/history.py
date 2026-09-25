@@ -80,14 +80,18 @@ def determine_import_window(
     refresh_days: int = REFRESH_DAYS,
     *,
     initial_backfill_complete: bool = False,
+    required_start: date | None = None,
 ) -> tuple[date, float]:
     """Return the first date to refresh and its preceding cumulative sum."""
     if not records:
         if initial_backfill_complete:
-            return today - timedelta(days=refresh_days - 1), 0.0
+            refresh_start = today - timedelta(days=refresh_days - 1)
+            return min(refresh_start, required_start or refresh_start), 0.0
         return today - timedelta(days=HISTORY_DAYS - 1), 0.0
 
     refresh_start = today - timedelta(days=refresh_days - 1)
+    if required_start is not None:
+        refresh_start = min(refresh_start, required_start)
     preceding = [
         record
         for record in records
@@ -102,8 +106,46 @@ def determine_import_window(
         )
         return refresh_start, float(baseline["sum"])
 
+    if required_start is not None and refresh_start == required_start:
+        following = [
+            record
+            for record in records
+            if record.get("sum") is not None
+            and record.get("state") is not None
+            and _statistics_date(record, local_tz) >= refresh_start
+        ]
+        if following:
+            first = min(following, key=_statistics_start)
+            return (
+                refresh_start,
+                float(first["sum"]) - float(first["state"]),
+            )
+
     oldest_date = min(_statistics_date(record, local_tz) for record in records)
     return min(oldest_date, refresh_start), 0.0
+
+
+def history_repair_start(
+    today: date,
+    checked_through: date | None,
+) -> date | None:
+    """Return the first unchecked supported history day, if any."""
+    if checked_through is not None and checked_through >= today:
+        return None
+    full_start = today - timedelta(days=HISTORY_DAYS - 1)
+    if checked_through is None:
+        return full_start
+    return max(full_start, checked_through + timedelta(days=1))
+
+
+def history_date_range(start_date: date, end_date: date) -> set[date]:
+    """Return every calendar date in one inclusive history interval."""
+    if start_date > end_date:
+        return set()
+    return {
+        start_date + timedelta(days=offset)
+        for offset in range((end_date - start_date).days + 1)
+    }
 
 
 def build_daily_energy_statistics(
@@ -390,6 +432,7 @@ def determine_hourly_pv_import_window(
     initial_backfill_complete: bool = False,
     force_initial_rebuild: bool = False,
     force_full_refresh: bool = False,
+    required_start: date | None = None,
 ) -> tuple[date, float]:
     """Return the hourly PV refresh window and preceding cumulative sum."""
     full_start = today - timedelta(days=HISTORY_DAYS - 1)
@@ -397,7 +440,8 @@ def determine_hourly_pv_import_window(
         return full_start, 0.0
     if not records:
         if initial_backfill_complete:
-            return today - timedelta(days=refresh_days - 1), 0.0
+            refresh_start = today - timedelta(days=refresh_days - 1)
+            return min(refresh_start, required_start or refresh_start), 0.0
         return full_start, 0.0
     if force_full_refresh or (
         not initial_backfill_complete
@@ -430,6 +474,7 @@ def determine_hourly_pv_import_window(
         local_tz,
         refresh_days,
         initial_backfill_complete=initial_backfill_complete,
+        required_start=required_start,
     )
 
 
@@ -624,14 +669,46 @@ class Smart1PvHistoryImporter:
             self.schema_version,
         )
 
-    def _mark_complete(self, *, has_data: bool) -> None:
+    def _checked_through(self) -> date | None:
+        """Return the last day fully queried for the active PV schema."""
+        if not self.history_state:
+            return None
+        return self.history_state.checked_through(
+            self.statistic_id,
+            self.schema_version,
+        )
+
+    def _mark_complete(
+        self,
+        *,
+        has_data: bool,
+        checked_through: date | None = None,
+    ) -> None:
         """Persist completion of the current PV history schema."""
         if self.history_state:
             self.history_state.mark_complete(
                 self.statistic_id,
                 self.schema_version,
                 has_data=has_data,
+                checked_through=checked_through,
             )
+
+    def _next_empty_retry_date(
+        self,
+        *,
+        today: date,
+        before: date,
+    ) -> date | None:
+        """Return at most one old empty day for this repair run."""
+        if not self.history_state:
+            return None
+        return self.history_state.next_empty_retry_date(
+            self.statistic_id,
+            self.schema_version,
+            oldest_supported=today - timedelta(days=HISTORY_DAYS - 1),
+            before=before,
+            today=today,
+        )
 
     def _schedule_persistence_task(self, coroutine: Any) -> None:
         """Keep a late Recorder finalizer alive until it finishes."""
@@ -653,6 +730,11 @@ class Smart1PvHistoryImporter:
         statistics: list[StatisticData],
         expected_marker_version: int,
         persistence_generation: int,
+        checked_through: date | None = None,
+        empty_days: set[date] | None = None,
+        nonempty_days: set[date] | None = None,
+        retried_day: date | None = None,
+        today: date | None = None,
     ) -> bool:
         """Verify a queued PV import before completing its schema marker."""
         if not self.history_state:
@@ -678,11 +760,26 @@ class Smart1PvHistoryImporter:
         if persistence_generation != self._persistence_generation:
             return False
 
-        marked = self.history_state.mark_complete_if_unchanged(
+        marked = self.history_state.commit_scan_if_unchanged(
             self.statistic_id,
             self.schema_version,
             has_data=True,
             expected_version=expected_marker_version,
+            checked_through=checked_through,
+            empty_days=empty_days or set(),
+            nonempty_days=nonempty_days or set(),
+            oldest_supported=(
+                today - timedelta(days=HISTORY_DAYS - 1)
+                if today is not None
+                else date.min
+            ),
+            retried_day=(
+                retried_day
+                if retried_day
+                in ((empty_days or set()) | (nonempty_days or set()))
+                else None
+            ),
+            checked_on=(today if retried_day is not None else None),
         )
         if not marked:
             # A newer run may have completed the same marker while this late
@@ -698,6 +795,17 @@ class Smart1PvHistoryImporter:
                     self.schema_version,
                 )
                 is True
+                and (
+                    checked_through is None
+                    or (
+                        self.history_state.checked_through(
+                            self.statistic_id,
+                            self.schema_version,
+                        )
+                        or date.min
+                    )
+                    >= checked_through
+                )
             )
         if marked:
             self._migration_required = False
@@ -709,6 +817,11 @@ class Smart1PvHistoryImporter:
         statistics: list[StatisticData],
         expected_marker_version: int,
         persistence_generation: int,
+        checked_through: date | None = None,
+        empty_days: set[date] | None = None,
+        nonempty_days: set[date] | None = None,
+        retried_day: date | None = None,
+        today: date | None = None,
     ) -> None:
         """Finalize a replacement whose clear callback arrived late."""
         confirmed = await self._async_confirm_statistics_persistence(
@@ -716,6 +829,11 @@ class Smart1PvHistoryImporter:
             statistics,
             expected_marker_version,
             persistence_generation,
+            checked_through,
+            empty_days,
+            nonempty_days,
+            retried_day,
+            today,
         )
         if persistence_generation != self._persistence_generation:
             return
@@ -756,9 +874,10 @@ class Smart1PvHistoryImporter:
         self,
         start_date: date,
         end_date: date,
-    ) -> tuple[list[tuple[date, float]], bool]:
+    ) -> tuple[list[tuple[date, float]], bool, date | None]:
         """Fetch daily production without failing on dates with no data."""
         daily_energy: list[tuple[date, float]] = []
+        checked_through: date | None = None
         target_date = start_date
 
         while target_date <= end_date:
@@ -778,15 +897,17 @@ class Smart1PvHistoryImporter:
                             PV_FETCH_ATTEMPTS,
                             describe_api_error(err),
                         )
-                        return daily_energy, False
+                        return daily_energy, False, checked_through
                     await asyncio.sleep(2**attempt)
 
             if value is not None:
                 daily_energy.append((target_date, value))
 
+            checked_through = target_date
+
             target_date += timedelta(days=1)
 
-        return daily_energy, True
+        return daily_energy, True, checked_through
 
     async def _fetch_hourly_energy(
         self,
@@ -794,13 +915,14 @@ class Smart1PvHistoryImporter:
         end_date: date,
         local_tz: ZoneInfo,
         exact_fallback: Mapping[date, float],
-    ) -> tuple[list[tuple[datetime, float]], bool, int, int]:
+    ) -> tuple[list[tuple[datetime, float]], bool, int, int, date | None]:
         """Fetch and normalize exact PV totals into measured hourly buckets."""
         assert self.pv_power_point is not None
         hourly_energy: list[tuple[datetime, float]] = []
         completed = True
         distributed_days = 0
         daily_fallback_days = 0
+        checked_through: date | None = None
         target_date = start_date
 
         while target_date <= end_date:
@@ -835,6 +957,7 @@ class Smart1PvHistoryImporter:
                     break
 
             if exact_energy_kwh is None:
+                checked_through = target_date
                 target_date += timedelta(days=1)
                 continue
 
@@ -884,6 +1007,7 @@ class Smart1PvHistoryImporter:
                 distributed_days += 1
             elif exact_energy_kwh > 0:
                 daily_fallback_days += 1
+            checked_through = target_date
             target_date += timedelta(days=1)
 
         return (
@@ -891,6 +1015,7 @@ class Smart1PvHistoryImporter:
             completed,
             distributed_days,
             daily_fallback_days,
+            checked_through,
         )
 
     async def async_import(
@@ -904,6 +1029,13 @@ class Smart1PvHistoryImporter:
             return
 
         async with self._lock:
+            # Every repair run supersedes pending readback finalizers from an
+            # older repair.  Schema-version checks alone are insufficient:
+            # two normal catch-up runs use the same schema, and the older
+            # finalizer could otherwise re-add stale empty-day evidence.
+            if repair:
+                self._persistence_generation += 1
+            persistence_generation = self._persistence_generation
             self._last_result = "running"
             self._last_refresh_days = refresh_days
             local_tz = ZoneInfo(self.hass.config.time_zone)
@@ -989,11 +1121,6 @@ class Smart1PvHistoryImporter:
                 # statistic before the clear so older valid history can be
                 # reimported as part of the replacement batch.
                 records = await self._all_existing_statistics()
-            if destructive_rebuild_required:
-                # Invalidate finalizers belonging to an older timed-out clear
-                # before this run performs any further network awaits.
-                self._persistence_generation += 1
-            persistence_generation = self._persistence_generation
             self._migration_required = (
                 alignment_rebuild_required
                 or profile_schema_rebuild_required
@@ -1016,8 +1143,8 @@ class Smart1PvHistoryImporter:
             )
 
             # Existing hourly data predates the persistent completion marker.
-            # It already represents the current schema and can be adopted
-            # without another 365-day request sweep.
+            # Adopt its storage schema here. The independent coverage cursor
+            # still requests one complete supported-window audit when needed.
             if (
                 records
                 and not initial_backfill_complete
@@ -1034,6 +1161,12 @@ class Smart1PvHistoryImporter:
                 self._last_result = "repair_pending"
                 return
 
+            required_start = (
+                history_repair_start(today, self._checked_through())
+                if repair and self.history_state
+                else None
+            )
+
             start_date, baseline_sum = determine_hourly_pv_import_window(
                 records,
                 today,
@@ -1046,25 +1179,78 @@ class Smart1PvHistoryImporter:
                     or alignment_rebuild_required
                     or profile_schema_rebuild_required
                 ),
+                required_start=required_start,
+            )
+            main_start_date = start_date
+            retry_date = (
+                self._next_empty_retry_date(
+                    today=today,
+                    before=main_start_date,
+                )
+                if repair
+                and initial_backfill_complete
+                and not destructive_rebuild_required
+                else None
             )
 
             if self.pv_power_point is None:
-                fetched_daily_energy, fetch_completed = (
-                    await self._fetch_daily_energy(
-                        start_date,
-                        today,
-                    )
+                main_fetch_result = await self._fetch_daily_energy(
+                    main_start_date,
+                    today,
                 )
+                if len(main_fetch_result) == 2:
+                    fetched_daily_energy, fetch_completed = main_fetch_result
+                    main_checked_through = today if fetch_completed else None
+                else:
+                    (
+                        fetched_daily_energy,
+                        fetch_completed,
+                        main_checked_through,
+                    ) = main_fetch_result
+                main_fetched_daily_energy = list(fetched_daily_energy)
+                retry_completed = False
+                retry_fetched_daily_energy: list[tuple[date, float]] = []
+                if fetch_completed and retry_date is not None:
+                    retry_fetch_result = await self._fetch_daily_energy(
+                        retry_date,
+                        retry_date,
+                    )
+                    (
+                        retry_fetched_daily_energy,
+                        retry_completed,
+                        *_retry_checked,
+                    ) = retry_fetch_result
+                    if retry_completed:
+                        fetched_daily_energy.extend(
+                            retry_fetched_daily_energy
+                        )
                 portal_daily_fallback_days = sum(
                     energy_kwh > 0
                     for _target_date, energy_kwh in fetched_daily_energy
                 )
                 if stored_profile_semantics and not forced_initial_rebuild:
+                    # A recovered old empty day sits outside the normal main
+                    # refresh window.  Include it in the profile-to-daily
+                    # replacement range before building the batch; widening
+                    # only the later merge window would drop the fetched value
+                    # while still allowing its retry state to be committed.
+                    profile_merge_start = min(
+                        start_date,
+                        min(
+                            (
+                                target_date
+                                for target_date, _energy in (
+                                    retry_fetched_daily_energy
+                                )
+                            ),
+                            default=start_date,
+                        ),
+                    )
                     fetched_hourly_energy = (
                         _merge_profile_history_for_daily_rebuild(
                             records,
                             fetched_daily_energy,
-                            start_date,
+                            profile_merge_start,
                             today,
                             local_tz,
                         )
@@ -1112,16 +1298,99 @@ class Smart1PvHistoryImporter:
                     and not forced_initial_rebuild
                     else {}
                 )
+                main_fetch_result = await self._fetch_hourly_energy(
+                    main_start_date,
+                    today,
+                    local_tz,
+                    exact_fallback,
+                )
                 (
                     fetched_hourly_energy,
                     fetch_completed,
                     distributed_days,
                     daily_fallback_days,
-                ) = await self._fetch_hourly_energy(
-                    start_date,
-                    today,
-                    local_tz,
-                    exact_fallback,
+                    *main_checked,
+                ) = main_fetch_result
+                main_checked_through = (
+                    main_checked[0]
+                    if main_checked
+                    else (today if fetch_completed else None)
+                )
+                main_fetched_hourly_energy = list(fetched_hourly_energy)
+                retry_completed = False
+                retry_fetched_hourly_energy: list[
+                    tuple[datetime, float]
+                ] = []
+                if fetch_completed and retry_date is not None:
+                    (
+                        retry_fetched_hourly_energy,
+                        retry_completed,
+                        retry_distributed_days,
+                        retry_daily_fallback_days,
+                        *_retry_checked,
+                    ) = await self._fetch_hourly_energy(
+                        retry_date,
+                        retry_date,
+                        local_tz,
+                        exact_fallback,
+                    )
+                    if retry_completed:
+                        fetched_hourly_energy.extend(
+                            retry_fetched_hourly_energy
+                        )
+                        distributed_days += retry_distributed_days
+                        daily_fallback_days += retry_daily_fallback_days
+
+            if self.pv_power_point is None:
+                main_nonempty_days = {
+                    target_date
+                    for target_date, _energy in main_fetched_daily_energy
+                }
+                retry_nonempty_days = {
+                    target_date
+                    for target_date, _energy in retry_fetched_daily_energy
+                }
+            else:
+                main_nonempty_days = {
+                    start.astimezone(local_tz).date()
+                    for start, _energy in main_fetched_hourly_energy
+                }
+                retry_nonempty_days = {
+                    start.astimezone(local_tz).date()
+                    for start, _energy in retry_fetched_hourly_energy
+                }
+            main_checked_days = (
+                history_date_range(
+                    main_start_date,
+                    main_checked_through,
+                )
+                if main_checked_through is not None
+                else set()
+            )
+            empty_days = main_checked_days - main_nonempty_days
+            if retry_completed and retry_date is not None:
+                if retry_date in retry_nonempty_days:
+                    nonempty_retry_date = retry_date
+                else:
+                    empty_days.add(retry_date)
+                    nonempty_retry_date = None
+            else:
+                nonempty_retry_date = None
+            persisted_nonempty_days = (
+                main_nonempty_days | retry_nonempty_days
+            )
+            if nonempty_retry_date is not None:
+                start_date, baseline_sum = (
+                    determine_hourly_pv_import_window(
+                        records,
+                        today,
+                        local_tz,
+                        refresh_days,
+                        initial_backfill_complete=(
+                            initial_backfill_complete
+                        ),
+                        required_start=nonempty_retry_date,
+                    )
                 )
 
             self._last_fetched_days = len(
@@ -1238,11 +1507,22 @@ class Smart1PvHistoryImporter:
                     ):
                         return
                     if not statistics and self.history_state and (
-                        self.history_state.mark_complete_if_unchanged(
+                        self.history_state.commit_scan_if_unchanged(
                             self.statistic_id,
                             self.schema_version,
                             has_data=False,
                             expected_version=expected_marker_version,
+                            checked_through=(
+                                main_checked_through
+                                if fetch_completed
+                                else None
+                            ),
+                            empty_days=empty_days,
+                            nonempty_days=set(),
+                            oldest_supported=(
+                                today - timedelta(days=HISTORY_DAYS - 1)
+                            ),
+                            checked_on=None,
                         )
                     ):
                         self._migration_required = False
@@ -1256,6 +1536,11 @@ class Smart1PvHistoryImporter:
                             statistics,
                             expected_marker_version,
                             persistence_generation,
+                            main_checked_through if repair else None,
+                            empty_days,
+                            persisted_nonempty_days,
+                            retry_date if retry_completed else None,
+                            today,
                         )
                     )
 
@@ -1285,9 +1570,29 @@ class Smart1PvHistoryImporter:
 
             if not statistics:
                 _LOGGER.debug("No smart1 PV history available for import")
-                if fetch_completed and not initial_backfill_complete:
-                    self._mark_complete(has_data=bool(records))
-                    self._migration_required = False
+                if self.history_state and main_checked_through is not None:
+                    committed = self.history_state.commit_scan_if_unchanged(
+                        self.statistic_id,
+                        self.schema_version,
+                        has_data=bool(records),
+                        expected_version=expected_marker_version,
+                        checked_through=(
+                            main_checked_through if repair else None
+                        ),
+                        empty_days=empty_days,
+                        nonempty_days=persisted_nonempty_days,
+                        oldest_supported=(
+                            today - timedelta(days=HISTORY_DAYS - 1)
+                        ),
+                        retried_day=(
+                            retry_date if retry_completed else None
+                        ),
+                        checked_on=(
+                            today if retry_completed else None
+                        ),
+                    )
+                    if committed:
+                        self._migration_required = False
                 self._last_result = "no_data"
                 return
 
@@ -1300,9 +1605,18 @@ class Smart1PvHistoryImporter:
             completion_needs_update = (
                 self.history_state is not None
                 and (
-                    (fetch_completed and not initial_backfill_complete)
+                    (
+                        main_checked_through is not None
+                        and not initial_backfill_complete
+                    )
                     or self._data_presence() is not True
                     or alignment_rebuild_required
+                    or (
+                        main_checked_through is not None
+                        and repair
+                        and required_start is not None
+                    )
+                    or (retry_date is not None and retry_completed)
                 )
             )
             if completion_needs_update:
@@ -1312,6 +1626,11 @@ class Smart1PvHistoryImporter:
                         statistics,
                         expected_marker_version,
                         persistence_generation,
+                        main_checked_through if repair else None,
+                        empty_days,
+                        persisted_nonempty_days,
+                        retry_date if retry_completed else None,
+                        today,
                     )
                 )
                 if not persistence_confirmed:
@@ -1327,6 +1646,11 @@ class Smart1PvHistoryImporter:
                                 list(statistics),
                                 expected_marker_version,
                                 persistence_generation,
+                                main_checked_through if repair else None,
+                                empty_days,
+                                persisted_nonempty_days,
+                                retry_date if retry_completed else None,
+                                today,
                             )
                         )
                     return
