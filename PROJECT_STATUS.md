@@ -109,12 +109,21 @@
   state records per schema whether Recorder rows were created, so a later loss
   of previously populated statistics triggers one complete rebuild instead of
   being mistaken for a legitimately empty history
+- The active PV history representation is tracked separately from schemas
+  completed in the past. Switching from hourly to daily storage and back
+  therefore performs one complete hourly repair, while valid pre-migration
+  hourly data is adopted without an unnecessary 365-day request sweep
+- Completed sparse derived-energy statistics may legitimately contain only
+  midnight buckets and retain the normal short refresh window. Decreasing
+  cumulative sums still trigger a full rebuild, and successfully refreshed
+  days zero obsolete hourly buckets before recalculating their sums
 - Current-day PV and derived statistics refresh every 15 minutes while the
   wider historical window continues to refresh every six hours. A pending
   initial repair is not restarted by every current-day refresh
 - Five-minute power integration preserves both occurrences of naive local
   timestamps during the autumn daylight-saving-time fold; timestamps that
-  already include an offset continue to be used directly
+  already include an offset continue to be used directly. Interleaved naive
+  rows for the two repeated wall-clock hours retain both UTC occurrences
 - Redacted diagnostics expose the history import result and repair state
   without statistic source IDs or measurement values
 - Derived grid import and export statistics were accepted by the real Home

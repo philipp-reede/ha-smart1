@@ -351,7 +351,7 @@ class Smart1PvHistoryImporter:
         """Return whether this statistic completed its current backfill."""
         return bool(
             self.history_state
-            and self.history_state.is_complete(
+            and self.history_state.is_current_schema(
                 self.statistic_id,
                 self.schema_version,
             )
@@ -558,11 +558,25 @@ class Smart1PvHistoryImporter:
                 self.force_initial_rebuild
                 and not initial_backfill_complete
             )
+            switching_from_daily_schema = bool(
+                self.pv_power_point is not None
+                and self.history_state
+                and self.history_state.is_current_schema(
+                    self.statistic_id,
+                    PV_DAILY_HISTORY_SCHEMA_VERSION,
+                )
+            )
             self._migration_required = (
                 not initial_backfill_complete
                 and (
                     forced_initial_rebuild
-                    or needs_hourly_pv_migration(records, local_tz)
+                    or (
+                        self.pv_power_point is not None
+                        and (
+                            switching_from_daily_schema
+                            or needs_hourly_pv_migration(records, local_tz)
+                        )
+                    )
                 )
             )
 
@@ -591,7 +605,9 @@ class Smart1PvHistoryImporter:
                 local_tz,
                 refresh_days,
                 initial_backfill_complete=initial_backfill_complete,
-                force_initial_rebuild=forced_initial_rebuild,
+                force_initial_rebuild=(
+                    forced_initial_rebuild or switching_from_daily_schema
+                ),
             )
 
             if self.pv_power_point is None:

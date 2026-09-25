@@ -83,11 +83,16 @@ def _has_decreasing_sum(records: list[Mapping[str, Any]]) -> bool:
 def needs_hourly_rebuild(
     records: list[Mapping[str, Any]],
     local_tz: ZoneInfo,
+    *,
+    initial_backfill_complete: bool = False,
 ) -> bool:
     """Return whether derived statistics must be cleared and rebuilt."""
     return bool(records) and (
-        not _has_hourly_resolution(records, local_tz)
-        or _has_decreasing_sum(records)
+        _has_decreasing_sum(records)
+        or (
+            not initial_backfill_complete
+            and not _has_hourly_resolution(records, local_tz)
+        )
     )
 
 
@@ -102,8 +107,9 @@ def determine_hourly_import_window(
 ) -> tuple[date, float]:
     """Return the hourly refresh start and preceding cumulative sum.
 
-    Existing daily-only statistics trigger a full import under the same
-    statistic ID so Energy Dashboard configuration remains intact.
+    Pre-marker daily-only statistics trigger a full import under the same
+    statistic ID so Energy Dashboard configuration remains intact. Once the
+    current backfill is complete, sparse midnight hours are valid.
     """
     initial_start = today - timedelta(days=HISTORY_DAYS - 1)
     if force_initial_rebuild:
@@ -112,7 +118,11 @@ def determine_hourly_import_window(
         if initial_backfill_complete:
             return today - timedelta(days=refresh_days - 1), 0.0
         return initial_start, 0.0
-    if needs_hourly_rebuild(records, local_tz):
+    if needs_hourly_rebuild(
+        records,
+        local_tz,
+        initial_backfill_complete=initial_backfill_complete,
+    ):
         return initial_start, 0.0
 
     refresh_start = today - timedelta(days=refresh_days - 1)
@@ -141,8 +151,20 @@ def merge_hourly_energy(
     end_date: date,
     local_tz: ZoneInfo,
 ) -> list[tuple[datetime, float]]:
-    """Merge refreshed hourly values with existing statistics as fallback."""
+    """Replace fetched local days while preserving temporarily missing days.
+
+    Home Assistant's external-statistics API upserts records but does not
+    delete obsolete buckets. Explicit zero-value tombstones therefore replace
+    stale hours when a day's derived distribution changes.
+    """
     energy_by_hour: dict[datetime, float] = {}
+    fetched_by_hour = {
+        start.astimezone(timezone.utc): energy_kwh
+        for start, energy_kwh in fetched_energy
+    }
+    replacement_dates = {
+        start.astimezone(local_tz).date() for start in fetched_by_hour
+    }
 
     for record in records:
         energy_kwh = record.get("state")
@@ -152,12 +174,14 @@ def merge_hourly_energy(
         start = _statistics_start(record)
         target_date = start.astimezone(local_tz).date()
         if start_date <= target_date <= end_date:
-            energy_by_hour[start] = float(energy_kwh)
+            energy_by_hour[start] = (
+                0.0
+                if target_date in replacement_dates
+                and start not in fetched_by_hour
+                else float(energy_kwh)
+            )
 
-    energy_by_hour.update(
-        (start.astimezone(timezone.utc), energy_kwh)
-        for start, energy_kwh in fetched_energy
-    )
+    energy_by_hour.update(fetched_by_hour)
     return sorted(energy_by_hour.items())
 
 
@@ -365,7 +389,13 @@ class Smart1DerivedEnergyImporter:
             detected_rebuild_roles = {
                 role_key
                 for role_key, records in records_by_role.items()
-                if needs_hourly_rebuild(records, local_tz)
+                if needs_hourly_rebuild(
+                    records,
+                    local_tz,
+                    initial_backfill_complete=(
+                        role_key in complete_roles
+                    ),
+                )
             }
             forced_rebuild_roles = (
                 set(self.role_points) - complete_roles

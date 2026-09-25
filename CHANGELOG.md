@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Stop completed sparse derived-energy statistics from being mistaken for
+  legacy daily data and rebuilt over 365 days every six hours, while retaining
+  the full rebuild for decreasing cumulative sums
+- Replace stale derived-energy hours with zero-value tombstones when a
+  successfully refreshed local day no longer contains those hours
+- Track the currently active photovoltaic history schema so temporary switches
+  between hourly and daily storage trigger one complete hourly repair instead
+  of leaving older midnight buckets behind
+- Preserve both occurrences of ambiguous daylight-saving-time samples when
+  naive portal rows are interleaved by local wall time
+
+### Testing
+
+- Cover recovery from an incomplete initial 365-day derived-history fetch on
+  the next successful attempt
+
 ## [0.7.1] - 2026-09-25
 
 ### Fixed
