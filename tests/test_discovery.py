@@ -45,6 +45,40 @@ def make_point(
 
 
 class Smart1DiscoveryTest(unittest.TestCase):
+    def test_optional_portal_evidence_confirms_pv_capability(self) -> None:
+        cases = (
+            ("inverter", 1, 0, None),
+            ("module_field", 0, 1, None),
+            ("zero_cumulative_energy", 0, 0, 0.0),
+            ("positive_cumulative_energy", 0, 0, 12.5),
+        )
+
+        for case_name, inverter_count, module_field_count, energy in cases:
+            with self.subTest(case=case_name):
+                result = Smart1Discovery().analyze([])
+                result.add_pv_evidence(
+                    inverter_count=inverter_count,
+                    module_field_count=module_field_count,
+                    cumulative_energy=energy,
+                )
+
+                self.assertTrue(result.has_pv)
+                self.assertEqual(result.inverter_count, inverter_count)
+                self.assertEqual(
+                    result.module_field_count,
+                    module_field_count,
+                )
+
+    def test_absent_optional_portal_evidence_does_not_invent_pv(self) -> None:
+        result = Smart1Discovery().analyze([])
+        result.add_pv_evidence(
+            inverter_count=0,
+            module_field_count=0,
+            cumulative_energy=None,
+        )
+
+        self.assertFalse(result.has_pv)
+
     def test_shared_classifier_detects_ecar_service_and_wp_name(self) -> None:
         result = Smart1Discovery().analyze(
             [

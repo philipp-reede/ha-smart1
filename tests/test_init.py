@@ -64,11 +64,12 @@ class Smart1SetupTest(unittest.TestCase):
         class FakeApi:
             instance = None
             linear_error = None
+            linear_devices = [point]
 
             def __init__(self, session, api_key, device_id) -> None:
                 type(self).instance = self
                 self.get_linear_devices = AsyncMock(
-                    return_value=[point],
+                    return_value=list(type(self).linear_devices),
                     side_effect=type(self).linear_error,
                 )
                 self.get_inverters_with_probe = AsyncMock(
@@ -101,17 +102,31 @@ class Smart1SetupTest(unittest.TestCase):
 
         class FakeCoordinator:
             instance = None
+            pv_energy_today = None
+            pv_cumulative_authoritative = False
 
             def __init__(self, *args, **kwargs) -> None:
                 type(self).instance = self
                 self.config_entry = kwargs.get("config_entry")
+                self.listeners = []
+                self.data = {
+                    "pv_energy_today": type(self).pv_energy_today,
+                    "pv_cumulative_authoritative": (
+                        type(self).pv_cumulative_authoritative
+                    ),
+                }
                 self.async_config_entry_first_refresh = AsyncMock()
+
+            def async_add_listener(self, listener):
+                self.listeners.append(listener)
+                return Mock(name="remove_coordinator_listener")
 
         class FakeHistoryImporter:
             instance = None
 
             def __init__(self, *args, **kwargs) -> None:
                 type(self).instance = self
+                self.pv_power_point = args[2]
                 self.statistic_id = "smart1_ems:pv_production"
                 self.async_import = AsyncMock()
 
@@ -124,6 +139,23 @@ class Smart1SetupTest(unittest.TestCase):
             inverter_count = 0
             module_field_count = 0
             bus_count = 0
+
+            def add_pv_evidence(
+                self,
+                *,
+                inverter_count,
+                module_field_count,
+                cumulative_energy,
+            ) -> None:
+                self.inverter_count = inverter_count
+                self.module_field_count = module_field_count
+                self.has_pv = self.has_pv or any(
+                    (
+                        inverter_count > 0,
+                        module_field_count > 0,
+                        cumulative_energy is not None,
+                    )
+                )
 
             def to_dict(self) -> dict:
                 return {"has_pv": self.has_pv}
@@ -293,6 +325,11 @@ class Smart1SetupTest(unittest.TestCase):
                 async_forward_entry_setups=AsyncMock(),
                 async_entries=lambda domain: list(configured_entries),
                 async_update_entry=async_update_entry,
+                async_reload=AsyncMock(),
+            ),
+            async_create_task=lambda coroutine, name: asyncio.create_task(
+                coroutine,
+                name=name,
             ),
         )
 
@@ -406,6 +443,143 @@ class Smart1SetupTest(unittest.TestCase):
                             raised.exception.__suppress_context__
                         )
 
+                # A successful cumulative request is sufficient proof of PV
+                # support even if no linear point can be classified. It must
+                # create the daily-only importer and protect its legacy
+                # statistic from orphan cleanup.
+                original_recorder_metadata = list(recorder_metadata)
+                entry.background_coroutines.clear()
+                entry.unload_callbacks.clear()
+                scheduled.clear()
+                FakeDiscoveryResult.has_pv = False
+                FakeCoordinator.pv_energy_today = 0.0
+                FakeApi.linear_devices = []
+                integration.ENERGY_ROLES_BY_KEY[
+                    "heat_pump_consumption"
+                ] = object()
+                entry.data = {
+                    "api_key": "redacted",
+                    "device_id": "plant-1",
+                    "statistics_namespace": "",
+                    "legacy_history_rebuild": True,
+                }
+                entry.options = {}
+                new_scoped_sibling = types.SimpleNamespace(
+                    entry_id="entry-new",
+                    data={
+                        "device_id": "plant-new",
+                        "statistics_namespace": "new-scope",
+                        "pv_capability_confirmed": True,
+                    },
+                    options={},
+                )
+                configured_entries[:] = [entry, new_scoped_sibling]
+
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                runtime_data = hass.data["smart1_ems"][entry.entry_id]
+                self.assertTrue(runtime_data["discovery"].has_pv)
+                self.assertEqual(len(runtime_data["history_importers"]), 1)
+                cumulative_evidence_task, _task_name = (
+                    entry.background_coroutines[0]
+                )
+                await cumulative_evidence_task
+                self.assertEqual(
+                    recorder.async_clear_statistics.call_args.args[0],
+                    ["smart1_ems:heat_pump_consumption_feedface"],
+                )
+                self.assertIsNone(
+                    FakeHistoryImporter.instance.pv_power_point
+                )
+
+                recorder_metadata[:] = original_recorder_metadata
+                recorder.async_clear_statistics.reset_mock()
+                async_list_statistic_ids.reset_mock()
+                entry.background_coroutines.clear()
+                FakeCoordinator.pv_energy_today = None
+                FakeApi.linear_devices = [point]
+
+                # Existing PV history is protected when the optional
+                # cumulative request is temporarily inconclusive at startup.
+                # A later successful poll requests one reload so the static
+                # sensor platform and history importer can be promoted.
+                cumulative_unload_callbacks = list(entry.unload_callbacks)
+                entry.background_coroutines.clear()
+                entry.unload_callbacks.clear()
+                scheduled.clear()
+                recorder.async_clear_statistics.reset_mock()
+                hass.config_entries.async_reload.reset_mock()
+                FakeDiscoveryResult.has_pv = False
+                FakeCoordinator.pv_energy_today = None
+                FakeCoordinator.pv_cumulative_authoritative = True
+                FakeApi.linear_devices = []
+                recorder_metadata[:] = [
+                    *original_recorder_metadata,
+                    {
+                        "source": "smart1_ems",
+                        "statistic_id": "smart1_ems:pv_production",
+                    },
+                ]
+                entry.data = {
+                    "api_key": "redacted",
+                    "device_id": "plant-1",
+                    "statistics_namespace": "",
+                    "legacy_history_rebuild": True,
+                }
+                entry.options = {}
+
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                late_pv_runtime = hass.data["smart1_ems"][entry.entry_id]
+                self.assertFalse(late_pv_runtime["discovery"].has_pv)
+                self.assertNotIn("history_importers", late_pv_runtime)
+                late_pv_cleanup, _task_name = entry.background_coroutines[0]
+                await late_pv_cleanup
+                cleared_ids = recorder.async_clear_statistics.call_args.args[0]
+                self.assertNotIn("smart1_ems:pv_production", cleared_ids)
+                self.assertEqual(len(FakeCoordinator.instance.listeners), 1)
+
+                FakeCoordinator.instance.data["pv_energy_today"] = 0.0
+                FakeCoordinator.instance.listeners[0]()
+                await asyncio.sleep(0)
+                hass.config_entries.async_reload.assert_awaited_once_with(
+                    entry.entry_id
+                )
+                self.assertIs(
+                    entry.data["pv_capability_confirmed"],
+                    True,
+                )
+
+                # Capability proof must survive the reload itself. The next
+                # setup can see another transient cumulative failure and must
+                # still create the static PV sensor/history path immediately.
+                entry.background_coroutines.clear()
+                FakeCoordinator.pv_energy_today = None
+                FakeCoordinator.pv_cumulative_authoritative = False
+                self.assertTrue(
+                    await integration.async_setup_entry(hass, entry)
+                )
+                persisted_pv_runtime = hass.data["smart1_ems"][entry.entry_id]
+                self.assertTrue(persisted_pv_runtime["discovery"].has_pv)
+                self.assertEqual(
+                    len(persisted_pv_runtime["history_importers"]),
+                    1,
+                )
+                persisted_pv_task, _task_name = (
+                    entry.background_coroutines[0]
+                )
+                await persisted_pv_task
+
+                recorder_metadata[:] = original_recorder_metadata
+                recorder.async_clear_statistics.reset_mock()
+                async_list_statistic_ids.reset_mock()
+                entry.background_coroutines.clear()
+                entry.unload_callbacks[:] = cumulative_unload_callbacks
+                FakeCoordinator.pv_cumulative_authoritative = False
+                FakeApi.linear_devices = [point]
+
                 # A multi-installation legacy owner may have neither PV nor
                 # selected derived roles. It must still remove shared history
                 # written by a scoped sibling and by a previously deselected
@@ -415,12 +589,27 @@ class Smart1SetupTest(unittest.TestCase):
                 entry.unload_callbacks.clear()
                 scheduled.clear()
                 FakeDiscoveryResult.has_pv = False
+                FakeCoordinator.pv_energy_today = None
+                FakeCoordinator.pv_cumulative_authoritative = True
+                FakeApi.linear_devices = []
                 integration.ENERGY_ROLES_BY_KEY["grid_import"] = object()
                 integration.ENERGY_ROLES_BY_KEY[
                     "heat_pump_consumption"
                 ] = object()
                 sibling = types.SimpleNamespace(
-                    data={},
+                    entry_id="entry-2",
+                    data={
+                        "device_id": "plant-2",
+                        "statistics_namespace": "plant-2-scope",
+                        # This old unscoped completion marker proves that the
+                        # now-scoped sibling managed shared PV history before
+                        # migration. It must work even when the legacy owner
+                        # sets up before the sibling can persist the newer
+                        # capability marker.
+                        "history_schema_versions": {
+                            "smart1_ems:pv_production": 5,
+                        },
+                    },
                     options={
                         "energy_roles": {
                             "grid_import": "sibling-power",
@@ -468,7 +657,7 @@ class Smart1SetupTest(unittest.TestCase):
                     on_done=ANY,
                 )
                 self.assertEqual(scheduled, [])
-                self.assertEqual(entry.unload_callbacks, [])
+                self.assertEqual(len(entry.unload_callbacks), 1)
                 self.assertEqual(
                     entry.data["history_schema_versions"],
                     {scoped_role_id: 1},
@@ -647,6 +836,9 @@ class Smart1SetupTest(unittest.TestCase):
         self.assertEqual(
             hass.config_entries.async_forward_entry_setups.await_args_list,
             [
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
+                call(entry, ["sensor"]),
                 call(entry, ["sensor"]),
                 call(entry, ["sensor"]),
                 call(entry, ["sensor"]),

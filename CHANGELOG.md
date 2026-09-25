@@ -6,6 +6,27 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Read the complete existing PV statistic before a whole-ID alignment or
+  profile rebuild clears Recorder, so installations with more than 9,125
+  hourly rows retain all valid history outside the supported repair window
+- Start forced multi-installation isolation rebuilds from a clean zero
+  baseline instead of reimporting shared legacy rows that cannot be assigned
+  reliably to one installation, and treat any persisted schema marker as proof
+  that this one-time isolation already completed before later schema changes
+- Treat discovered inverter or module-field topology and a successful
+  cumulative PV value, including zero, as photovoltaic capability evidence,
+  enabling the PV sensor, daily history fallback and legacy-statistic
+  protection even without a classifiable linear PV point
+- Preserve and instantiate all registered inverter-string entities across
+  failed or empty detail responses, retain strings with recognized registry
+  customizations when omitted by a partial response, reload once when
+  provisional topology becomes known, and dynamically add genuinely new
+  strings seen later
+- Persist confirmed PV capability, protect markerless existing PV history when
+  cumulative discovery is temporarily inconclusive at startup, and reload once
+  a later coordinator poll first proves PV support
+- Compare offset-aware PV-string timestamps by their actual instant across a
+  daylight-saving-time fold instead of by their textual representation
 - Queue complete PV and derived-energy replacement batches directly behind a
   destructive Recorder clear before awaiting its callback, so a timeout or
   config-entry cancellation cannot leave a delayed clear without replacement
@@ -48,6 +69,10 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
+- Cover destructive PV rebuilds with 10,000 existing hourly rows, clean
+  multi-installation isolation plus later schema changes, topology and
+  zero-production PV evidence, delayed capability promotion, empty and partial
+  string-detail responses, and offset-aware DST ordering
 - Cover delayed Recorder callbacks and their next refresh, cancellation after
   clear submission, prevalidation failure, stale callback generations, mixed
   non-empty and empty replacement roles, multi-role repair-window boundaries,

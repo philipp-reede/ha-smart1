@@ -20,6 +20,7 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
@@ -51,6 +52,7 @@ MAX_HOURLY_RECORDS_PER_DAY = 25
 PV_STATISTIC_ID = f"{DOMAIN}:pv_production"
 PV_FETCH_ATTEMPTS = 3
 PV_STATISTICS_LOOKBACK = HISTORY_DAYS * MAX_HOURLY_RECORDS_PER_DAY
+PV_STATISTICS_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def pv_statistic_id(statistics_namespace: str = "") -> str:
@@ -736,6 +738,20 @@ class Smart1PvHistoryImporter:
         )
         return result.get(self.statistic_id, [])
 
+    async def _all_existing_statistics(self) -> list[Mapping[str, Any]]:
+        """Return the complete long-term statistic before a whole-ID clear."""
+        result = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            PV_STATISTICS_EPOCH,
+            None,
+            {self.statistic_id},
+            "hour",
+            None,
+            {"state", "sum"},
+        )
+        return result.get(self.statistic_id, [])
+
     async def _fetch_daily_energy(
         self,
         start_date: date,
@@ -908,9 +924,20 @@ class Smart1PvHistoryImporter:
                 and self._data_presence() is not False
             ):
                 initial_backfill_complete = False
+            # The legacy multi-installation isolation is a one-time operation,
+            # independent of later storage-schema changes. Completion markers
+            # and that migration flag were introduced together, so any
+            # persisted schema proves this statistic has already passed the
+            # isolation boundary. A later hourly/daily switch must preserve
+            # the now installation-specific pre-window history.
+            stored_schema_version = (
+                self.history_state.current_schema_version(self.statistic_id)
+                if self.history_state
+                else 0
+            )
             forced_initial_rebuild = (
                 self.force_initial_rebuild
-                and not initial_backfill_complete
+                and stored_schema_version == 0
             )
             alignment_rebuild_required = needs_utc_hour_alignment_rebuild(
                 records
@@ -922,11 +949,6 @@ class Smart1PvHistoryImporter:
                     self.statistic_id,
                     PV_DAILY_HISTORY_SCHEMA_VERSION,
                 )
-            )
-            stored_schema_version = (
-                self.history_state.current_schema_version(self.statistic_id)
-                if self.history_state
-                else 0
             )
             switching_from_hourly_schema = bool(
                 self.pv_power_point is None
@@ -953,6 +975,20 @@ class Smart1PvHistoryImporter:
                 or alignment_rebuild_required
                 or profile_schema_rebuild_required
             )
+            if (
+                repair
+                and not forced_initial_rebuild
+                and (
+                    alignment_rebuild_required
+                    or profile_schema_rebuild_required
+                )
+                and len(records) >= record_count
+            ):
+                # A whole-ID clear removes every row, not only the bounded
+                # lookback used for normal repair detection. Read the complete
+                # statistic before the clear so older valid history can be
+                # reimported as part of the replacement batch.
+                records = await self._all_existing_statistics()
             if destructive_rebuild_required:
                 # Invalidate finalizers belonging to an older timed-out clear
                 # before this run performs any further network awaits.
@@ -1023,7 +1059,7 @@ class Smart1PvHistoryImporter:
                     energy_kwh > 0
                     for _target_date, energy_kwh in fetched_daily_energy
                 )
-                if stored_profile_semantics:
+                if stored_profile_semantics and not forced_initial_rebuild:
                     fetched_hourly_energy = (
                         _merge_profile_history_for_daily_rebuild(
                             records,
@@ -1034,7 +1070,10 @@ class Smart1PvHistoryImporter:
                         )
                     )
                 else:
-                    if alignment_rebuild_required:
+                    if (
+                        alignment_rebuild_required
+                        and not forced_initial_rebuild
+                    ):
                         # Legacy daily-only rows are exact day totals even
                         # when their local-midnight timestamps are not valid
                         # UTC-hour buckets. Keep them as fallbacks for
@@ -1124,7 +1163,7 @@ class Smart1PvHistoryImporter:
             if (
                 alignment_rebuild_required
                 or profile_schema_rebuild_required
-            ):
+            ) and not forced_initial_rebuild:
                 preserved_statistics = (
                     _preserved_daily_pv_statistics_before(
                         records,
@@ -1142,11 +1181,11 @@ class Smart1PvHistoryImporter:
             else:
                 preserved_statistics = []
             if preserved_statistics:
-                # A forced legacy rebuild normally starts at zero.  When the
-                # same statistic also contains misaligned rows, however, the
-                # valid pre-window rows are deliberately reimported.  Continue
-                # from their last cumulative value so the replacement cannot
-                # introduce a falling sum at the rebuild boundary.
+                # Schema and alignment repairs deliberately reimport valid
+                # pre-window rows. Continue from their last cumulative value
+                # so the replacement cannot introduce a falling sum at the
+                # rebuild boundary. Forced isolation rebuilds never enter this
+                # branch because their shared history is not attributable.
                 baseline_sum = max(
                     baseline_sum,
                     float(preserved_statistics[-1]["sum"]),

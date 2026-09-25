@@ -71,10 +71,12 @@ class Smart1Coordinator(DataUpdateCoordinator):
             # not retain them as a visible chained cause in Home Assistant.
             raise UpdateFailed(describe_api_error(err)) from None
 
+        pv_cumulative_authoritative = False
         try:
             pv_energy_today = await self.api.get_pv_cumulative_energy(
                 target_date=today,
             )
+            pv_cumulative_authoritative = True
         except (ClientError, Smart1ApiError, TimeoutError) as err:
             # PV production is optional. A missing cumulative endpoint must not
             # make otherwise valid live measurements unavailable.
@@ -85,12 +87,17 @@ class Smart1Coordinator(DataUpdateCoordinator):
             pv_energy_today = None
 
         pv_strings = {}
+        pv_strings_authoritative = False
         if self.inverters:
             try:
                 pv_strings = await self.api.get_latest_pv_string_samples(
                     target_date=today,
                     missing_ok=True,
                 )
+                # A successful but empty current-day response, for example
+                # before sunrise, is not proof that registered strings are
+                # obsolete. Non-empty rows can still refine initial topology.
+                pv_strings_authoritative = bool(pv_strings)
             except (ClientError, Smart1ApiError, TimeoutError) as err:
                 # Detailed inverter diagnostics are optional. Keep the latest
                 # successful values instead of failing all linear entities.
@@ -100,9 +107,15 @@ class Smart1Coordinator(DataUpdateCoordinator):
                 )
                 previous_data = getattr(self, "data", None) or {}
                 pv_strings = previous_data.get("pv_strings", {})
+                pv_strings_authoritative = previous_data.get(
+                    "pv_strings_authoritative",
+                    False,
+                )
 
         return {
             "live": live_values,
             "pv_energy_today": pv_energy_today,
+            "pv_cumulative_authoritative": pv_cumulative_authoritative,
             "pv_strings": pv_strings,
+            "pv_strings_authoritative": pv_strings_authoritative,
         }

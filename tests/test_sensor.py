@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -96,6 +96,10 @@ class FakeEntityRegistry:
         config_entry_id="entry-1",
         domain="sensor",
         platform="smart1_ems",
+        name=None,
+        unit_of_measurement=None,
+        options=None,
+        aliases=None,
     ) -> None:
         self.entities[(domain, platform, unique_id)] = entity_id
         self.registry_entries.append(
@@ -105,6 +109,12 @@ class FakeEntityRegistry:
                 entity_id=entity_id,
                 platform=platform,
                 unique_id=unique_id,
+                name=name,
+                unit_of_measurement=unit_of_measurement,
+                options=options or {},
+                aliases=[entity_registry.COMPUTED_NAME]
+                if aliases is None
+                else aliases,
             )
         )
 
@@ -137,6 +147,7 @@ sys.modules["homeassistant.helpers.device_registry"] = device_registry
 
 
 entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
+entity_registry.COMPUTED_NAME = None
 entity_registry.async_get = lambda hass: hass.entity_registry
 entity_registry.async_entries_for_config_entry = (
     lambda registry, entry_id: [
@@ -250,6 +261,38 @@ class InverterSensorTest(unittest.TestCase):
 
         self.assertEqual(entity.native_value, 42.0)
         self.assertTrue(entity.available)
+
+    def test_temperature_compares_dst_offsets_chronologically(self) -> None:
+        self.coordinator.data["pv_strings"] = {
+            (2, 1, 1): inverter_module.Smart1PvStringSample(
+                bus=2,
+                address=1,
+                string_id=1,
+                timestamp="2026-10-25T02:55:00+02:00",
+                ac_power_w=None,
+                dc_power_w=None,
+                dc_voltage_v=None,
+                inverter_temperature_c=41.0,
+            ),
+            (2, 1, 2): inverter_module.Smart1PvStringSample(
+                bus=2,
+                address=1,
+                string_id=2,
+                timestamp="2026-10-25T02:05:00+01:00",
+                ac_power_w=None,
+                dc_power_w=None,
+                dc_voltage_v=None,
+                inverter_temperature_c=42.0,
+            ),
+        }
+        entity = sensor_module.Smart1InverterTemperatureSensor(
+            self.coordinator,
+            "entry-1",
+            self.inverter,
+            "ems-device-id",
+        )
+
+        self.assertEqual(entity.native_value, 42.0)
 
     def test_inverter_device_info_supports_home_assistant_2026_7(self) -> None:
         class LegacyDeviceInfo(dict):
@@ -489,7 +532,22 @@ class InverterSensorTest(unittest.TestCase):
                     metric,
                 )
                 entity_id = f"sensor.unused_{string_id}_{metric.key}"
-                self.entity_registry.add_entry(entity_id, unique_id)
+                self.entity_registry.add_entry(
+                    entity_id,
+                    unique_id,
+                    # HA stores the entity's integration-provided current
+                    # unit at top level; this is not a user override.
+                    unit_of_measurement=metric.unit,
+                    options={
+                        "sensor": {
+                            "suggested_display_precision": metric.precision,
+                        },
+                        # Home Assistant may populate assistant exposure
+                        # automatically. It must not make an inactive string
+                        # look explicitly customized by the user.
+                        "conversation": {"should_expose": False},
+                    },
+                )
                 inactive_entity_ids.append(entity_id)
 
         hass = types.SimpleNamespace(
@@ -520,6 +578,24 @@ class InverterSensorTest(unittest.TestCase):
         self.assertEqual(
             set(self.entity_registry.removed),
             set(inactive_entity_ids),
+        )
+
+    def test_explicit_sensor_option_marks_registry_entry_as_customized(
+        self,
+    ) -> None:
+        registry_entry = types.SimpleNamespace(
+            aliases=[entity_registry.COMPUTED_NAME],
+            options={
+                "sensor": {
+                    "display_precision": 0,
+                    "suggested_display_precision": 1,
+                },
+                "conversation": {"should_expose": False},
+            },
+        )
+
+        self.assertTrue(
+            sensor_module._registry_entry_is_user_customized(registry_entry)
         )
 
     def test_setup_removes_only_stale_owned_topology_after_authoritative_discovery(
@@ -822,6 +898,540 @@ class InverterSensorTest(unittest.TestCase):
         )
 
         self.assertEqual(len(added), 7)
+
+    def test_failed_first_detail_request_preserves_registered_strings(
+        self,
+    ) -> None:
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler",
+            string_count=1,
+            string_capacities_w=(5000.0,),
+            string_module_fields=("East",),
+        )
+        existing_unique_id = sensor_module._inverter_string_unique_id(
+            "entry-1",
+            inverter,
+            2,
+            sensor_module.INVERTER_STRING_METRICS[0],
+        )
+        self.entity_registry.add_entry(
+            "sensor.existing_string_2",
+            existing_unique_id,
+        )
+        coordinator = types.SimpleNamespace(
+            data={
+                "pv_strings": {},
+                "pv_strings_authoritative": False,
+            }
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                added.extend,
+            )
+        )
+
+        self.assertEqual(self.entity_registry.removed, [])
+        string_2_entities = [
+            entity
+            for entity in added
+            if isinstance(entity, sensor_module.Smart1InverterStringSensor)
+            and entity._string_id == 2
+        ]
+        self.assertEqual(len(string_2_entities), 3)
+
+        coordinator.data["pv_strings"] = {
+            (2, 1, 2): inverter_module.Smart1PvStringSample(
+                bus=2,
+                address=1,
+                string_id=2,
+                timestamp="2026-08-05 12:05:00",
+                ac_power_w=1200.0,
+                dc_power_w=1300.0,
+                dc_voltage_v=500.0,
+                inverter_temperature_c=41.0,
+            )
+        }
+        self.assertEqual(string_2_entities[0].native_value, 1200.0)
+        self.assertTrue(string_2_entities[0].available)
+
+    def test_successful_empty_detail_request_preserves_registered_strings(
+        self,
+    ) -> None:
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler",
+            string_count=1,
+            string_capacities_w=(5000.0,),
+            string_module_fields=("East",),
+        )
+        existing_unique_id = sensor_module._inverter_string_unique_id(
+            "entry-1",
+            inverter,
+            2,
+            sensor_module.INVERTER_STRING_METRICS[0],
+        )
+        self.entity_registry.add_entry(
+            "sensor.existing_string_2",
+            existing_unique_id,
+        )
+        coordinator = types.SimpleNamespace(
+            data={
+                "pv_strings": {},
+                "pv_strings_authoritative": False,
+            }
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                added.extend,
+            )
+        )
+
+        self.assertEqual(self.entity_registry.removed, [])
+        self.assertEqual(
+            len(
+                [
+                    entity
+                    for entity in added
+                    if isinstance(
+                        entity,
+                        sensor_module.Smart1InverterStringSensor,
+                    )
+                    and entity._string_id == 2
+                ]
+            ),
+            3,
+        )
+
+    def test_later_nonempty_detail_reloads_provisional_strings(self) -> None:
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler",
+            string_count=1,
+            string_capacities_w=(5000.0,),
+            string_module_fields=("East",),
+        )
+        stale_unique_id = sensor_module._inverter_string_unique_id(
+            "entry-1",
+            inverter,
+            2,
+            sensor_module.INVERTER_STRING_METRICS[0],
+        )
+        self.entity_registry.add_entry(
+            "sensor.stale_string_2",
+            stale_unique_id,
+        )
+
+        class ListeningCoordinator:
+            def __init__(self) -> None:
+                self.data = {"pv_strings": {}}
+                self.listener = None
+
+            def async_add_listener(self, listener):
+                self.listener = listener
+                return lambda: None
+
+        coordinator = ListeningCoordinator()
+        reload_coroutines = []
+        async_reload = AsyncMock(return_value=True)
+
+        def async_create_task(coroutine, name):
+            reload_coroutines.append((coroutine, name))
+
+        entry = types.SimpleNamespace(
+            entry_id="entry-1",
+            async_on_unload=lambda _callback: None,
+        )
+        hass = types.SimpleNamespace(
+            async_create_task=async_create_task,
+            config_entries=types.SimpleNamespace(async_reload=async_reload),
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(hass, entry, lambda _items: None)
+        )
+        self.assertEqual(self.entity_registry.removed, [])
+
+        coordinator.data["pv_strings"] = {
+            (2, 1, 1): inverter_module.Smart1PvStringSample(
+                bus=2,
+                address=1,
+                string_id=1,
+                timestamp="2026-08-05 12:05:00",
+                ac_power_w=1000.0,
+                dc_power_w=1100.0,
+                dc_voltage_v=500.0,
+                inverter_temperature_c=41.0,
+            )
+        }
+        coordinator.listener()
+        coordinator.listener()
+
+        self.assertEqual(len(reload_coroutines), 1)
+        reload, task_name = reload_coroutines[0]
+        self.assertEqual(
+            task_name,
+            "smart1 EMS inverter string topology reload",
+        )
+        asyncio.run(reload)
+        async_reload.assert_awaited_once_with("entry-1")
+
+    def test_later_nonempty_detail_reloads_second_inverter_once(self) -> None:
+        inverter_a = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler A",
+            string_count=1,
+            string_capacities_w=(5000.0,),
+            string_module_fields=("East",),
+        )
+        inverter_b = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A2",
+            bus=2,
+            address=2,
+            name="Energy Butler B",
+            string_count=1,
+            string_capacities_w=(6000.0,),
+            string_module_fields=("West",),
+        )
+        provisional_unique_id = sensor_module._inverter_string_unique_id(
+            "entry-1",
+            inverter_b,
+            2,
+            sensor_module.INVERTER_STRING_METRICS[0],
+        )
+        self.entity_registry.add_entry(
+            "sensor.provisional_inverter_b_string_2",
+            provisional_unique_id,
+        )
+
+        def sample(inverter, power: float):
+            return inverter_module.Smart1PvStringSample(
+                bus=inverter.bus,
+                address=inverter.address,
+                string_id=1,
+                timestamp="2026-08-05 12:05:00",
+                ac_power_w=power,
+                dc_power_w=power + 100.0,
+                dc_voltage_v=500.0,
+                inverter_temperature_c=41.0,
+            )
+
+        class ListeningCoordinator:
+            def __init__(self) -> None:
+                self.data = {
+                    "pv_strings": {
+                        (2, 1, 1): sample(inverter_a, 1000.0),
+                    }
+                }
+                self.listener = None
+
+            def async_add_listener(self, listener):
+                self.listener = listener
+                return lambda: None
+
+        coordinator = ListeningCoordinator()
+        reload_coroutines = []
+        async_reload = AsyncMock(return_value=True)
+
+        def async_create_task(coroutine, name):
+            reload_coroutines.append((coroutine, name))
+
+        entry = types.SimpleNamespace(
+            entry_id="entry-1",
+            async_on_unload=lambda _callback: None,
+        )
+        hass = types.SimpleNamespace(
+            async_create_task=async_create_task,
+            config_entries=types.SimpleNamespace(async_reload=async_reload),
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter_a, inverter_b],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(hass, entry, lambda _items: None)
+        )
+        self.assertEqual(self.entity_registry.removed, [])
+        self.assertEqual(reload_coroutines, [])
+
+        coordinator.data["pv_strings"][(2, 2, 1)] = sample(
+            inverter_b,
+            1200.0,
+        )
+        coordinator.listener()
+        coordinator.listener()
+
+        self.assertEqual(len(reload_coroutines), 1)
+        reload, task_name = reload_coroutines[0]
+        self.assertEqual(
+            task_name,
+            "smart1 EMS inverter string topology reload",
+        )
+        asyncio.run(reload)
+        async_reload.assert_awaited_once_with("entry-1")
+
+    def test_partial_detail_request_preserves_registered_strings(
+        self,
+    ) -> None:
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler",
+            string_count=1,
+            string_capacities_w=(5000.0,),
+            string_module_fields=("East",),
+        )
+
+        def sample(string_id: int, power: float):
+            return inverter_module.Smart1PvStringSample(
+                bus=2,
+                address=1,
+                string_id=string_id,
+                timestamp="2026-08-05 12:05:00",
+                ac_power_w=power,
+                dc_power_w=power,
+                dc_voltage_v=500.0,
+                inverter_temperature_c=41.0,
+            )
+
+        existing_unique_id = sensor_module._inverter_string_unique_id(
+            "entry-1",
+            inverter,
+            2,
+            sensor_module.INVERTER_STRING_METRICS[0],
+        )
+        self.entity_registry.add_entry(
+            "sensor.existing_string_2",
+            existing_unique_id,
+            name="Customized west string",
+        )
+
+        class ListeningCoordinator:
+            def __init__(self) -> None:
+                self.data = {
+                    "pv_strings": {(2, 1, 1): sample(1, 1000.0)},
+                    "pv_strings_authoritative": True,
+                }
+                self.listener = None
+
+            def async_add_listener(self, listener):
+                self.listener = listener
+                return lambda: None
+
+        coordinator = ListeningCoordinator()
+        unload_callbacks = []
+        entry = types.SimpleNamespace(
+            entry_id="entry-1",
+            async_on_unload=unload_callbacks.append,
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(hass, entry, added.extend)
+        )
+
+        self.assertEqual(self.entity_registry.removed, [])
+        string_2_entities = [
+            entity
+            for entity in added
+            if isinstance(entity, sensor_module.Smart1InverterStringSensor)
+            and entity._string_id == 2
+        ]
+        self.assertEqual(len(string_2_entities), 3)
+        self.assertFalse(string_2_entities[0].available)
+
+        coordinator.data["pv_strings"][(2, 1, 2)] = sample(2, 1200.0)
+        coordinator.listener()
+
+        self.assertEqual(
+            len(
+                [
+                    entity
+                    for entity in added
+                    if isinstance(
+                        entity,
+                        sensor_module.Smart1InverterStringSensor,
+                    )
+                    and entity._string_id == 2
+                ]
+            ),
+            3,
+        )
+        self.assertEqual(string_2_entities[0].native_value, 1200.0)
+        self.assertTrue(string_2_entities[0].available)
+
+    def test_later_detail_poll_adds_string_missing_from_partial_setup(
+        self,
+    ) -> None:
+        inverter = inverter_module.Smart1Inverter(
+            id="Inverter_B2_A1",
+            bus=2,
+            address=1,
+            name="Energy Butler",
+            string_count=1,
+            string_capacities_w=(5000.0,),
+            string_module_fields=("East",),
+        )
+
+        def sample(string_id: int, power: float):
+            return inverter_module.Smart1PvStringSample(
+                bus=2,
+                address=1,
+                string_id=string_id,
+                timestamp="2026-08-05 12:05:00",
+                ac_power_w=power,
+                dc_power_w=power,
+                dc_voltage_v=500.0,
+                inverter_temperature_c=41.0,
+            )
+
+        class ListeningCoordinator:
+            def __init__(self) -> None:
+                self.data = {
+                    "pv_strings": {(2, 1, 1): sample(1, 1000.0)},
+                    "pv_strings_authoritative": True,
+                }
+                self.listener = None
+
+            def async_add_listener(self, listener):
+                self.listener = listener
+                return lambda: None
+
+        coordinator = ListeningCoordinator()
+        unload_callbacks = []
+        entry = types.SimpleNamespace(
+            entry_id="entry-1",
+            async_on_unload=unload_callbacks.append,
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [inverter],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+        added = []
+
+        asyncio.run(
+            sensor_module.async_setup_entry(hass, entry, added.extend)
+        )
+        self.assertEqual(len(unload_callbacks), 1)
+        self.assertIsNotNone(coordinator.listener)
+        self.assertFalse(
+            any(
+                isinstance(
+                    entity,
+                    sensor_module.Smart1InverterStringSensor,
+                )
+                and entity._string_id == 2
+                for entity in added
+            )
+        )
+
+        coordinator.data["pv_strings"][(2, 1, 2)] = sample(2, 1200.0)
+        coordinator.listener()
+
+        string_2_entities = [
+            entity
+            for entity in added
+            if isinstance(entity, sensor_module.Smart1InverterStringSensor)
+            and entity._string_id == 2
+        ]
+        self.assertEqual(len(string_2_entities), 3)
+        self.assertEqual(string_2_entities[0].native_value, 1200.0)
 
 
 if __name__ == "__main__":
