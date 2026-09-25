@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import re
 
 
@@ -45,6 +46,26 @@ def _row_value(row: dict[str, str], *keys: str) -> str:
         if value is not None:
             return value
     return ""
+
+
+def pv_timestamp_sort_key(value: object) -> tuple[int, float, str]:
+    """Return a chronological, deterministic key for one PV timestamp."""
+    text = _clean_text(value)
+    try:
+        parsed = datetime.fromisoformat(
+            f"{text[:-1]}+00:00" if text.endswith("Z") else text
+        )
+    except ValueError:
+        # Keep malformed portal values deterministic without allowing them to
+        # supersede a valid timestamp.
+        return (0, 0.0, text)
+
+    if parsed.tzinfo is None:
+        # Naive values are the portal's local wall time. Treating them as UTC
+        # preserves their chronological wall-time order while aware values are
+        # normalized to their actual instant across a DST fold.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (1, parsed.timestamp(), text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +267,9 @@ def parse_latest_pv_string_samples(
             ),
         )
         previous = samples.get(sample.key)
-        if previous is None or sample.timestamp >= previous.timestamp:
+        if previous is None or pv_timestamp_sort_key(
+            sample.timestamp
+        ) >= pv_timestamp_sort_key(previous.timestamp):
             samples[sample.key] = sample
 
     return samples

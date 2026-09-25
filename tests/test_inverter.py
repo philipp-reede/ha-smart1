@@ -134,6 +134,29 @@ class ParsePvStringSamplesTest(unittest.TestCase):
 
         self.assertEqual(INVERTER.parse_latest_pv_string_samples(rows), {})
 
+    def test_latest_row_compares_dst_offsets_chronologically(self) -> None:
+        rows = [
+            {
+                "Bus": "2",
+                "Address": "1",
+                "StringId": "1",
+                "Timestamp": "2026-10-25T02:55:00+02:00",
+                "Value1": "100",
+            },
+            {
+                "Bus": "2",
+                "Address": "1",
+                "StringId": "1",
+                "Timestamp": "2026-10-25T02:05:00+01:00",
+                "Value1": "200",
+            },
+        ]
+
+        sample = INVERTER.parse_latest_pv_string_samples(rows)[(2, 1, 1)]
+
+        self.assertEqual(sample.timestamp, "2026-10-25T02:05:00+01:00")
+        self.assertEqual(sample.ac_power_w, 200.0)
+
 
 if __name__ == "__main__":
     unittest.main()

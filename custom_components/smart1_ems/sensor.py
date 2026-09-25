@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import re
 
@@ -23,7 +24,7 @@ from .bus import Smart1BusSystem
 from .classifier import Smart1Category
 from .const import DOMAIN
 from .entity_mapper import get_entity_descriptions
-from .inverter import Smart1Inverter
+from .inverter import Smart1Inverter, pv_timestamp_sort_key
 from .module_field import Smart1ModuleField
 
 PV_DEVICE_NAME = "Smart1 Photovoltaik"
@@ -241,6 +242,88 @@ def _remove_stale_topology_entities(
             entity_registry.async_remove(registry_entry.entity_id)
 
 
+def _registered_inverter_string_ids(
+    entity_registry,
+    entry_id: str,
+    inverter: Smart1Inverter,
+    *,
+    customized_only: bool = False,
+) -> set[int]:
+    """Return string IDs already registered for one current inverter."""
+    metrics = "|".join(
+        re.escape(metric.key) for metric in INVERTER_STRING_METRICS
+    )
+    pattern = re.compile(
+        rf"^smart1_{re.escape(entry_id)}_inverter_{inverter.bus}_"
+        rf"{inverter.address}_string_(?P<string_id>\d+)_(?:{metrics})$"
+    )
+    string_ids: set[int] = set()
+    for registry_entry in er.async_entries_for_config_entry(
+        entity_registry,
+        entry_id,
+    ):
+        if (
+            registry_entry.domain != "sensor"
+            or registry_entry.platform != DOMAIN
+        ):
+            continue
+        match = pattern.fullmatch(registry_entry.unique_id)
+        if match is None or int(match.group("string_id")) <= 0:
+            continue
+        if customized_only and not _registry_entry_is_user_customized(
+            registry_entry
+        ):
+            continue
+        string_ids.add(int(match.group("string_id")))
+    return string_ids
+
+
+def _registry_entry_is_user_customized(registry_entry) -> bool:
+    """Return whether removing an entry would discard user configuration."""
+    for attribute in (
+        "area_id",
+        "categories",
+        "device_class",
+        "icon",
+        "labels",
+        "name",
+    ):
+        value = getattr(registry_entry, attribute, None)
+        if value not in (None, "", (), [], {}, set(), frozenset()):
+            return True
+
+    aliases = getattr(registry_entry, "aliases", ()) or ()
+    if isinstance(aliases, str):
+        aliases = (aliases,)
+    computed_name = getattr(er, "COMPUTED_NAME", None)
+    if any(alias not in (None, computed_name) for alias in aliases):
+        return True
+
+    options = getattr(registry_entry, "options", None)
+    sensor_options = (
+        options.get("sensor", {}) if isinstance(options, Mapping) else {}
+    )
+    if isinstance(sensor_options, Mapping) and any(
+        key in sensor_options
+        for key in ("display_precision", "unit_of_measurement")
+    ):
+        # These are explicit sensor presentation choices. Other option
+        # domains can be populated automatically (for example voice-assistant
+        # exposure), while ``suggested_*`` sensor options come from the
+        # integration itself; neither is proof that the user customized this
+        # PV string.
+        return True
+
+    for attribute in ("disabled_by", "hidden_by"):
+        value = getattr(registry_entry, attribute, None)
+        if (
+            value is not None
+            and str(value).lower().rsplit(".", 1)[-1] == "user"
+        ):
+            return True
+    return False
+
+
 def _device_category(category: Smart1Category) -> Smart1Category:
     """Map measurement roles to the logical EMS device."""
     if category in {
@@ -370,7 +453,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     )
                 )
 
+    entity_registry = er.async_get(hass)
     pv_strings = coordinator.data.get("pv_strings", {})
+    initially_reported_inverters = {
+        (bus, address)
+        for (bus, address, string_id), sample in pv_strings.items()
+        if string_id > 0 and sample.has_measurement
+    }
+    known_string_ids: dict[tuple[int, int], set[int]] = {}
+    inverters_by_key = {inverter.key: inverter for inverter in inverters}
     for inverter in inverters:
         assert ems_device_id is not None
         detailed_string_ids = {
@@ -384,11 +475,34 @@ async def async_setup_entry(hass, entry, async_add_entities):
         # inverter. Prefer it over metadata because some portals assign module
         # fields to unused inputs. Metadata remains the discovery fallback when
         # no detailed rows have been received yet.
-        string_ids = (
-            detailed_string_ids
-            if detailed_string_ids
-            else set(inverter.active_string_ids)
-        )
+        if detailed_string_ids:
+            string_ids = detailed_string_ids
+            # A non-empty detail response is the best available active-string
+            # evidence and deliberately filters stale metadata/registry rows.
+            # Preserve only omitted strings carrying explicit user registry
+            # customizations; removing those would irreversibly lose settings
+            # if this response was merely partial.
+            string_ids.update(
+                _registered_inverter_string_ids(
+                    entity_registry,
+                    entry.entry_id,
+                    inverter,
+                    customized_only=True,
+                )
+            )
+        else:
+            string_ids = set(inverter.active_string_ids)
+            # A failed or empty first request contains no active-string
+            # evidence. Keep every registered string provisionally until a
+            # later non-empty response can distinguish active and stale rows.
+            string_ids.update(
+                _registered_inverter_string_ids(
+                    entity_registry,
+                    entry.entry_id,
+                    inverter,
+                )
+            )
+        known_string_ids[inverter.key] = set(string_ids)
         for string_id in sorted(string_ids):
             for metric in INVERTER_STRING_METRICS:
                 expected_inverter_ids.add(
@@ -422,7 +536,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         )
 
     _remove_stale_topology_entities(
-        er.async_get(hass),
+        entity_registry,
         entry.entry_id,
         expected_inverter_ids=expected_inverter_ids,
         expected_module_field_ids=expected_module_field_ids,
@@ -436,6 +550,64 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
 
     async_add_entities(entities)
+
+    add_listener = getattr(coordinator, "async_add_listener", None)
+    if inverters and callable(add_listener):
+        detail_reload_requested = False
+
+        def _add_new_reported_strings() -> None:
+            """Add strings first observed after platform setup."""
+            nonlocal detail_reload_requested
+            current_strings = coordinator.data.get("pv_strings", {})
+            if (
+                not detail_reload_requested
+                and any(
+                    (bus, address) not in initially_reported_inverters
+                    and string_id > 0
+                    and sample.has_measurement
+                    for (bus, address, string_id), sample in (
+                        current_strings.items()
+                    )
+                )
+            ):
+                # Provisional registered strings were retained because setup
+                # had no active-string evidence. Reload once when the first
+                # non-empty response arrives so the normal authoritative
+                # filter can remove stale uncustomized registry entries.
+                detail_reload_requested = True
+                hass.async_create_task(
+                    hass.config_entries.async_reload(entry.entry_id),
+                    "smart1 EMS inverter string topology reload",
+                )
+                return
+
+            new_entities = []
+            for (bus, address, string_id), sample in current_strings.items():
+                inverter = inverters_by_key.get((bus, address))
+                if (
+                    inverter is None
+                    or string_id <= 0
+                    or not sample.has_measurement
+                    or string_id
+                    in known_string_ids.setdefault(inverter.key, set())
+                ):
+                    continue
+                known_string_ids[inverter.key].add(string_id)
+                for metric in INVERTER_STRING_METRICS:
+                    new_entities.append(
+                        Smart1InverterStringSensor(
+                            coordinator,
+                            entry.entry_id,
+                            inverter,
+                            string_id,
+                            metric,
+                            ems_device_id,
+                        )
+                    )
+            if new_entities:
+                async_add_entities(new_entities)
+
+        entry.async_on_unload(add_listener(_add_new_reported_strings))
 
 
 class Smart1Sensor(CoordinatorEntity, SensorEntity):
@@ -750,7 +922,10 @@ class Smart1InverterTemperatureSensor(CoordinatorEntity, SensorEntity):
         ]
         if not samples:
             return None
-        return max(samples, key=lambda sample: sample.timestamp).inverter_temperature_c
+        return max(
+            samples,
+            key=lambda sample: pv_timestamp_sort_key(sample.timestamp),
+        ).inverter_temperature_c
 
     @property
     def available(self):

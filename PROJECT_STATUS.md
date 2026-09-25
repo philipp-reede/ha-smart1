@@ -18,8 +18,13 @@
   have shared those IDs, every unscoped statistic is discovered from all
   config-entry state and Recorder metadata. Statistics the deterministic
   legacy owner can still manage are rebuilt only after a complete replacement
-  fetch; orphaned IDs are removed even when that owner currently has no
-  matching PV capability or selected Energy role. Persisted cleanup state
+  fetch. That isolation rebuild deliberately discards the formerly shared
+  rows and begins at a zero cumulative baseline because they cannot be
+  attributed safely to one installation. Any subsequently persisted schema
+  marker proves the one-time isolation boundary has been crossed, preventing
+  later hourly/daily schema changes from discarding valid owner-specific
+  pre-window history. Orphaned IDs are removed even when that owner currently
+  has no matching PV capability or selected Energy role. Persisted cleanup state
   prevents repeated clears and is rearmed if a removed statistic later
   reappears
 - Rejected API keys trigger a translated Home Assistant reauthentication flow.
@@ -39,11 +44,27 @@
 - Device registry identifiers use valid `(DOMAIN, identifier)` pairs
 - PV production is read from the documented photovoltaics cumulative endpoint
 - PV production is aggregated once per inverter and exposed in kWh
+- Photovoltaic capability is confirmed by any classifiable PV point,
+  non-empty inverter or module-field topology, or a successful cumulative
+  production value including zero. This keeps the live PV sensor, daily-only
+  history fallback and legacy-history protection available on portals without
+  a conventional linear `pv_global` point. If cumulative discovery is only
+  temporarily inconclusive during startup, existing PV history is protected.
+  A later successful poll persists the capability before requesting one reload,
+  so another transient failure during that reload cannot hide PV again
 - A failure of optional PV cumulative data no longer blocks live values
 - Physical inverters are discovered from the documented metadata endpoint and
   represented as separate Home Assistant devices
 - The detailed photovoltaic endpoint supplies per-string AC/DC power and DC
   voltage plus inverter temperature as optional diagnostic sensors
+- All registered string IDs for a currently discovered inverter are retained
+  across failed or empty detail responses. A non-empty partial response may
+  still remove stale uncustomized IDs, while omitted strings with recognized
+  entity-registry metadata or sensor-formatting customizations are retained.
+  Genuinely new strings first observed after a known partial topology are added
+  dynamically. If setup had no detail rows at all, the first later non-empty
+  response requests one reload so provisional stale entries can be cleaned
+  safely
 - Missing or failed inverter endpoints do not block linear entities, PV totals
   or Energy Dashboard statistics; transient failures retain the latest sample
 - Obsolete inverter, PV-string, module-field and bus entities are removed only
@@ -93,8 +114,10 @@
   for positive and negative fractional offsets and an Adelaide DST transition
 - PV rows created by older releases between UTC hours trigger a one-time
   destructive repair for profiled and daily-only history. The clear occurs only
-  after a complete 365-day response; valid pre-window rows are reimported and
-  their final cumulative sum remains the replacement baseline
+  after a complete 365-day response. Before any whole-ID clear, an exhausted
+  bounded lookback is replaced by a complete Recorder read, so every valid
+  pre-window row is reimported and its final cumulative sum remains the
+  replacement baseline even when more than 9,125 hourly rows exist
 - Stored hourly PV schemas remain identifiable if the live power point is
   temporarily missing. Exact new portal totals replace only their local day;
   missing days retain aligned hourly history, including rows before the repair
@@ -184,6 +207,9 @@
   therefore retain separate profiles and both UTC occurrences; a genuinely
   ambiguous profile remains an informed reconstruction rather than
   API-provided truth
+- Offset-aware PV-string samples are ordered by their normalized instant, so
+  the latest string measurements and inverter temperature remain correct
+  across the repeated autumn daylight-saving-time hour
 - Redacted diagnostics expose the history import result and repair state
   without statistic source IDs or measurement values
 - Derived grid import and export statistics were accepted by the real Home

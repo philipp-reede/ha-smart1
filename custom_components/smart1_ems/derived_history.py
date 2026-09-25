@@ -593,11 +593,20 @@ class Smart1DerivedEnergyImporter:
                     ),
                 )
             }
-            forced_rebuild_roles = (
-                set(self.role_points) - complete_roles
+            # Legacy isolation is independent of later schema upgrades. Since
+            # completion markers and this migration were introduced together,
+            # any persisted marker proves that role crossed the one-time
+            # isolation boundary already.
+            forced_rebuild_roles = {
+                role_key
+                for role_key, statistic_id in statistic_ids.items()
                 if self.force_initial_rebuild
-                else set()
-            )
+                and (
+                    not self.history_state
+                    or self.history_state.current_schema_version(statistic_id)
+                    == 0
+                )
+            }
             detected_rebuild_roles |= forced_rebuild_roles
             self._detected_rebuild_roles = tuple(
                 sorted(detected_rebuild_roles)

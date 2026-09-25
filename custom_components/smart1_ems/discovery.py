@@ -28,6 +28,24 @@ class Smart1DiscoveryResult:
     module_field_count: int = 0
     bus_count: int = 0
 
+    def add_pv_evidence(
+        self,
+        *,
+        inverter_count: int,
+        module_field_count: int,
+        cumulative_energy: float | None,
+    ) -> None:
+        """Add PV capability evidence from optional portal endpoints."""
+        self.inverter_count = inverter_count
+        self.module_field_count = module_field_count
+        self.has_pv = self.has_pv or any(
+            (
+                inverter_count > 0,
+                module_field_count > 0,
+                cumulative_energy is not None,
+            )
+        )
+
     def to_dict(self) -> dict:
         """Return identifier-free discovery details for diagnostics and logs."""
         return {

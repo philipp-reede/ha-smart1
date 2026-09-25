@@ -42,6 +42,7 @@ PLATFORMS = ["sensor"]
 HISTORY_UPDATE_INTERVAL = timedelta(hours=6)
 CURRENT_DAY_UPDATE_INTERVAL = timedelta(minutes=15)
 LEGACY_ORPHAN_CLEANUP_KEY = "legacy_orphan_cleanup_ids"
+PV_CAPABILITY_CONFIRMED_KEY = "pv_capability_confirmed"
 
 _INVERTER_ID_COLUMNS = {"Inverter Id", "InverterId", '"Inverter Id"'}
 _MODULE_FIELD_ID_COLUMNS = {
@@ -111,6 +112,16 @@ def _legacy_statistic_ids(entries: list[ConfigEntry]) -> set[str]:
                 if _is_unscoped_legacy_statistic_id(statistic_id)
             )
     return statistic_ids
+
+
+def _entry_proves_legacy_shared_pv(entry: ConfigEntry) -> bool:
+    """Return whether a scoped entry demonstrably wrote legacy PV history."""
+    raw_versions = entry.data.get(HISTORY_SCHEMA_VERSIONS_KEY, {})
+    return bool(
+        entry.data.get(STATISTICS_NAMESPACE_KEY)
+        and isinstance(raw_versions, Mapping)
+        and PV_STATISTIC_ID in raw_versions
+    )
 
 
 def _stored_orphan_cleanup_ids(data: Mapping[str, object]) -> set[str]:
@@ -280,8 +291,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     discovery = Smart1Discovery()
     discovery_result = discovery.analyze(devices)
-    discovery_result.inverter_count = len(inverters)
-    discovery_result.module_field_count = len(module_fields)
     discovery_result.bus_count = len(buses)
     inverter_discovery_authoritative = _discovery_probe_is_authoritative(
         inverter_probe,
@@ -298,11 +307,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _BUS_ID_COLUMNS,
     )
 
-    _LOGGER.info(
-        "Smart1 Discovery: %s",
-        discovery_result.to_dict(),
-    )
-
     active_linear_ids = entry.options.get(
         "active_linear_ids",
         [device.id for device in devices],
@@ -317,6 +321,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         config_entry=entry,
     )
     await coordinator.async_config_entry_first_refresh()
+
+    # Linear points are not the only reliable proof of photovoltaic support.
+    # Some portals expose only inverter/module topology or the dedicated
+    # cumulative endpoint.  Retain the point-based discovery result, then add
+    # this optional endpoint evidence before sensor, history and legacy-cleanup
+    # gates inspect ``has_pv``.
+    discovery_result.add_pv_evidence(
+        inverter_count=len(inverters),
+        module_field_count=len(module_fields),
+        cumulative_energy=coordinator.data.get("pv_energy_today"),
+    )
+    if entry.data.get(PV_CAPABILITY_CONFIRMED_KEY) is True:
+        discovery_result.has_pv = True
+    elif discovery_result.has_pv:
+        hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                PV_CAPABILITY_CONFIRMED_KEY: True,
+            },
+        )
+
+    _LOGGER.info(
+        "Smart1 Discovery: %s",
+        discovery_result.to_dict(),
+    )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "api": api,
@@ -336,6 +366,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
         "bus_discovery_authoritative": bus_discovery_authoritative,
     }
+
+    if not discovery_result.has_pv:
+        pv_reload_requested = False
+
+        def _promote_late_pv_capability() -> None:
+            """Reload once when a later poll first proves PV support."""
+            nonlocal pv_reload_requested
+            if (
+                pv_reload_requested
+                or coordinator.data.get("pv_energy_today") is None
+            ):
+                return
+            pv_reload_requested = True
+            discovery_result.has_pv = True
+            hass.config_entries.async_update_entry(
+                entry,
+                data={
+                    **entry.data,
+                    PV_CAPABILITY_CONFIRMED_KEY: True,
+                },
+            )
+            hass.async_create_task(
+                hass.config_entries.async_reload(entry.entry_id),
+                "smart1 EMS late PV capability reload",
+            )
+
+        entry.async_on_unload(
+            coordinator.async_add_listener(_promote_late_pv_capability)
+        )
 
     history_importers = []
     managed_legacy_statistic_ids: set[str] = set()
@@ -361,6 +420,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         history_importers.append(pv_importer)
         if not statistics_namespace:
             managed_legacy_statistic_ids.add(pv_importer.statistic_id)
+    elif not statistics_namespace:
+        # An empty current-day PV response is not proof that this installation
+        # has no PV: it can also occur before first production. Keep the legacy
+        # statistic unless another configured installation has independently
+        # confirmed PV capability, in which case the unscoped rows cannot be
+        # attributed safely to this legacy owner and isolation may remove them.
+        raw_history_versions = entry.data.get(HISTORY_SCHEMA_VERSIONS_KEY, {})
+        current_device_id = _normalized_device_id(entry.data.get("device_id"))
+        other_entry_confirms_shared_pv = any(
+            candidate.entry_id != entry.entry_id
+            and _normalized_device_id(candidate.data.get("device_id"))
+            not in {"", current_device_id}
+            and _entry_proves_legacy_shared_pv(candidate)
+            for candidate in hass.config_entries.async_entries(DOMAIN)
+        )
+        if not other_entry_confirms_shared_pv or (
+            isinstance(raw_history_versions, Mapping)
+            and PV_STATISTIC_ID in raw_history_versions
+        ):
+            managed_legacy_statistic_ids.add(PV_STATISTIC_ID)
 
     points_by_id = {point.id: point for point in devices}
     selected_roles = entry.options.get("energy_roles", {})

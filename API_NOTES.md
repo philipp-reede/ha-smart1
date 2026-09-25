@@ -64,6 +64,22 @@ available, a positive configured capacity or a meaningful module-field
 assignment is used as a discovery fallback. Declared but unused inverter inputs
 do not create unavailable Home Assistant entities. Registry entries created by
 earlier versions for such inputs are removed when the integration is reloaded.
+All existing registered strings for a currently discovered inverter are kept
+and instantiated provisionally when the detail response fails or is empty. A
+non-empty response remains the best evidence for active-only filtering: stale
+uncustomized IDs can be removed, while omitted strings carrying recognized
+entity-registry metadata or sensor-formatting customizations are retained in
+case the response was partial.
+Genuinely new strings observed after a known partial topology are added
+dynamically. If setup had no detail rows, the first later non-empty response
+requests one reload so provisional stale entries can be filtered safely.
+Removing an inverter from an authoritative topology response still removes
+its entities.
+
+Offset-aware detail timestamps are compared as absolute instants rather than
+as text. This keeps the selected latest string sample and inverter temperature
+correct when the local clock repeats an hour at the end of daylight saving
+time; naive timestamps retain their local wall-time ordering.
 
 The inverter name, manufacturer, model and serial number populate the Home
 Assistant device registry. The API key, plant ID, inverter ID, serial number,
@@ -139,6 +155,16 @@ Endpoint:
   string 1.
 - When requesting all strings, aggregate one production value per
   `(Bus, Address)` to avoid double counting.
+
+A non-empty inverter or module-field topology, or a successful cumulative
+response including `0 Wh`, is treated as photovoltaic capability evidence.
+This allows portals without a classifiable linear PV point to expose the live
+daily-total sensor and use cumulative daily values for historical statistics.
+If the startup request is temporarily inconclusive, existing PV history is
+protected from legacy cleanup. A later successful cumulative poll persists the
+confirmed capability before triggering one config-entry reload, so the static
+sensor and history importer remain enabled even if the reload's first optional
+request is inconclusive again.
 
 ## Linear cumulative data
 
