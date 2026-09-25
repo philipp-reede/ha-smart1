@@ -77,6 +77,9 @@ def classify_point(point: Smart1Point) -> Smart1Category:
     if "pv" in hardware:
         return Smart1Category.PV
 
+    if "photovoltaic" in interface:
+        return Smart1Category.PV
+
     if "wallbox" in interface:
         return Smart1Category.WALLBOX
 

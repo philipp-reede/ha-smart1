@@ -70,6 +70,11 @@ class Smart1DiscoveryTest(unittest.TestCase):
                 "has_pv",
             ),
             (
+                "unstructured_photovoltaic_interface",
+                make_point("Power B2", "photovoltaic"),
+                "has_pv",
+            ),
+            (
                 "battery_interface",
                 make_point("Power C", "battery"),
                 "has_battery",

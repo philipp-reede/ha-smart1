@@ -41,6 +41,9 @@ from .point import Smart1Point
 from .power_integration import integrate_power_rows
 from .recorder_helpers import (
     async_clear_statistics,
+    async_wait_for_recorder_commit,
+    async_wait_for_statistics_readback,
+    statistics_are_persisted,
     validate_energy_statistics_imports,
 )
 
@@ -305,6 +308,8 @@ class Smart1DerivedEnergyImporter:
         self._detected_rebuild_roles: tuple[str, ...] = ()
         self._cleared_rebuild_roles: tuple[str, ...] = ()
         self._roles_without_replacement: tuple[str, ...] = ()
+        self._persistence_tasks: set[asyncio.Task[Any]] = set()
+        self._persistence_generation = 0
 
     def _is_complete(self, statistic_id: str) -> bool:
         """Return whether a statistic completed its current backfill."""
@@ -338,6 +343,114 @@ class Smart1DerivedEnergyImporter:
                 DERIVED_HISTORY_SCHEMA_VERSION,
                 has_data=has_data,
             )
+
+    def _schedule_persistence_task(self, coroutine: Any) -> None:
+        """Keep a late Recorder finalizer alive until it finishes."""
+        create_task = getattr(self.hass, "async_create_task", None)
+        task = (
+            create_task(
+                coroutine,
+                "smart1 EMS derived history persistence finalizer",
+            )
+            if create_task is not None
+            else asyncio.create_task(coroutine)
+        )
+        self._persistence_tasks.add(task)
+        task.add_done_callback(self._persistence_tasks.discard)
+
+    async def _async_confirm_statistics_persistence(
+        self,
+        recorder: Any,
+        role_keys: set[str],
+        statistic_ids: Mapping[str, str],
+        statistics_by_role: Mapping[str, list[StatisticData]],
+        expected_marker_versions: Mapping[str, int],
+        persistence_generation: int,
+    ) -> set[str]:
+        """Verify queued derived imports and complete only persisted roles."""
+        if not role_keys or not self.history_state:
+            return set()
+        if persistence_generation != self._persistence_generation:
+            return set()
+        # Treat the queue barrier as advisory. A slow import may already be
+        # running outside the queue when the barrier times out; only readback
+        # proves whether its transaction committed.
+        await async_wait_for_recorder_commit(recorder)
+        if persistence_generation != self._persistence_generation:
+            return set()
+
+        async def _confirm_role(role_key: str) -> tuple[str, bool]:
+            statistics = statistics_by_role[role_key]
+            persisted = await async_wait_for_statistics_readback(
+                statistics,
+                lambda: self._existing_statistics(
+                    statistic_ids[role_key],
+                    STATISTICS_LOOKBACK + len(statistics) + 1,
+                ),
+                matcher=statistics_are_persisted,
+            )
+            if not persisted:
+                return role_key, False
+            if persistence_generation != self._persistence_generation:
+                return role_key, False
+
+            marked = self.history_state.mark_complete_if_unchanged(
+                statistic_ids[role_key],
+                DERIVED_HISTORY_SCHEMA_VERSION,
+                has_data=True,
+                expected_version=expected_marker_versions[role_key],
+            )
+            if not marked:
+                marked = bool(
+                    self.history_state.is_complete(
+                        statistic_ids[role_key],
+                        DERIVED_HISTORY_SCHEMA_VERSION,
+                    )
+                    and self.history_state.data_presence(
+                        statistic_ids[role_key],
+                        DERIVED_HISTORY_SCHEMA_VERSION,
+                    )
+                    is True
+                )
+            return role_key, marked
+
+        results = await asyncio.gather(
+            *(_confirm_role(role_key) for role_key in sorted(role_keys))
+        )
+        return {
+            role_key for role_key, persisted in results if persisted
+        }
+
+    async def _async_finalize_late_clear(
+        self,
+        recorder: Any,
+        role_keys: set[str],
+        cleared_roles: set[str],
+        statistic_ids: Mapping[str, str],
+        statistics_by_role: Mapping[str, list[StatisticData]],
+        expected_marker_versions: Mapping[str, int],
+        persistence_generation: int,
+    ) -> None:
+        """Finalize replacements after a delayed clear callback."""
+        persisted_roles = await self._async_confirm_statistics_persistence(
+            recorder,
+            role_keys,
+            statistic_ids,
+            statistics_by_role,
+            expected_marker_versions,
+            persistence_generation,
+        )
+        if persistence_generation != self._persistence_generation:
+            return
+        if role_keys <= persisted_roles:
+            self._cleared_rebuild_roles = tuple(sorted(cleared_roles))
+        if self._last_result not in {"clear_timeout", "persistence_pending"}:
+            return
+        self._last_result = (
+            "completed"
+            if role_keys <= persisted_roles
+            else "persistence_pending"
+        )
 
     @property
     def diagnostic_status(self) -> dict[str, Any]:
@@ -519,6 +632,11 @@ class Smart1DerivedEnergyImporter:
                     self._last_result = "repair_pending"
                     return
             forced_clear_roles = forced_rebuild_roles & rebuild_roles
+            if forced_clear_roles:
+                # Invalidate an older timed-out clear finalizer before this
+                # run performs any further network awaits.
+                self._persistence_generation += 1
+            persistence_generation = self._persistence_generation
             windows = {
                 role_key: determine_hourly_import_window(
                     records,
@@ -629,32 +747,64 @@ class Smart1DerivedEnergyImporter:
                     )
 
             recorder = get_instance(self.hass)
+            expected_marker_versions = {
+                role_key: self.history_state.current_schema_version(
+                    statistic_ids[role_key]
+                )
+                for role_key in refreshable_roles
+            } if self.history_state else {}
             if forced_clear_roles:
                 rebuild_statistic_ids = [
                     statistic_ids[role_key]
                     for role_key in sorted(forced_clear_roles)
                 ]
-                expected_versions = {
-                    role_key: (
-                        self.history_state.current_schema_version(
-                            statistic_ids[role_key]
-                        )
-                        if self.history_state
-                        else 0
-                    )
-                    for role_key in forced_clear_roles
-                }
 
                 def _mark_rebuild_complete() -> None:
                     if not self.history_state:
                         return
-                    for role_key in forced_clear_roles:
+                    if (
+                        persistence_generation != self._persistence_generation
+                    ):
+                        return
+                    # Empty rebuilds finish with the clear itself.  A role
+                    # with replacement rows is completed only after the
+                    # queued import has been read back from Recorder.
+                    for role_key in (
+                        forced_clear_roles - roles_with_statistics
+                    ):
                         self.history_state.mark_complete_if_unchanged(
                             statistic_ids[role_key],
                             DERIVED_HISTORY_SCHEMA_VERSION,
-                            has_data=role_key in roles_with_statistics,
-                            expected_version=expected_versions[role_key],
+                            has_data=False,
+                            expected_version=(
+                                expected_marker_versions[role_key]
+                            ),
                         )
+
+                late_rebuild_roles = (
+                    forced_clear_roles & roles_with_statistics
+                )
+
+                def _finalize_late_rebuild() -> None:
+                    if not late_rebuild_roles or not self.history_state:
+                        return
+                    self._schedule_persistence_task(
+                        self._async_finalize_late_clear(
+                            recorder,
+                            set(late_rebuild_roles),
+                            set(forced_clear_roles),
+                            dict(statistic_ids),
+                            {
+                                role_key: list(statistics_by_role[role_key])
+                                for role_key in late_rebuild_roles
+                            },
+                            {
+                                role_key: expected_marker_versions[role_key]
+                                for role_key in late_rebuild_roles
+                            },
+                            persistence_generation,
+                        )
+                    )
 
                 if not await async_clear_statistics(
                     recorder,
@@ -675,6 +825,7 @@ class Smart1DerivedEnergyImporter:
                         forced_clear_roles
                     ),
                     on_done=_mark_rebuild_complete,
+                    on_late_done=_finalize_late_rebuild,
                 ):
                     _LOGGER.warning(
                         "Timed out while clearing smart1 derived energy "
@@ -698,23 +849,93 @@ class Smart1DerivedEnergyImporter:
                 if fetch_completed
                 else set()
             )
+            marker_update_roles = set()
+            if self.history_state:
+                marker_update_roles = {
+                    role_key
+                    for role_key in roles_with_statistics
+                    if (
+                        (
+                            role_key in completed_roles
+                            and (
+                                not self._is_complete(
+                                    statistic_ids[role_key]
+                                )
+                                or self._data_presence(
+                                    statistic_ids[role_key]
+                                ) is not True
+                            )
+                        )
+                        or (
+                            role_key not in completed_roles
+                            and self._data_presence(
+                                statistic_ids[role_key]
+                            ) is not True
+                        )
+                    )
+                }
+
+            persisted_roles = (
+                await self._async_confirm_statistics_persistence(
+                    recorder,
+                    marker_update_roles,
+                    statistic_ids,
+                    statistics_by_role,
+                    expected_marker_versions,
+                    persistence_generation,
+                )
+            )
+
+            pending_marker_roles = marker_update_roles - persisted_roles
             for role_key in completed_roles:
+                has_data = (
+                    role_key in roles_with_statistics
+                    or (
+                        role_key not in forced_rebuild_roles
+                        and bool(records_by_role[role_key])
+                    )
+                )
+                if role_key in marker_update_roles:
+                    # Confirmation already wrote the generation-guarded
+                    # marker. Failed roles remain pending below.
+                    continue
                 self._mark_complete(
                     statistic_ids[role_key],
-                    has_data=(
-                        role_key in roles_with_statistics
-                        or (
-                            role_key not in forced_rebuild_roles
-                            and bool(records_by_role[role_key])
-                        )
-                    ),
+                    has_data=has_data,
                 )
             for role_key in roles_with_statistics - completed_roles:
                 if self._data_presence(statistic_ids[role_key]) is not True:
-                    self._mark_complete(
-                        statistic_ids[role_key],
-                        has_data=True,
+                    # Confirmation above owns this marker update as well.
+                    continue
+
+            if pending_marker_roles:
+                _LOGGER.warning(
+                    "Deferring smart1 derived energy completion markers for "
+                    "roles %s until Recorder persistence can be verified",
+                    ", ".join(sorted(pending_marker_roles)),
+                )
+                self._last_result = "persistence_pending"
+                if persistence_generation == self._persistence_generation:
+                    self._schedule_persistence_task(
+                        self._async_finalize_late_clear(
+                            recorder,
+                            set(pending_marker_roles),
+                            set(forced_clear_roles),
+                            dict(statistic_ids),
+                            {
+                                role_key: list(
+                                    statistics_by_role[role_key]
+                                )
+                                for role_key in pending_marker_roles
+                            },
+                            {
+                                role_key: expected_marker_versions[role_key]
+                                for role_key in pending_marker_roles
+                            },
+                            persistence_generation,
+                        )
                     )
+                return
 
             self._last_result = (
                 "completed"
