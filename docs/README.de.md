@@ -102,25 +102,28 @@ Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 | Zusatzheizung | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, Firmware `V47.22.18.24` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wallbox | KEBA P40 M-TEC | Software `1.4.5` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wärmepumpe | M-TEC AP440 | Nicht angegeben | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3` und `2026.9.3`; OS `18.3` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3` und `2026.9.3`; OS `18.3` und Supervisor `2026.09.2` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 
 Diese Angaben dokumentieren bestätigte Testkombinationen und keine
 Mindestversionen. Bericht
 [#13](https://github.com/philipp-reede/ha-smart1/issues/13) wurde mit smart1 EMS
 `v0.6.1`, Home Assistant Core `2026.7.4` und `portal.smart1.eu` erstellt. Die
 gleiche Anlage wurde anschließend mit Energy Hero Software `1.28.59` und Home
-Assistant Core `2026.8.3` erneut erfolgreich getestet. Der jüngste Referenztest
-erfolgte mit smart1 EMS `v0.6.6`, Home Assistant OS `18.3` und Home Assistant
-Core `2026.9.3`. Dabei startete die Integration stabil und ohne Warnungen. Die
-bisherigen Geräte- und Entitätszuordnungen blieben unverändert plausibel, alle
-sieben Rollen des Energy Dashboards waren belegt und sowohl der PV- als auch
-der abgeleitete Energie-Historienimport wurden vollständig abgeschlossen. Im
+Assistant Core `2026.8.3` erneut erfolgreich getestet. Beim jüngsten
+Referenztest wurde smart1 EMS unter Home Assistant OS `18.3`, Supervisor
+`2026.09.2` und Home Assistant Core `2026.9.3` direkt von `v0.6.6` auf `v0.7.0`
+aktualisiert. Die Integration startete stabil und ohne Warnungen oder
+beobachtete Auffälligkeiten. Die bisherigen Geräte- und Entitätszuordnungen
+blieben unverändert plausibel, alle sieben Rollen des Energy Dashboards waren
+belegt und sowohl der PV- als auch der abgeleitete Energie-Historienimport
+wurden vollständig abgeschlossen. Im
 Energy Dashboard traten keine Auffälligkeiten auf. Die bereinigte Diagnose
-erfasste beim
-PV-Plausibilitätstest alle 288 Fünf-Minuten-Werte des Vortags ohne Lücke; die
-Abweichung zum exakten Tageswert betrug nur 0,78 %. Der vollständige
-Testverlauf ist im
-[Kompatibilitätsbericht #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5827549220)
+meldete 77 Messpunkte, einen Wechselrichter mit zwei aktiven Strings und zwei
+vollständig beschriebenen Modulfeldern. Der PV-Plausibilitätstest erfasste alle
+288 Fünf-Minuten-Werte des Vortags ohne Lücke; die Abweichung zum exakten
+Tageswert betrug nur 0,78 %. Die Reauthentifizierung wurde bei diesem normalen
+Aktualisierungstest nicht ausgelöst. Der vollständige Testverlauf ist im
+[Kompatibilitätsbericht #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5828037865)
 dokumentiert.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern

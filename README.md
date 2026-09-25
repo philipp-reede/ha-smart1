@@ -105,22 +105,25 @@ been limited to one installation:
 | Auxiliary heating | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, firmware `V47.22.18.24` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | EV charging | KEBA P40 M-TEC | Software `1.4.5` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Heat pump | M-TEC AP440 | Not reported | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3` and `2026.9.3`; OS `18.3` tested with Core `2026.9.3` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3` and `2026.9.3`; OS `18.3` and Supervisor `2026.09.2` tested with Core `2026.9.3` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 
 These are confirmed test combinations, not minimum version requirements.
 Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
 smart1 EMS `v0.6.1` with Home Assistant Core `2026.7.4` on `portal.smart1.eu`.
 The same installation was retested successfully with Energy Hero software
-`1.28.59` and Home Assistant Core `2026.8.3`. The latest reference test used
-smart1 EMS `v0.6.6`, Home Assistant OS `18.3` and Home Assistant Core
-`2026.9.3`. It confirmed stable startup without integration warnings,
-unchanged plausible device and entity assignments, all seven Energy Dashboard
-roles, completed photovoltaic and derived-energy history imports, and an
-Energy Dashboard without anomalies. The redacted diagnostic PV probe
-covered all 288 five-minute samples of the previous day without gaps and
-differed from the exact daily total by only 0.78%. The full test history is
-documented in
-[compatibility report #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5827549220).
+`1.28.59` and Home Assistant Core `2026.8.3`. The latest reference test upgraded
+smart1 EMS in place from `v0.6.6` to `v0.7.0` on Home Assistant OS `18.3`,
+Supervisor `2026.09.2` and Home Assistant Core `2026.9.3`. It confirmed stable
+startup without integration warnings or observed anomalies, unchanged
+plausible device and entity assignments, all seven Energy Dashboard roles,
+completed photovoltaic and derived-energy history imports, and an Energy
+Dashboard without anomalies.
+The redacted diagnostic reported 77 measurement points, one inverter with two
+active strings and two complete module fields. Its PV probe covered all 288
+five-minute samples of the previous day without gaps and differed from the
+exact daily total by only 0.78%. Reauthentication was not triggered during this
+normal upgrade test. The full test history is documented in
+[compatibility report #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5828037865).
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a
