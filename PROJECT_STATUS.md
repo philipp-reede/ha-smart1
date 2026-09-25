@@ -100,7 +100,7 @@
 - Entities use Home Assistant's device-aware naming convention
 - The repository contains HACS metadata, public installation documentation,
   English and German custom-integration translations, and automated HACS and
-  Hassfest validation for the current 0.6.6 early-beta release
+  Hassfest validation for the current 0.7.0 early-beta release
 - CI also imports every integration module against pinned Home Assistant Core
   2026.9.3 on Python 3.14, while setup tests cover startup history import and
   the separate scheduled repair and current-day refresh paths
