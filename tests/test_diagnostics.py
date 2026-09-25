@@ -200,6 +200,83 @@ class Hass:
 
 
 class DiagnosticsTest(unittest.TestCase):
+    def test_point_and_discovery_diagnostics_redact_interface_ids(
+        self,
+    ) -> None:
+        service_id = "1526468329"
+        object_id = "private-object-id"
+        raw_interface = (
+            f"rio:ecar_{service_id}_charger_{object_id}:ChargeCurrent"
+        )
+        point = point_module.Smart1Point(
+            id="private-point-id",
+            name="Wallbox current",
+            type="Power",
+            source="sensor",
+            hardware="wallbox",
+            interface=raw_interface,
+            parsed_interface=interface_module.parse_interface(raw_interface),
+        )
+
+        point_result = diagnostics._point_diagnostics(1, point)
+        discovery_result = discovery_module.Smart1Discovery().analyze(
+            [point]
+        ).to_dict()
+        serialized = json.dumps(
+            {"point": point_result, "discovery": discovery_result}
+        )
+
+        self.assertNotIn(raw_interface, serialized)
+        self.assertNotIn(service_id, serialized)
+        self.assertNotIn(object_id, serialized)
+        self.assertNotIn('"interface"', serialized)
+        self.assertNotIn('"service_id"', serialized)
+        self.assertNotIn('"object_id"', serialized)
+        self.assertEqual(
+            point_result["parsed_interface"],
+            {
+                "protocol": "rio",
+                "service": "ecar",
+                "object_type": "charger",
+                "signal": "ChargeCurrent",
+                "service_id_present": True,
+                "object_id_present": True,
+            },
+        )
+        self.assertEqual(discovery_result["interface_count"], 1)
+        self.assertEqual(
+            discovery_result["interface_types"],
+            [
+                {
+                    "protocol": "rio",
+                    "service": "ecar",
+                    "object_type": "charger",
+                    "signal": "chargecurrent",
+                    "service_id_present": True,
+                    "object_id_present": True,
+                }
+            ],
+        )
+
+    def test_unparsed_interfaces_are_counted_but_not_exposed(self) -> None:
+        raw_interface = "private-stable-interface-id"
+        point = point_module.Smart1Point(
+            id="private-point-id",
+            name="PV",
+            type="Power",
+            source="sensor",
+            hardware="pv_global",
+            interface=raw_interface,
+            parsed_interface=interface_module.parse_interface(raw_interface),
+        )
+
+        result = discovery_module.Smart1Discovery().analyze([point]).to_dict()
+
+        self.assertEqual(result["interface_count"], 1)
+        self.assertEqual(result["unparsed_interface_count"], 1)
+        self.assertEqual(result["interface_types"], [])
+        self.assertNotIn(raw_interface, json.dumps(result))
+
     def test_bus_error_code_is_sanitized(self) -> None:
         api_key = "fake-api-key-must-not-leak"
 

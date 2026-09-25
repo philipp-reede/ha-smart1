@@ -63,9 +63,12 @@
 - Measurement roles now share one logical Smart1 EMS device
 - Heat pumps and heating elements have dedicated classification rules
 - Direct battery, e-car, heat-pump, and grid-meter interfaces are classified
-  by their parsed smart1 service
+  by their parsed smart1 service. Capability discovery uses the same central
+  classifier, avoiding a different result between diagnostics and entities
 - Multi-device counter calculations remain assigned to the EMS
-- Redacted diagnostics expose classification metadata without credentials or values
+- Redacted diagnostics expose classification metadata without credentials,
+  values, raw interface strings, service IDs or object IDs. Discovery logs use
+  the same identifier-free protocol, service, object-type and signal summary
 - Portal, HTTP and network errors are reduced to privacy-safe codes or exception
   types before they reach logs, update failures or downloadable diagnostics;
   failed required discovery is retried through Home Assistant without retaining
@@ -133,15 +136,21 @@
   refreshed days zero obsolete hourly buckets before recalculating their sums
 - Current-day PV and derived statistics refresh every 15 minutes while the
   wider historical window continues to refresh every six hours. A pending
-  initial repair is not restarted by every current-day refresh
-- Destructive history cleanup waits for Recorder's per-operation completion
-  callback before state is removed. Complete replacement batches are prepared
+  initial repair is neither restarted nor cleared by a current-day refresh;
+  other completed roles can still receive their short refresh independently
+- Destructive history rebuilds wait for Recorder's per-operation completion
+  callback before completion state is written. Replacement batches are prepared
   and validated first, then queued immediately behind the clear without an
   intervening await, so a timeout or task cancellation cannot leave a delayed
   clear without its replacement. Late completion updates only the active,
   unchanged schema generation and therefore neither repeats annual scans nor
   lets an unloaded entry overwrite newer state. Failure to inspect optional
   Recorder metadata does not block live sensors
+- Orphaned legacy statistics have their completion marker invalidated
+  synchronously after Recorder accepts the clear, because that queued operation
+  cannot be cancelled. The eventual callback records cleanup from the latest
+  config-entry data without touching a marker written by a newer reload or
+  replacement import
 - Five-minute power integration preserves both occurrences of naive local
   timestamps during the autumn daylight-saving-time fold; timestamps that
   already include an offset continue to be used exactly. Because naive portal

@@ -157,6 +157,13 @@ for the previous complete day. It reports only the response shape and the
 point numbers for which rows exist. API keys, linear IDs, timestamps and
 measurements are excluded.
 
+Point and discovery diagnostics also exclude the raw interface string and its
+stable service and object IDs. They retain only identifier-free protocol,
+service, object-type and signal metadata plus boolean ID-presence flags.
+Capability flags are derived through the same classifier as Home Assistant
+entities, so structured services and name fallbacks cannot drift between the
+two views.
+
 The real-installation probe requested all 38 energy-typed counters for a
 completed day. The portal returned an API error row with `Errorcode` and
 `Errormessage` columns instead of cumulative measurements. The linear
@@ -214,6 +221,9 @@ five-minute power values. This is deliberately opt-in:
   creates a new statistic instead of combining incompatible histories.
 - The initial import covers 365 days; the latest three days are refreshed
   every six hours.
+- The separate 15-minute current-day refresh skips roles whose initial legacy
+  rebuild is still pending. It can update already completed roles without
+  clearing or prematurely completing the pending role.
 - Detected legacy or non-monotonic statistics are repaired by upserting the
   supported window. Valid older rows and successful no-data dates are retained;
   a successful empty repair is marked complete so it is not repeated every six
@@ -226,6 +236,11 @@ five-minute power values. This is deliberately opt-in:
   before the clear is queued. A late successful callback completes the schema
   marker for the active config-entry generation, preventing another annual
   scan without allowing an unloaded entry to overwrite newer state.
+- An orphaned legacy statistic has its completion marker removed immediately
+  after Recorder accepts the irreversible clear. The eventual callback records
+  cleanup against the latest config-entry data without removing a completion
+  marker written by a newer reload. A missing callback can therefore cause a
+  redundant full backfill, but not an incorrect three-day-only recovery.
 
 These values are estimates derived from power samples, not native smart1
 meter totals. Missing coverage can therefore make them lower than the actual

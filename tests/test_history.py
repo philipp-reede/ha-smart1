@@ -3564,6 +3564,143 @@ class Smart1HistoryTest(unittest.TestCase):
             derived_history.statistic_id_for_role("grid_import", "grid"),
         )
 
+    def test_current_day_refresh_does_not_clear_pending_forced_role(
+        self,
+    ) -> None:
+        local_tz = ZoneInfo("Europe/Berlin")
+        today = datetime.now(local_tz).date()
+        hour_start = datetime.combine(
+            today,
+            datetime.min.time().replace(hour=1),
+            tzinfo=local_tz,
+        ).astimezone(timezone.utc)
+        existing_record = {
+            "start": hour_start.timestamp(),
+            "state": 0.25,
+            "sum": 20.0,
+        }
+        state = _HistoryState()
+        grid_statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            "grid",
+        )
+        wallbox_statistic_id = derived_history.statistic_id_for_role(
+            "wallbox_consumption",
+            "wallbox",
+        )
+        state.mark_complete(
+            grid_statistic_id,
+            derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            has_data=True,
+        )
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            types.SimpleNamespace(
+                config=types.SimpleNamespace(time_zone="Europe/Berlin")
+            ),
+            types.SimpleNamespace(),
+            {
+                "grid_import": types.SimpleNamespace(
+                    id="grid",
+                    name="Bezug",
+                ),
+                "wallbox_consumption": types.SimpleNamespace(
+                    id="wallbox",
+                    name="ECar Laden",
+                ),
+            },
+            history_state=state,
+            force_initial_rebuild=True,
+        )
+        importer._existing_statistics = AsyncMock(
+            side_effect=([existing_record], []),
+        )
+        importer._fetch_hourly_energy = AsyncMock(
+            return_value=(
+                {"grid_import": [(hour_start, 0.5)]},
+                True,
+            )
+        )
+        recorder_instance = types.SimpleNamespace(
+            async_clear_statistics=Mock(),
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ) as add_statistics,
+        ):
+            asyncio.run(importer.async_import(1, repair=False))
+
+        importer._fetch_hourly_energy.assert_awaited_once_with(
+            today,
+            today,
+            local_tz,
+        )
+        recorder_instance.async_clear_statistics.assert_not_called()
+        add_statistics.assert_called_once()
+        self.assertEqual(
+            add_statistics.call_args.kwargs["metadata"]["statistic_id"],
+            grid_statistic_id,
+        )
+        self.assertFalse(
+            state.is_complete(
+                wallbox_statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            )
+        )
+        self.assertEqual(importer.diagnostic_status["last_result"], "completed")
+
+        importer._existing_statistics.side_effect = (
+            [existing_record],
+            [],
+        )
+        importer._fetch_hourly_energy.reset_mock()
+        importer._fetch_hourly_energy.return_value = (
+            {
+                "grid_import": [(hour_start, 0.5)],
+                "wallbox_consumption": [(hour_start, 1.0)],
+            },
+            True,
+        )
+        recorder_instance.async_clear_statistics.side_effect = (
+            _complete_statistics_clear
+        )
+
+        with (
+            patch.object(
+                derived_history,
+                "get_instance",
+                return_value=recorder_instance,
+            ),
+            patch.object(
+                derived_history,
+                "async_add_external_statistics",
+            ),
+        ):
+            asyncio.run(importer.async_import())
+
+        importer._fetch_hourly_energy.assert_awaited_once_with(
+            today - history.timedelta(days=history.HISTORY_DAYS - 1),
+            today,
+            local_tz,
+        )
+        recorder_instance.async_clear_statistics.assert_called_once_with(
+            [wallbox_statistic_id],
+            on_done=ANY,
+        )
+        self.assertTrue(
+            state.is_complete(
+                wallbox_statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            )
+        )
+
     def test_hourly_merge_replaces_old_daily_midnight_record(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
         midnight = datetime(2026, 8, 3, tzinfo=local_tz).astimezone(
