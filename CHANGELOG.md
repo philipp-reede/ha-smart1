@@ -15,6 +15,16 @@ All notable changes to this project are documented in this file.
 - Restrict derived-energy sum-decrease detection to the supported 365-day
   repair window plus exactly one cumulative predecessor, preventing older
   unrepairable decreases from restarting a year-long scan every six hours
+- Keep pending forced derived-energy roles out of the 15-minute refresh clear
+  path, so only the six-hour repair can replace and complete their full
+  365-day history
+- Invalidate orphaned-history completion state as soon as Recorder accepts its
+  irreversible clear, while recording cleanup only from the eventual callback,
+  so a timeout and options reload cannot misclassify an empty series as current
+- Remove stable interface, service and object identifiers from diagnostics and
+  discovery logs while retaining identifier-free protocol and capability data
+- Derive discovery capability flags from the same central point classifier used
+  for entities, including structured `ecar` services and standalone `WP` names
 
 ### Testing
 
@@ -22,6 +32,9 @@ All notable changes to this project are documented in this file.
   clear submission, prevalidation failure, stale callback generations, mixed
   non-empty and empty replacement roles, multi-role repair-window boundaries,
   and old or future sum decreases outside the supported range
+- Cover mixed completed and pending roles during current-day refresh, orphan
+  cleanup across timeout and reload, structured and unparsed interface
+  redaction, and shared discovery/classifier positive and negative cases
 
 ## [0.7.2] - 2026-09-25
 

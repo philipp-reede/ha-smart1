@@ -17,6 +17,7 @@ from .bus import Smart1BusSystem
 from .classifier import classify_point
 from .const import DOMAIN
 from .energy_roles import ENERGY_ROLES_BY_KEY
+from .interface import parse_interface
 from .inverter import Smart1Inverter, Smart1PvStringSample
 from .module_field import Smart1ModuleField
 from .point import Smart1Point
@@ -24,8 +25,8 @@ from .power_integration import integrate_power_rows
 
 
 def _point_diagnostics(number: int, point: Smart1Point) -> dict[str, Any]:
-    """Return non-value metadata used to classify one point."""
-    parsed = point.parsed_interface
+    """Return identifier-free metadata used to classify one point."""
+    parsed = point.parsed_interface or parse_interface(point.interface)
 
     return {
         "point_number": number,
@@ -33,16 +34,15 @@ def _point_diagnostics(number: int, point: Smart1Point) -> dict[str, Any]:
         "type": point.type,
         "source": point.source,
         "hardware": point.hardware,
-        "interface": point.interface,
         "max": point.max,
         "index": point.index,
         "parsed_interface": {
             "protocol": parsed.protocol if parsed else None,
             "service": parsed.service if parsed else None,
-            "service_id": parsed.service_id if parsed else None,
             "object_type": parsed.object_type if parsed else None,
-            "object_id": parsed.object_id if parsed else None,
             "signal": parsed.signal if parsed else None,
+            "service_id_present": parsed.service_id is not None,
+            "object_id_present": parsed.object_id is not None,
         },
         "current_category": classify_point(point).value,
     }

@@ -159,28 +159,44 @@ async def _async_clear_orphaned_legacy_statistics(
     # Import lazily so config-entry migration remains recorder-independent.
     from homeassistant.components.recorder import get_instance
 
+    cleanup_ids = set(statistic_ids)
     recorder = get_instance(hass)
-    if not await async_clear_statistics(recorder, statistic_ids):
+
+    def _invalidate_queued_statistics() -> None:
+        # Once Recorder accepted the clear it can no longer be cancelled.
+        # Invalidate completion state before the helper's first await so an
+        # options reload cannot select the role with a stale short-refresh
+        # marker while the clear is still waiting in Recorder's queue.
+        history_state.forget_statistics(cleanup_ids)
+
+    def _record_completed_cleanup() -> None:
+        # Read entry.data only when the callback runs. A delayed callback may
+        # outlive an options reload, so merging current data avoids restoring
+        # a stale snapshot. It deliberately does not touch history markers:
+        # a replacement import queued after this clear may already have
+        # completed by then.
+        updated_data = dict(entry.data)
+        cleaned_ids = _stored_orphan_cleanup_ids(updated_data)
+        cleaned_ids.update(cleanup_ids)
+        updated_data[LEGACY_ORPHAN_CLEANUP_KEY] = sorted(cleaned_ids)
+        hass.config_entries.async_update_entry(entry, data=updated_data)
+
+        _LOGGER.warning(
+            "Removed %d unscoped smart1 history statistics that cannot be "
+            "attributed to the selected legacy installation",
+            len(cleanup_ids),
+        )
+
+    if not await async_clear_statistics(
+        recorder,
+        cleanup_ids,
+        enqueue_followup=_invalidate_queued_statistics,
+        on_done=_record_completed_cleanup,
+    ):
         _LOGGER.warning(
             "Timed out while removing unscoped smart1 history statistics"
         )
         return
-
-    # A later options change may make the owner capable of rebuilding one of
-    # these IDs. Remove stale completion state so that change triggers a full
-    # backfill instead of treating the now-empty Recorder series as current.
-    history_state.forget_statistics(statistic_ids)
-    updated_data = dict(entry.data)
-    cleaned_ids = _stored_orphan_cleanup_ids(updated_data)
-    cleaned_ids.update(statistic_ids)
-    updated_data[LEGACY_ORPHAN_CLEANUP_KEY] = sorted(cleaned_ids)
-    hass.config_entries.async_update_entry(entry, data=updated_data)
-
-    _LOGGER.warning(
-        "Removed %d unscoped smart1 history statistics that cannot be "
-        "attributed to the selected legacy installation",
-        len(statistic_ids),
-    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

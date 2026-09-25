@@ -56,6 +56,9 @@ def classify_point(point: Smart1Point) -> Smart1Category:
         if service == "riometer":
             return Smart1Category.GRID
 
+        if service in {"photovoltaic", "pv"}:
+            return Smart1Category.PV
+
     # 2. Stable metadata
     name = point.name.lower()
     smart1_type = point.type.lower()
@@ -71,7 +74,7 @@ def classify_point(point: Smart1Point) -> Smart1Category:
     ):
         return Smart1Category.OTHER
 
-    if hardware == "pv_global":
+    if "pv" in hardware:
         return Smart1Category.PV
 
     if "wallbox" in interface:
@@ -80,10 +83,16 @@ def classify_point(point: Smart1Point) -> Smart1Category:
     if "energytrader" in interface:
         return Smart1Category.BATTERY
 
+    if "battery" in interface:
+        return Smart1Category.BATTERY
+
     if "heatpump" in interface or "heat_pump" in interface:
         return Smart1Category.HEAT_PUMP
 
-    if any(token in interface for token in ("energyheater", "energy_heater")):
+    if any(
+        token in interface
+        for token in ("energyheater", "energy_heater", "heater")
+    ):
         return Smart1Category.ENERGY_HEATER
 
     # 3. Name fallback

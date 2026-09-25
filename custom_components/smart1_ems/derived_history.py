@@ -518,6 +518,7 @@ class Smart1DerivedEnergyImporter:
                 if not refreshable_roles:
                     self._last_result = "repair_pending"
                     return
+            forced_clear_roles = forced_rebuild_roles & rebuild_roles
             windows = {
                 role_key: determine_hourly_import_window(
                     records,
@@ -628,10 +629,10 @@ class Smart1DerivedEnergyImporter:
                     )
 
             recorder = get_instance(self.hass)
-            if forced_rebuild_roles:
+            if forced_clear_roles:
                 rebuild_statistic_ids = [
                     statistic_ids[role_key]
-                    for role_key in sorted(forced_rebuild_roles)
+                    for role_key in sorted(forced_clear_roles)
                 ]
                 expected_versions = {
                     role_key: (
@@ -641,13 +642,13 @@ class Smart1DerivedEnergyImporter:
                         if self.history_state
                         else 0
                     )
-                    for role_key in forced_rebuild_roles
+                    for role_key in forced_clear_roles
                 }
 
                 def _mark_rebuild_complete() -> None:
                     if not self.history_state:
                         return
-                    for role_key in forced_rebuild_roles:
+                    for role_key in forced_clear_roles:
                         self.history_state.mark_complete_if_unchanged(
                             statistic_ids[role_key],
                             DERIVED_HISTORY_SCHEMA_VERSION,
@@ -665,13 +666,13 @@ class Smart1DerivedEnergyImporter:
                                     metadata_by_role[role_key],
                                     statistics_by_role[role_key],
                                 )
-                                for role_key in sorted(forced_rebuild_roles)
+                                for role_key in sorted(forced_clear_roles)
                                 if role_key in statistics_by_role
                             ]
                         )
                     ),
                     enqueue_followup=lambda: _enqueue_statistics(
-                        forced_rebuild_roles
+                        forced_clear_roles
                     ),
                     on_done=_mark_rebuild_complete,
                 ):
@@ -683,7 +684,7 @@ class Smart1DerivedEnergyImporter:
                     self._last_result = "clear_timeout"
                     return
                 self._cleared_rebuild_roles = tuple(
-                    sorted(forced_rebuild_roles)
+                    sorted(forced_clear_roles)
                 )
                 _LOGGER.info(
                     "Cleared %d smart1 derived energy statistics before rebuild",

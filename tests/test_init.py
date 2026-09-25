@@ -567,6 +567,76 @@ class Smart1SetupTest(unittest.TestCase):
                 )
                 async_list_statistic_ids.side_effect = list_statistic_ids
 
+                # A queued orphan clear cannot be cancelled after the helper
+                # times out. Invalidate its completion marker while queueing
+                # so an options reload rearms a full backfill. The delayed
+                # callback may record cleanup, but must not erase a marker
+                # written by that replacement generation.
+                delayed_callbacks = []
+
+                def delay_clear(_statistic_ids, *, on_done) -> None:
+                    delayed_callbacks.append(on_done)
+
+                recorder.async_clear_statistics.reset_mock()
+                recorder.async_clear_statistics.side_effect = delay_clear
+                delayed_id = "smart1_ems:grid_import_deadbeef"
+                entry.data = {
+                    "api_key": "redacted",
+                    "device_id": "plant-1",
+                    "statistics_namespace": "",
+                    "legacy_history_rebuild": True,
+                    "history_schema_versions": {delayed_id: 1},
+                    "history_data_presence": {
+                        delayed_id: {"1": True}
+                    },
+                }
+                queued_state = integration.Smart1HistoryState(hass, entry)
+                recorder_helpers = sys.modules[
+                    "custom_components.smart1_ems.recorder_helpers"
+                ]
+
+                with (
+                    patch.object(
+                        recorder_helpers,
+                        "RECORDER_OPERATION_TIMEOUT",
+                        0.001,
+                    ),
+                    self.assertLogs(integration._LOGGER, level="WARNING"),
+                ):
+                    await integration._async_clear_orphaned_legacy_statistics(
+                        hass,
+                        entry,
+                        queued_state,
+                        {delayed_id},
+                    )
+
+                self.assertNotIn(
+                    delayed_id,
+                    entry.data["history_schema_versions"],
+                )
+                self.assertNotIn(
+                    "legacy_orphan_cleanup_ids",
+                    entry.data,
+                )
+
+                queued_state.deactivate()
+                reloaded_state = integration.Smart1HistoryState(hass, entry)
+                self.assertFalse(reloaded_state.is_complete(delayed_id, 1))
+                reloaded_state.mark_complete(
+                    delayed_id,
+                    1,
+                    has_data=True,
+                )
+
+                delayed_callbacks[0]()
+                await asyncio.sleep(0)
+
+                self.assertTrue(reloaded_state.is_complete(delayed_id, 1))
+                self.assertEqual(
+                    entry.data["legacy_orphan_cleanup_ids"],
+                    [delayed_id],
+                )
+
                 FakeDiscoveryResult.has_pv = True
                 entry.unload_callbacks[:] = initial_unload_callbacks
 
