@@ -18,11 +18,29 @@
         "data": {
           "device_id": "Installation"
         }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect smart1 EMS",
+        "description": "Enter a valid API key that still has access to this smart1 installation.",
+        "data": {
+          "api_key": "API key"
+        },
+        "data_description": {
+          "api_key": "The API key is hidden while you type."
+        }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect to smart1 EMS. Check the API key and try again.",
-      "no_plants": "No smart1 installations were found for this API key."
+      "invalid_auth": "The API key was rejected by the smart1 portal.",
+      "no_plants": "No smart1 installations were found for this API key.",
+      "wrong_account": "This API key does not provide access to the existing smart1 installation."
+    },
+    "abort": {
+      "already_configured": "This smart1 installation is already configured.",
+      "already_in_progress": "Configuration of this smart1 installation is already in progress.",
+      "reauth_successful": "The API key was updated successfully.",
+      "wrong_account": "This API key does not belong to the existing smart1 installation."
     }
   },
   "options": {

@@ -30,12 +30,21 @@ helpers = sys.modules.setdefault(
     types.ModuleType("homeassistant.helpers"),
 )
 helpers.__path__ = []
+exceptions = types.ModuleType("homeassistant.exceptions")
+
+
+class ConfigEntryAuthFailed(Exception):
+    pass
+
+
+exceptions.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+sys.modules["homeassistant.exceptions"] = exceptions
 update_coordinator = types.ModuleType("homeassistant.helpers.update_coordinator")
 
 
 class DataUpdateCoordinator:
     def __init__(self, *args, **kwargs) -> None:
-        pass
+        self.config_entry = kwargs.get("config_entry")
 
 
 class UpdateFailed(Exception):
@@ -70,6 +79,7 @@ coordinator_module = importlib.import_module(
     "custom_components.smart1_ems.coordinator"
 )
 Smart1Coordinator = coordinator_module.Smart1Coordinator
+Smart1ApiError = coordinator_module.Smart1ApiError
 
 
 class LiveOnlyApi:
@@ -128,7 +138,77 @@ class FailingLiveApi:
         )
 
 
+class FailingApiErrorApi:
+    def __init__(self, error_code: str, api_key: str) -> None:
+        self.error_code = error_code
+        self.api_key = api_key
+
+    async def get_latest_linear_values(self, *args, **kwargs):
+        raise Smart1ApiError(
+            f"{self.error_code} response for apikey={self.api_key}"
+        )
+
+
 class Smart1CoordinatorTest(unittest.TestCase):
+    def test_coordinator_is_linked_to_config_entry(self) -> None:
+        entry = object()
+
+        coordinator = Smart1Coordinator(
+            None,
+            LiveOnlyApi(),
+            [],
+            ["point-1"],
+            config_entry=entry,
+        )
+
+        self.assertIs(coordinator.config_entry, entry)
+
+    def test_auth_failure_requests_reauthentication_without_secret(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+
+        for error_code in ("401", "403"):
+            with self.subTest(error_code=error_code):
+                coordinator = Smart1Coordinator(
+                    None,
+                    FailingApiErrorApi(error_code, api_key),
+                    [],
+                    ["point-1"],
+                )
+
+                with self.assertRaises(ConfigEntryAuthFailed) as raised:
+                    asyncio.run(coordinator._async_update_data())
+
+                self.assertEqual(
+                    str(raised.exception),
+                    f"smart1 API error {error_code}",
+                )
+                self.assertNotIn(api_key, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_non_auth_api_failures_remain_update_failed(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+
+        for error_code in ("500", "unknown"):
+            with self.subTest(error_code=error_code):
+                coordinator = Smart1Coordinator(
+                    None,
+                    FailingApiErrorApi(error_code, api_key),
+                    [],
+                    ["point-1"],
+                )
+
+                with self.assertRaises(UpdateFailed) as raised:
+                    asyncio.run(coordinator._async_update_data())
+
+                self.assertEqual(
+                    str(raised.exception),
+                    f"smart1 API error {error_code}",
+                )
+                self.assertNotIn(api_key, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(raised.exception.__suppress_context__)
+
     def test_required_update_failure_does_not_expose_api_key(self) -> None:
         api_key = "fake-api-key-must-not-leak"
         coordinator = Smart1Coordinator(

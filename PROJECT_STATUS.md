@@ -7,6 +7,12 @@
 - `/plants` is queried automatically
 - A single plant is selected automatically; when an API key exposes multiple
   plants, the config flow asks the user to select one
+- Config entries use the stable smart1 `DeviceId` as their unique ID. Existing
+  entries are migrated in place, while modern and legacy duplicates are
+  rejected without changing device, entity or statistic identifiers
+- Rejected API keys trigger a translated Home Assistant reauthentication flow.
+  A replacement key is stored only when it still exposes the original plant;
+  temporary portal and network failures continue through normal retries
 - Sensors and counters are discovered automatically
 - Live values are fetched through one filtered linear request
 - DataUpdateCoordinator updates values periodically
@@ -134,11 +140,6 @@
 - Validate inverter-bus discovery and manufacturer protocols with additional
   EMS and inverter combinations
 - Add a configurable history range if real-world installations need it
-- Add config-entry unique IDs based on the plant `DeviceId`, prevent duplicate
-  configuration of one plant and add an explicit reauthentication flow for
-  API-key changes as a separate config-flow improvement
-- Add direct config-flow tests for single- and multi-plant setup, connection
-  failures, duplicate entries, reauthentication and duplicate Energy roles
 - Monitor the pending default HACS catalogue review in
   [hacs/default#10379](https://github.com/hacs/default/pull/10379) and address
   review feedback

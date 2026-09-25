@@ -5,6 +5,7 @@ from datetime import timedelta
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+import re
 import sys
 import types
 import unittest
@@ -31,10 +32,27 @@ class Smart1SetupTest(unittest.TestCase):
             pass
 
         class Smart1ApiError(Exception):
-            pass
+            def __init__(self, code: object) -> None:
+                match = re.match(r"^\s*(\d{3})(?:\D|$)", str(code))
+                self.code = match.group(1) if match else "unknown"
+                super().__init__(f"smart1 API error {self.code}")
 
         class ConfigEntryNotReady(Exception):
             pass
+
+        class ConfigEntryAuthFailed(Exception):
+            pass
+
+        def describe_api_error(error: BaseException) -> str:
+            if isinstance(error, Smart1ApiError):
+                return f"smart1 API error {error.code}"
+            return type(error).__name__
+
+        def is_auth_error(error: BaseException) -> bool:
+            return (
+                isinstance(error, Smart1ApiError)
+                and error.code in {"401", "403"}
+            )
 
         point = types.SimpleNamespace(
             id="pv-power",
@@ -64,6 +82,7 @@ class Smart1SetupTest(unittest.TestCase):
 
             def __init__(self, *args, **kwargs) -> None:
                 type(self).instance = self
+                self.config_entry = kwargs.get("config_entry")
                 self.async_config_entry_first_refresh = AsyncMock()
 
         class FakeHistoryImporter:
@@ -120,6 +139,7 @@ class Smart1SetupTest(unittest.TestCase):
             ),
             "homeassistant.exceptions": _module(
                 "homeassistant.exceptions",
+                ConfigEntryAuthFailed=ConfigEntryAuthFailed,
                 ConfigEntryNotReady=ConfigEntryNotReady,
             ),
             "homeassistant.helpers": helpers,
@@ -137,7 +157,8 @@ class Smart1SetupTest(unittest.TestCase):
                 "custom_components.smart1_ems.api",
                 Smart1Api=FakeApi,
                 Smart1ApiError=Smart1ApiError,
-                describe_api_error=lambda error: type(error).__name__,
+                describe_api_error=describe_api_error,
+                is_auth_error=is_auth_error,
                 sanitize_api_error_code=lambda code: "unknown",
             ),
             "custom_components.smart1_ems.const": _module(
@@ -206,6 +227,7 @@ class Smart1SetupTest(unittest.TestCase):
                 self.assertTrue(
                     await integration.async_setup_entry(hass, entry)
                 )
+                self.assertIs(FakeCoordinator.instance.config_entry, entry)
 
                 self.assertEqual(len(entry.background_coroutines), 1)
                 background, task_name = entry.background_coroutines[0]
@@ -245,6 +267,50 @@ class Smart1SetupTest(unittest.TestCase):
                 self.assertNotIn(api_key, str(raised.exception))
                 self.assertIsNone(raised.exception.__cause__)
                 self.assertTrue(raised.exception.__suppress_context__)
+
+                for error_code in ("500", "unknown"):
+                    with self.subTest(error_code=error_code):
+                        api_key = "fake-api-key-must-not-leak"
+                        FakeApi.linear_error = Smart1ApiError(
+                            f"{error_code} response for apikey={api_key}"
+                        )
+                        try:
+                            with self.assertRaises(
+                                ConfigEntryNotReady
+                            ) as raised:
+                                await integration.async_setup_entry(hass, entry)
+                        finally:
+                            FakeApi.linear_error = None
+
+                        self.assertNotIn(api_key, str(raised.exception))
+                        self.assertIsNone(raised.exception.__cause__)
+                        self.assertTrue(
+                            raised.exception.__suppress_context__
+                        )
+
+                for error_code in ("401", "403"):
+                    with self.subTest(error_code=error_code):
+                        api_key = "fake-api-key-must-not-leak"
+                        FakeApi.linear_error = Smart1ApiError(
+                            f"{error_code} response for apikey={api_key}"
+                        )
+                        try:
+                            with self.assertRaises(
+                                ConfigEntryAuthFailed
+                            ) as raised:
+                                await integration.async_setup_entry(hass, entry)
+                        finally:
+                            FakeApi.linear_error = None
+
+                        self.assertEqual(
+                            str(raised.exception),
+                            f"smart1 API error {error_code}",
+                        )
+                        self.assertNotIn(api_key, str(raised.exception))
+                        self.assertIsNone(raised.exception.__cause__)
+                        self.assertTrue(
+                            raised.exception.__suppress_context__
+                        )
 
         asyncio.run(run_setup_and_callbacks())
 

@@ -5,7 +5,7 @@ from aiohttp import ClientError
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -13,6 +13,7 @@ from .api import (
     Smart1Api,
     Smart1ApiError,
     describe_api_error,
+    is_auth_error,
     sanitize_api_error_code,
 )
 from .const import DOMAIN
@@ -36,6 +37,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         devices = await api.get_linear_devices()
     except (ClientError, Smart1ApiError, TimeoutError) as err:
+        if is_auth_error(err):
+            raise ConfigEntryAuthFailed(describe_api_error(err)) from None
         # Initial discovery is required. Ask Home Assistant to retry without
         # retaining a client exception that may contain the API-key URL.
         raise ConfigEntryNotReady(describe_api_error(err)) from None
@@ -111,6 +114,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         devices,
         active_linear_ids,
         inverters,
+        config_entry=entry,
     )
     await coordinator.async_config_entry_first_refresh()
 
@@ -195,6 +199,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+def _normalized_device_id(value: object) -> str:
+    """Normalize the stable installation ID stored in a config entry."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> bool:
+    """Add installation identity metadata to legacy config entries."""
+    if entry.version != 1:
+        _LOGGER.error("Unsupported smart1 config-entry migration version")
+        return False
+
+    if entry.minor_version >= 2:
+        return True
+
+    device_id = _normalized_device_id(entry.data.get("device_id"))
+    if not device_id:
+        _LOGGER.error(
+            "Cannot migrate smart1 config entry without an installation ID"
+        )
+        return False
+
+    existing_unique_id = _normalized_device_id(entry.unique_id)
+    if existing_unique_id and existing_unique_id != device_id:
+        _LOGGER.error(
+            "Cannot migrate smart1 config entry with conflicting identity"
+        )
+        return False
+
+    entries = list(hass.config_entries.async_entries(DOMAIN))
+    same_device_entries = [
+        candidate
+        for candidate in entries
+        if _normalized_device_id(candidate.data.get("device_id")) == device_id
+    ]
+    unique_id_owners = [
+        candidate
+        for candidate in entries
+        if _normalized_device_id(candidate.unique_id) == device_id
+    ]
+    active_same_device_entries = [
+        candidate
+        for candidate in same_device_entries
+        if getattr(candidate, "disabled_by", None) is None
+    ]
+    candidates = (
+        unique_id_owners
+        or active_same_device_entries
+        or same_device_entries
+    )
+    if candidates:
+        winner = min(candidates, key=lambda candidate: candidate.entry_id)
+        if winner.entry_id != entry.entry_id:
+            _LOGGER.error(
+                "Cannot migrate duplicate smart1 config entries automatically"
+            )
+            return False
+
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, "device_id": device_id},
+        unique_id=device_id,
+        version=1,
+        minor_version=2,
+    )
     return True
 
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import Any
+
+from aiohttp import ClientError
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -16,7 +19,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from .api import Smart1Api
+from .api import Smart1Api, Smart1ApiError, is_auth_error
 from .const import DOMAIN
 from .energy_roles import (
     ENERGY_ROLES,
@@ -29,10 +32,71 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure a smart1 EMS installation."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self):
         self._api_key = None
         self._plants = []
+
+    @staticmethod
+    def _device_id(plant: dict[str, Any]) -> str:
+        """Return a normalized installation identifier."""
+        value = plant.get("DeviceId")
+        return value.strip() if isinstance(value, str) else ""
+
+    @classmethod
+    def _plant_title(cls, plant: dict[str, Any]) -> str:
+        """Return a user-facing installation name."""
+        name = str(plant.get("DeviceName") or "").strip()
+        return name or f"smart1 EMS {cls._device_id(plant)}"
+
+    async def _async_get_plants(
+        self,
+        api_key: str,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetch installations and map failures to config-flow errors."""
+        session = async_get_clientsession(self.hass)
+        api = Smart1Api(session, api_key, "")
+
+        try:
+            plants = await api.get_plants()
+        except Smart1ApiError as err:
+            return [], "invalid_auth" if is_auth_error(err) else "cannot_connect"
+        except (ClientError, TimeoutError):
+            return [], "cannot_connect"
+
+        valid_plants = [plant for plant in plants if self._device_id(plant)]
+        if not valid_plants:
+            return [], "no_plants"
+        return valid_plants, None
+
+    async def _async_create_plant_entry(
+        self,
+        plant: dict[str, Any],
+    ):
+        """Create one entry while protecting new and legacy installs."""
+        device_id = self._device_id(plant)
+
+        await self.async_set_unique_id(device_id)
+        self._abort_if_unique_id_configured()
+
+        # Entries created before config-entry unique IDs were introduced still
+        # need to block a second entry for the same installation. Compare the
+        # normalized value instead of relying on an exact data-dict match.
+        if any(
+            isinstance(entry.data.get("device_id"), str)
+            and entry.data["device_id"].strip() == device_id
+            for entry in self._async_current_entries()
+        ):
+            return self.async_abort(reason="already_configured")
+
+        return self.async_create_entry(
+            title=self._plant_title(plant),
+            data={
+                "api_key": self._api_key,
+                "device_id": device_id,
+            },
+        )
 
     @staticmethod
     @callback
@@ -47,28 +111,13 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._api_key = user_input["api_key"]
-
-            session = async_get_clientsession(self.hass)
-            api = Smart1Api(session, self._api_key, "")
-
-            try:
-                self._plants = await api.get_plants()
-            except Exception:
-                errors["base"] = "cannot_connect"
+            self._plants, error = await self._async_get_plants(self._api_key)
+            if error is not None:
+                errors["base"] = error
+            elif len(self._plants) == 1:
+                return await self._async_create_plant_entry(self._plants[0])
             else:
-                if not self._plants:
-                    errors["base"] = "no_plants"
-                elif len(self._plants) == 1:
-                    plant = self._plants[0]
-                    return self.async_create_entry(
-                        title=plant.get("DeviceName", "smart1 EMS"),
-                        data={
-                            "api_key": self._api_key,
-                            "device_id": plant["DeviceId"],
-                        },
-                    )
-                else:
-                    return await self.async_step_plant()
+                return await self.async_step_plant()
 
         return self.async_show_form(
             step_id="user",
@@ -88,19 +137,12 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             device_id = user_input["device_id"]
             plant = next(
                 plant for plant in self._plants
-                if plant["DeviceId"] == device_id
+                if self._device_id(plant) == device_id
             )
-
-            return self.async_create_entry(
-                title=plant.get("DeviceName", f"smart1 EMS {device_id}"),
-                data={
-                    "api_key": self._api_key,
-                    "device_id": device_id,
-                },
-            )
+            return await self._async_create_plant_entry(plant)
 
         options = {
-            plant["DeviceId"]: plant.get("DeviceName", plant["DeviceId"])
+            self._device_id(plant): self._plant_title(plant)
             for plant in self._plants
         }
 
@@ -110,6 +152,55 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required("device_id"): vol.In(options),
             }),
             errors={},
+        )
+
+    async def async_step_reauth(self, entry_data):
+        """Request a replacement API key for an existing installation."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None):
+        """Validate and save a replacement API key."""
+        errors = {}
+
+        if user_input is not None:
+            api_key = user_input["api_key"]
+            plants, error = await self._async_get_plants(api_key)
+            if error is not None:
+                errors["base"] = error
+            else:
+                entry = self._get_reauth_entry()
+                stored_device_id = entry.data.get("device_id")
+                expected_device_id = (
+                    stored_device_id.strip()
+                    if isinstance(stored_device_id, str)
+                    else ""
+                )
+                if not any(
+                    self._device_id(plant) == expected_device_id
+                    for plant in plants
+                ):
+                    errors["base"] = "wrong_account"
+                else:
+                    await self.async_set_unique_id(expected_device_id)
+                    self._abort_if_unique_id_mismatch(
+                        reason="wrong_account"
+                    )
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        data_updates={"api_key": api_key},
+                    )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({
+                vol.Required("api_key"): TextSelector(
+                    TextSelectorConfig(
+                        type=TextSelectorType.PASSWORD,
+                        autocomplete="current-password",
+                    )
+                ),
+            }),
+            errors=errors,
         )
 
 
