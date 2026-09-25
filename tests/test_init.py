@@ -71,10 +71,32 @@ class Smart1SetupTest(unittest.TestCase):
                     return_value=[point],
                     side_effect=type(self).linear_error,
                 )
-                self.get_inverters = AsyncMock(return_value=[])
-                self.get_module_fields = AsyncMock(return_value=[])
+                self.get_inverters_with_probe = AsyncMock(
+                    return_value=(
+                        [],
+                        {
+                            "endpoint_result": "empty_response",
+                            "response_columns": ["Inverter Id"],
+                        },
+                    )
+                )
+                self.get_module_fields_with_probe = AsyncMock(
+                    return_value=(
+                        [],
+                        {
+                            "endpoint_result": "empty_response",
+                            "response_columns": ["ModulfieldId"],
+                        },
+                    )
+                )
                 self.get_buses_with_probe = AsyncMock(
-                    return_value=([], {"endpoint_result": "empty_response"})
+                    return_value=(
+                        [],
+                        {
+                            "endpoint_result": "empty_response",
+                            "response_columns": ["BusId"],
+                        },
+                    )
                 )
 
         class FakeCoordinator:
@@ -228,6 +250,16 @@ class Smart1SetupTest(unittest.TestCase):
                     await integration.async_setup_entry(hass, entry)
                 )
                 self.assertIs(FakeCoordinator.instance.config_entry, entry)
+                runtime_data = hass.data["smart1_ems"][entry.entry_id]
+                self.assertTrue(
+                    runtime_data["inverter_discovery_authoritative"]
+                )
+                self.assertTrue(
+                    runtime_data["module_field_discovery_authoritative"]
+                )
+                self.assertTrue(
+                    runtime_data["bus_discovery_authoritative"]
+                )
 
                 self.assertEqual(len(entry.background_coroutines), 1)
                 background, task_name = entry.background_coroutines[0]

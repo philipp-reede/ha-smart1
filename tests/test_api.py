@@ -206,6 +206,78 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertEqual(api.requested_path, "/modulfields/42")
         self.assertTrue(api.missing_ok)
 
+    def test_inverter_probe_reports_response_shape_without_values(self) -> None:
+        api = Smart1Api(
+            CsvSession(
+                "Inverter Id;Name;Serial No\n"
+                "Inverter_B2_A1;private-name;private-serial\n"
+            ),
+            "redacted",
+            "42",
+        )
+
+        inverters, probe = asyncio.run(
+            api.get_inverters_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual([inverter.key for inverter in inverters], [(2, 1)])
+        self.assertEqual(
+            probe,
+            {
+                "endpoint_result": "data_returned",
+                "response_status": 200,
+                "response_rows": 1,
+                "response_columns": ["Inverter Id", "Name", "Serial No"],
+            },
+        )
+        self.assertNotIn("private-name", str(probe))
+        self.assertNotIn("private-serial", str(probe))
+
+    def test_module_field_probe_retains_known_empty_csv_headers(self) -> None:
+        api = Smart1Api(
+            CsvSession("ModulfieldId;Name;Bias;Direction\n"),
+            "redacted",
+            "42",
+        )
+
+        module_fields, probe = asyncio.run(
+            api.get_module_fields_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual(module_fields, [])
+        self.assertEqual(
+            probe,
+            {
+                "endpoint_result": "empty_response",
+                "response_status": 200,
+                "response_rows": 0,
+                "response_columns": [
+                    "Bias",
+                    "Direction",
+                    "ModulfieldId",
+                    "Name",
+                ],
+            },
+        )
+
+    def test_metadata_probes_report_optional_endpoint_not_found(self) -> None:
+        inverter_api = Smart1Api(CsvSession("", status=404), "redacted", "42")
+        module_api = Smart1Api(CsvSession("", status=404), "redacted", "42")
+
+        inverters, inverter_probe = asyncio.run(
+            inverter_api.get_inverters_with_probe(missing_ok=True)
+        )
+        module_fields, module_probe = asyncio.run(
+            module_api.get_module_fields_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual(inverters, [])
+        self.assertEqual(module_fields, [])
+        for probe in (inverter_probe, module_probe):
+            self.assertEqual(probe["endpoint_result"], "not_found")
+            self.assertEqual(probe["response_status"], 404)
+            self.assertEqual(probe["response_columns"], [])
+
     def test_bus_endpoint_is_optional(self) -> None:
         api = RecordingSmart1Api(
             [
@@ -352,6 +424,96 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertEqual(
             api.requested_path,
             "/data/csv/42/linear/day/detailed/20260804/counter_1",
+        )
+
+    def test_linear_live_values_use_latest_timestamp_in_any_order(self) -> None:
+        api = RecordingSmart1Api(
+            [
+                {
+                    "LinearId": "counter_1",
+                    "Timestamp": "2026-08-04 12:10:00",
+                    "Value1": "300",
+                },
+                {
+                    "LinearId": "counter_2",
+                    "Timestamp": "2026-08-04 12:00:00",
+                    "Value1": "100",
+                },
+                {
+                    "LinearId": "counter_1",
+                    "Timestamp": "2026-08-04 12:00:00",
+                    "Value1": "100",
+                },
+                {
+                    "LinearId": "counter_2",
+                    "Timestamp": "2026-08-04 12:10:00",
+                    "Value1": "300",
+                },
+                {
+                    "LinearId": "counter_2",
+                    "Timestamp": "2026-08-04 12:05:00",
+                    "Value1": "200",
+                },
+            ]
+        )
+
+        values = asyncio.run(
+            api.get_latest_linear_values(["counter_1", "counter_2"])
+        )
+
+        self.assertEqual(
+            values,
+            {"counter_1": 300.0, "counter_2": 300.0},
+        )
+
+    def test_linear_live_timestamp_fallback_is_deterministic(self) -> None:
+        api = RecordingSmart1Api(
+            [
+                {
+                    "LinearId": "without_timestamp",
+                    "Timestamp": "invalid",
+                    "Value1": "100",
+                },
+                {
+                    "LinearId": "without_timestamp",
+                    "Value1": "200",
+                },
+                {
+                    "LinearId": "valid_wins",
+                    "Timestamp": "2026-08-04T10:10:00Z",
+                    "Value1": "300",
+                },
+                {
+                    "LinearId": "valid_wins",
+                    "Timestamp": "invalid",
+                    "Value1": "400",
+                },
+                {
+                    "LinearId": "offset",
+                    "Timestamp": "2026-08-04T12:05:00+02:00",
+                    "Value1": "500",
+                },
+                {
+                    "LinearId": "offset",
+                    "Timestamp": "2026-08-04T10:10:00Z",
+                    "Value1": "600",
+                },
+            ]
+        )
+
+        values = asyncio.run(
+            api.get_latest_linear_values(
+                ["without_timestamp", "valid_wins", "offset"]
+            )
+        )
+
+        self.assertEqual(
+            values,
+            {
+                "without_timestamp": 200.0,
+                "valid_wins": 300.0,
+                "offset": 600.0,
+            },
         )
 
     def test_rejects_unsupported_period(self) -> None:

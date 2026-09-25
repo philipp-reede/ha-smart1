@@ -61,6 +61,9 @@
     },
     "error": {
       "duplicate_energy_point": "Each measurement point can be assigned to only one energy role."
+    },
+    "abort": {
+      "not_loaded": "The smart1 EMS entry is not loaded. Enable it or resolve its setup error before changing these options."
     }
   },
   "entity": {

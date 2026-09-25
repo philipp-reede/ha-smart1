@@ -26,13 +26,17 @@ from .energy_roles import (
     energy_candidates,
     recommend_energy_roles,
 )
+from .history_state import (
+    STATISTICS_NAMESPACE_KEY,
+    statistics_namespace_for_device,
+)
 
 
 class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure a smart1 EMS installation."""
 
     VERSION = 1
-    MINOR_VERSION = 2
+    MINOR_VERSION = 3
 
     def __init__(self):
         self._api_key = None
@@ -95,6 +99,9 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data={
                 "api_key": self._api_key,
                 "device_id": device_id,
+                STATISTICS_NAMESPACE_KEY: (
+                    statistics_namespace_for_device(device_id)
+                ),
             },
         )
 
@@ -209,7 +216,11 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
 
     async def async_step_init(self, user_input=None):
         """Manage smart1 EMS options."""
-        runtime_data = self.hass.data[DOMAIN][self.config_entry.entry_id]
+        runtime_data = self.hass.data.get(DOMAIN, {}).get(
+            self.config_entry.entry_id
+        )
+        if runtime_data is None:
+            return self.async_abort(reason="not_loaded")
         points = runtime_data["devices"]
         current_roles = dict(self.config_entry.options.get("energy_roles", {}))
         recommendations = recommend_energy_roles(points)

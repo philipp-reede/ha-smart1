@@ -27,6 +27,12 @@ from homeassistant.util.unit_conversion import EnergyConverter
 
 from .api import Smart1Api, Smart1ApiError, describe_api_error
 from .const import DOMAIN
+from .history_state import (
+    PV_DAILY_HISTORY_SCHEMA_VERSION,
+    PV_HISTORY_SCHEMA_VERSION,
+    Smart1HistoryState,
+    scoped_statistic_id,
+)
 from .point import Smart1Point
 from .power_integration import PowerIntegrationResult, integrate_power_rows
 
@@ -37,6 +43,11 @@ REFRESH_DAYS = 3
 PV_STATISTIC_ID = f"{DOMAIN}:pv_production"
 PV_FETCH_ATTEMPTS = 3
 PV_STATISTICS_LOOKBACK = HISTORY_DAYS * 25
+
+
+def pv_statistic_id(statistics_namespace: str = "") -> str:
+    """Return the installation-scoped PV statistic ID."""
+    return scoped_statistic_id(PV_STATISTIC_ID, statistics_namespace)
 
 
 def _statistics_start(record: Mapping[str, Any]) -> datetime:
@@ -57,9 +68,13 @@ def determine_import_window(
     today: date,
     local_tz: ZoneInfo,
     refresh_days: int = REFRESH_DAYS,
+    *,
+    initial_backfill_complete: bool = False,
 ) -> tuple[date, float]:
     """Return the first date to refresh and its preceding cumulative sum."""
     if not records:
+        if initial_backfill_complete:
+            return today - timedelta(days=refresh_days - 1), 0.0
         return today - timedelta(days=HISTORY_DAYS - 1), 0.0
 
     refresh_start = today - timedelta(days=refresh_days - 1)
@@ -143,11 +158,29 @@ def determine_hourly_pv_import_window(
     today: date,
     local_tz: ZoneInfo,
     refresh_days: int = REFRESH_DAYS,
+    *,
+    initial_backfill_complete: bool = False,
+    force_initial_rebuild: bool = False,
 ) -> tuple[date, float]:
     """Return the hourly PV refresh window and preceding cumulative sum."""
-    if not records or needs_hourly_pv_migration(records, local_tz):
+    if force_initial_rebuild:
         return today - timedelta(days=HISTORY_DAYS - 1), 0.0
-    return determine_import_window(records, today, local_tz, refresh_days)
+    if not records:
+        if initial_backfill_complete:
+            return today - timedelta(days=refresh_days - 1), 0.0
+        return today - timedelta(days=HISTORY_DAYS - 1), 0.0
+    if not initial_backfill_complete and needs_hourly_pv_migration(
+        records,
+        local_tz,
+    ):
+        return today - timedelta(days=HISTORY_DAYS - 1), 0.0
+    return determine_import_window(
+        records,
+        today,
+        local_tz,
+        refresh_days,
+        initial_backfill_complete=initial_backfill_complete,
+    )
 
 
 def distribute_exact_pv_energy(
@@ -191,8 +224,20 @@ def merge_hourly_pv_energy(
     end_date: date,
     local_tz: ZoneInfo,
 ) -> list[tuple[datetime, float]]:
-    """Merge refreshed PV hours over existing daily or hourly records."""
+    """Replace fetched local days while preserving temporarily missing days.
+
+    Home Assistant's external-statistics API upserts records but does not
+    delete obsolete buckets. Explicit zero-value tombstones therefore replace
+    stale hours when a day's distribution changes or falls back to one bucket.
+    """
     energy_by_hour: dict[datetime, float] = {}
+    fetched_by_hour = {
+        start.astimezone(timezone.utc): energy_kwh
+        for start, energy_kwh in fetched_energy
+    }
+    replacement_dates = {
+        start.astimezone(local_tz).date() for start in fetched_by_hour
+    }
 
     for record in records:
         energy_kwh = record.get("state")
@@ -201,12 +246,14 @@ def merge_hourly_pv_energy(
         start = _statistics_start(record)
         target_date = start.astimezone(local_tz).date()
         if start_date <= target_date <= end_date:
-            energy_by_hour[start] = float(energy_kwh)
+            energy_by_hour[start] = (
+                0.0
+                if target_date in replacement_dates
+                and start not in fetched_by_hour
+                else float(energy_kwh)
+            )
 
-    energy_by_hour.update(
-        (start.astimezone(timezone.utc), energy_kwh)
-        for start, energy_kwh in fetched_energy
-    )
+    energy_by_hour.update(fetched_by_hour)
     return sorted(energy_by_hour.items())
 
 
@@ -260,10 +307,22 @@ class Smart1PvHistoryImporter:
         hass: HomeAssistant,
         api: Smart1Api,
         pv_power_point: Smart1Point | None = None,
+        *,
+        statistics_namespace: str = "",
+        history_state: Smart1HistoryState | None = None,
+        force_initial_rebuild: bool = False,
     ) -> None:
         self.hass = hass
         self.api = api
         self.pv_power_point = pv_power_point
+        self.statistic_id = pv_statistic_id(statistics_namespace)
+        self.schema_version = (
+            PV_HISTORY_SCHEMA_VERSION
+            if pv_power_point is not None
+            else PV_DAILY_HISTORY_SCHEMA_VERSION
+        )
+        self.history_state = history_state
+        self.force_initial_rebuild = force_initial_rebuild
         self._lock = asyncio.Lock()
         self._last_result = "not_started"
         self._last_refresh_days: int | None = None
@@ -284,7 +343,37 @@ class Smart1PvHistoryImporter:
             "last_daily_fallback_days": self._last_daily_fallback_days,
             "hourly_distribution_available": self.pv_power_point is not None,
             "migration_required": self._migration_required,
+            "initial_backfill_complete": self._is_complete(),
+            "forced_initial_rebuild": self.force_initial_rebuild,
         }
+
+    def _is_complete(self) -> bool:
+        """Return whether this statistic completed its current backfill."""
+        return bool(
+            self.history_state
+            and self.history_state.is_complete(
+                self.statistic_id,
+                self.schema_version,
+            )
+        )
+
+    def _data_presence(self) -> bool | None:
+        """Return whether the completed PV backfill produced recorder rows."""
+        if not self.history_state:
+            return None
+        return self.history_state.data_presence(
+            self.statistic_id,
+            self.schema_version,
+        )
+
+    def _mark_complete(self, *, has_data: bool) -> None:
+        """Persist completion of the current PV history schema."""
+        if self.history_state:
+            self.history_state.mark_complete(
+                self.statistic_id,
+                self.schema_version,
+                has_data=has_data,
+            )
 
     async def _existing_statistics(self) -> list[Mapping[str, Any]]:
         """Return enough recent records to establish a refresh baseline."""
@@ -292,11 +381,11 @@ class Smart1PvHistoryImporter:
             get_last_statistics,
             self.hass,
             PV_STATISTICS_LOOKBACK,
-            PV_STATISTIC_ID,
+            self.statistic_id,
             True,
             {"state", "sum"},
         )
-        return result.get(PV_STATISTIC_ID, [])
+        return result.get(self.statistic_id, [])
 
     async def _fetch_daily_energy(
         self,
@@ -455,58 +544,84 @@ class Smart1PvHistoryImporter:
             local_tz = ZoneInfo(self.hass.config.time_zone)
             today = datetime.now(local_tz).date()
             records = await self._existing_statistics()
-            self._migration_required = needs_hourly_pv_migration(
-                records,
-                local_tz,
+            initial_backfill_complete = self._is_complete()
+            # A completed non-empty backfill must be recreated if its recorder
+            # rows later disappear. Only an explicitly empty successful
+            # backfill may retain the short refresh window without records.
+            if (
+                initial_backfill_complete
+                and not records
+                and self._data_presence() is not False
+            ):
+                initial_backfill_complete = False
+            forced_initial_rebuild = (
+                self.force_initial_rebuild
+                and not initial_backfill_complete
             )
-            if not repair and not records:
+            self._migration_required = (
+                not initial_backfill_complete
+                and (
+                    forced_initial_rebuild
+                    or needs_hourly_pv_migration(records, local_tz)
+                )
+            )
+
+            # Existing hourly data predates the persistent completion marker.
+            # It already represents the current schema and can be adopted
+            # without another 365-day request sweep.
+            if (
+                records
+                and not initial_backfill_complete
+                and not self._migration_required
+                and not forced_initial_rebuild
+            ):
+                self._mark_complete(has_data=True)
+                initial_backfill_complete = True
+
+            if not repair and (
+                self._migration_required
+                or (not records and not initial_backfill_complete)
+            ):
                 self._last_result = "repair_pending"
                 return
+
+            start_date, baseline_sum = determine_hourly_pv_import_window(
+                records,
+                today,
+                local_tz,
+                refresh_days,
+                initial_backfill_complete=initial_backfill_complete,
+                force_initial_rebuild=forced_initial_rebuild,
+            )
+
             if self.pv_power_point is None:
-                start_date, baseline_sum = determine_import_window(
-                    records,
-                    today,
-                    local_tz,
-                    refresh_days,
-                )
-                fetched_energy, fetch_completed = await self._fetch_daily_energy(
-                    start_date,
-                    today,
-                )
-                self._last_fetched_days = len(fetched_energy)
-                if not records and not fetch_completed:
-                    _LOGGER.warning(
-                        "Deferring initial smart1 PV history import because "
-                        "the history fetch did not complete",
+                fetched_daily_energy, fetch_completed = (
+                    await self._fetch_daily_energy(
+                        start_date,
+                        today,
                     )
-                    self._last_result = "incomplete_fetch"
-                    return
-                daily_energy = merge_daily_energy(
-                    records,
-                    fetched_energy,
-                    start_date,
-                    today,
-                    local_tz,
                 )
-                statistics = build_daily_energy_statistics(
-                    daily_energy,
-                    baseline_sum,
-                    local_tz,
+                fetched_hourly_energy = [
+                    (
+                        datetime.combine(
+                            target_date,
+                            time.min,
+                            tzinfo=local_tz,
+                        ).astimezone(timezone.utc),
+                        energy_kwh,
+                    )
+                    for target_date, energy_kwh in fetched_daily_energy
+                ]
+                distributed_days = 0
+                daily_fallback_days = sum(
+                    energy_kwh > 0
+                    for _target_date, energy_kwh in fetched_daily_energy
                 )
-                self._last_result = "completed_daily_fallback"
             else:
-                if self._migration_required and not repair:
-                    self._last_result = "repair_pending"
-                    return
-                start_date, baseline_sum = determine_hourly_pv_import_window(
-                    records,
-                    today,
-                    local_tz,
-                    refresh_days,
-                )
                 exact_fallback = (
                     _daily_exact_fallback(records, local_tz)
                     if self._migration_required
+                    and not forced_initial_rebuild
                     else {}
                 )
                 (
@@ -520,41 +635,52 @@ class Smart1PvHistoryImporter:
                     local_tz,
                     exact_fallback,
                 )
-                self._last_fetched_days = len(
-                    {
-                        start.astimezone(local_tz).date()
-                        for start, _energy in fetched_hourly_energy
-                    }
+
+            self._last_fetched_days = len(
+                {
+                    start.astimezone(local_tz).date()
+                    for start, _energy in fetched_hourly_energy
+                }
+            )
+            self._last_distributed_days = distributed_days
+            self._last_daily_fallback_days = daily_fallback_days
+
+            if not initial_backfill_complete and not fetch_completed:
+                _LOGGER.warning(
+                    "Deferring initial smart1 PV history import because "
+                    "the history fetch did not complete",
                 )
-                self._last_distributed_days = distributed_days
-                self._last_daily_fallback_days = daily_fallback_days
-                if not records and not fetch_completed:
-                    _LOGGER.warning(
-                        "Deferring initial smart1 PV history import because "
-                        "the history fetch did not complete",
-                    )
-                    self._last_result = "incomplete_fetch"
-                    return
-                hourly_energy = merge_hourly_pv_energy(
+                self._last_result = "incomplete_fetch"
+                return
+
+            recorder = get_instance(self.hass)
+            if forced_initial_rebuild:
+                recorder.async_clear_statistics([self.statistic_id])
+                await recorder.async_block_till_done()
+                records = []
+                baseline_sum = 0.0
+
+            hourly_energy = (
+                sorted(fetched_hourly_energy)
+                if forced_initial_rebuild
+                else merge_hourly_pv_energy(
                     records,
                     fetched_hourly_energy,
                     start_date,
                     today,
                     local_tz,
                 )
-                statistics = build_hourly_pv_statistics(
-                    hourly_energy,
-                    baseline_sum,
-                )
-                if daily_fallback_days:
-                    self._last_result = "completed_with_daily_fallback"
-                elif fetch_completed:
-                    self._last_result = "completed"
-                else:
-                    self._last_result = "completed_with_partial_fetch"
+            )
+            statistics = build_hourly_pv_statistics(
+                hourly_energy,
+                baseline_sum,
+            )
 
             if not statistics:
                 _LOGGER.debug("No smart1 PV history available for import")
+                if fetch_completed and not initial_backfill_complete:
+                    self._mark_complete(has_data=False)
+                    self._migration_required = False
                 self._last_result = "no_data"
                 return
 
@@ -565,7 +691,7 @@ class Smart1PvHistoryImporter:
                     has_sum=True,
                     name="smart1 EMS PV production",
                     source=DOMAIN,
-                    statistic_id=PV_STATISTIC_ID,
+                    statistic_id=self.statistic_id,
                     unit_class=EnergyConverter.UNIT_CLASS,
                     unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
                 ),
@@ -575,11 +701,21 @@ class Smart1PvHistoryImporter:
                 "Imported %d days of smart1 PV history",
                 len(statistics),
             )
-            if self._migration_required:
-                await get_instance(self.hass).async_block_till_done()
-                if (
-                    self.pv_power_point is not None
-                    and fetch_completed
-                    and daily_fallback_days == 0
-                ):
-                    self._migration_required = False
+            completion_needs_update = (
+                (fetch_completed and not initial_backfill_complete)
+                or (
+                    self.history_state is not None
+                    and self._data_presence() is not True
+                )
+            )
+            if completion_needs_update:
+                await recorder.async_block_till_done()
+                self._mark_complete(has_data=True)
+                self._migration_required = False
+
+            if daily_fallback_days:
+                self._last_result = "completed_with_daily_fallback"
+            elif fetch_completed:
+                self._last_result = "completed"
+            else:
+                self._last_result = "completed_with_partial_fetch"

@@ -215,6 +215,25 @@ class EnergyRolesTest(unittest.TestCase):
             re.compile(r"^smart1_ems:grid_import_[0-9a-f]{8}$"),
         )
 
+    def test_statistic_id_is_scoped_per_installation(self) -> None:
+        legacy_id = energy_roles.statistic_id_for_role(
+            "grid_import",
+            "counter-one",
+        )
+        first = energy_roles.statistic_id_for_role(
+            "grid_import",
+            "counter-one",
+            "installation-a",
+        )
+        second = energy_roles.statistic_id_for_role(
+            "grid_import",
+            "counter-one",
+            "installation-b",
+        )
+
+        self.assertEqual(first, f"{legacy_id}_installation-a")
+        self.assertNotEqual(first, second)
+
 
 if __name__ == "__main__":
     unittest.main()

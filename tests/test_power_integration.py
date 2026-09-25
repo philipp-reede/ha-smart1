@@ -114,6 +114,62 @@ class PowerIntegrationTest(unittest.TestCase):
             datetime(2026, 3, 29, 0, 0, tzinfo=timezone.utc),
         )
 
+    def test_keeps_both_naive_fall_dst_hours_in_chronological_rows(
+        self,
+    ) -> None:
+        rows = [
+            row(f"2026-10-25 02:{minute:02d}:00", "1000")
+            for _fold in range(2)
+            for minute in range(0, 60, 5)
+        ]
+        rows.append(row("2026-10-25 03:00:00", "1000"))
+
+        result = power_integration.integrate_power_rows(
+            rows,
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+
+        self.assertEqual(result.sample_count, 25)
+        self.assertEqual(result.integrated_intervals, 24)
+        self.assertEqual(result.skipped_gaps, 0)
+        self.assertEqual(result.covered_seconds, 2 * 60 * 60)
+        self.assertAlmostEqual(result.energy_kwh, 2.0)
+        self.assertEqual(
+            [item[0] for item in result.hourly_energy_kwh],
+            [
+                datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc),
+                datetime(2026, 10, 25, 1, 0, tzinfo=timezone.utc),
+            ],
+        )
+
+    def test_keeps_both_naive_fall_dst_hours_in_reverse_rows(self) -> None:
+        rows = [
+            row(f"2026-10-25 02:{minute:02d}:00", "1000")
+            for _fold in range(2)
+            for minute in range(0, 60, 5)
+        ]
+        rows.append(row("2026-10-25 03:00:00", "1000"))
+
+        result = power_integration.integrate_power_rows(
+            list(reversed(rows)),
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+
+        self.assertEqual(result.sample_count, 25)
+        self.assertEqual(result.integrated_intervals, 24)
+        self.assertEqual(result.skipped_gaps, 0)
+        self.assertEqual(result.covered_seconds, 2 * 60 * 60)
+        self.assertAlmostEqual(result.energy_kwh, 2.0)
+        self.assertEqual(
+            [item[0] for item in result.hourly_energy_kwh],
+            [
+                datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc),
+                datetime(2026, 10, 25, 1, 0, tzinfo=timezone.utc),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

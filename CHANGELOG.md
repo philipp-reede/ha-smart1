@@ -4,6 +4,47 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Scope PV and derived Energy Dashboard statistics to their smart1
+  installation so multiple config entries can no longer share recorder rows
+- Replace every successfully refreshed local PV day as a unit, including
+  zeroing obsolete hourly buckets, so a daily fallback or a missing detail
+  profile cannot duplicate the exact cumulative total
+- Persist completed PV history schemas and successful empty PV or derived
+  backfills, preventing legitimate daily fallbacks and empty histories from
+  restarting a 365-day import every six hours, while rebuilding once if a
+  previously populated external statistic later disappears from Recorder
+- Preserve both occurrences of ambiguous naive portal timestamps during the
+  autumn daylight-saving-time transition, for ascending and descending CSV
+  responses
+- Perform a required plant authentication probe when an installation has no
+  active linear points, allowing rejected credentials or revoked access to the
+  configured plant to enter Home Assistant's reauthentication flow
+- Abort the Energy-role Options Flow cleanly when its config entry is not
+  loaded instead of raising an internal error
+- Remove obsolete inverter, PV-string, module-field and inverter-bus entities
+  after a successful authoritative topology response, while retaining them
+  when an optional endpoint is missing, has an unknown schema or fails
+- Select the newest live value by its parsed CSV timestamp instead of relying
+  on the response row order
+
+### Migration
+
+- Keep the established external-statistic IDs for one deterministic legacy
+  config entry so its existing Energy Dashboard selections remain valid. If
+  several legacy installations could already have shared those IDs, clear and
+  rebuild them for that owner only after a complete replacement fetch
+- Assign installation-scoped IDs to additional existing entries and all new
+  entries. Historical rows that multiple installations may already have
+  written to the former shared IDs cannot be attributed automatically; they
+  are replaced by the legacy owner's available 365-day history instead
+
+### CI
+
+- Upgrade `actions/checkout` and `actions/setup-python` to version 7 and give
+  the unit-test and Home Assistant import jobs stable check names
+
 ### Documentation
 
 - Record the successful in-place upgrade and real-world validation of smart1
