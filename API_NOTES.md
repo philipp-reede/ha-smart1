@@ -233,9 +233,12 @@ five-minute power values. This is deliberately opt-in:
   from the API. Complete replacement batches are queued directly behind a
   destructive clear before its callback is awaited, preserving FIFO recovery
   even if Recorder reports a timeout. All batches are synchronously validated
-  before the clear is queued. A late successful callback completes the schema
-  marker for the active config-entry generation, preventing another annual
-  scan without allowing an unloaded entry to overwrite newer state.
+  before the clear is queued. Completion is persisted only after every expected
+  statistic can be read back from Recorder. If the bounded foreground wait or
+  clear callback expires first, a Home Assistant-tracked background finalizer
+  continues verification. It completes only the active config-entry generation,
+  preventing another annual scan without allowing an older overlapping run or
+  unloaded entry to overwrite newer state.
 - An orphaned legacy statistic has its completion marker removed immediately
   after Recorder accepts the irreversible clear. The eventual callback records
   cleanup against the latest config-entry data without removing a completion
@@ -260,12 +263,36 @@ requests the day endpoint once per date when importing history.
   scaling the integrated five-minute `pv_global` power profile. This preserves
   the documented daily production while keeping the Energy Dashboard's hourly
   source and residual-consumption calculations temporally aligned.
-- A zero-valued local-midnight bucket replaces the former single daily bucket
-  during migration under the unchanged statistic ID.
+- Measured profiles contain only their actual production buckets. If no usable
+  detail profile exists, the exact daily total is stored at the first complete
+  UTC-hour boundary inside that local date. This also keeps statistics valid in
+  15-, 30- and 45-minute-offset time zones.
 - Missing dates remain unknown and are not converted to zero production.
 - A daily-to-hourly schema repair continues its cumulative sum from the newest
   Recorder row before the 365-day window, preserving monotonicity when older
   statistics remain stored.
+- Schema upgrades revalidate completion markers that previously represented an
+  empty result exactly once. A successful empty response is then recorded under
+  the new schema and returns to the normal short refresh cycle.
+- PV rows produced by older releases between full UTC hours are detected even
+  when their completion marker is current. After a complete 365-day fetch, the
+  statistic is replaced with aligned rows; valid rows before that window and
+  their cumulative sum baseline are carried into the replacement. An incomplete
+  fetch leaves the existing statistic untouched.
+- If a stored hourly PV profile exists while its live power point is temporarily
+  unavailable, the importer retains profile semantics from schema state and row
+  shape. A newly returned exact daily total replaces that local day; a
+  successful `missing_ok` day keeps its existing aligned hourly buckets. Legacy
+  positive singleton fallbacks are remapped only when no hourly profile exists
+  for that day, while artificial off-hour zero buckets are discarded.
+- Historical schema markers 2 and 3 can describe more than one representation
+  because older releases changed storage modes without an unambiguous marker.
+  Their Recorder row shape is therefore inspected during upgrade. The current
+  daily-only representation uses marker 6; once confirmed, intentionally kept
+  hourly fallback rows no longer trigger another full-year rebuild.
+- A non-empty import is marked complete only after all expected state and sum
+  values can be read back from Recorder; delayed persistence is finalized in a
+  generation-safe background task.
 - The import runs in the background and is stored as external Home Assistant
   long-term statistics under `smart1_ems:pv_production`.
 

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from datetime import datetime, timezone
+import logging
+import math
 import re
 from typing import Any
 
 RECORDER_OPERATION_TIMEOUT = 10
+
+_LOGGER = logging.getLogger(__name__)
 
 _VALID_STATISTIC_ID = re.compile(
     r"^(?!.+__)(?!_)[\da-z_]+(?<!_):(?!_)[\da-z_]+(?<!_)$"
@@ -53,8 +57,18 @@ def validate_energy_statistics_imports(
                 or start.utcoffset() is None
             ):
                 raise ValueError("Statistics start must be timezone-aware")
+            # Match Home Assistant's synchronous input validation first, then
+            # enforce the integration's stronger storage invariant.  HA checks
+            # the supplied representation before converting it to UTC, which
+            # means a fractional-offset local hour could otherwise become a
+            # half-hour Recorder bucket after conversion.
             if start.minute or start.second or start.microsecond:
                 raise ValueError("Statistics start must be on the hour")
+            utc_start = start.astimezone(timezone.utc)
+            if utc_start.minute or utc_start.second or utc_start.microsecond:
+                raise ValueError(
+                    "Statistics start must be on a UTC hour boundary"
+                )
 
             last_reset = statistic.get("last_reset")
             if last_reset is not None and (
@@ -67,6 +81,147 @@ def validate_energy_statistics_imports(
                 )
 
 
+def statistics_are_persisted(
+    expected: Iterable[Mapping[str, Any]],
+    observed: Iterable[Mapping[str, Any]],
+) -> bool:
+    """Return whether Recorder contains every expected state and sum.
+
+    An external-statistics import is one database transaction.  Comparing the
+    complete queued batch after Recorder has processed its queue therefore
+    distinguishes a committed import from a task that failed and was requeued.
+    """
+
+    def _timestamp(record: Mapping[str, Any]) -> float | None:
+        start = record.get("start")
+        if isinstance(start, datetime):
+            if start.tzinfo is None or start.utcoffset() is None:
+                return None
+            return start.timestamp()
+        try:
+            return float(start)
+        except (TypeError, ValueError):
+            return None
+
+    observed_by_start = {
+        timestamp: record
+        for record in observed
+        if (timestamp := _timestamp(record)) is not None
+    }
+    found_expected = False
+    for expected_record in expected:
+        found_expected = True
+        timestamp = _timestamp(expected_record)
+        if timestamp is None:
+            return False
+        observed_record = observed_by_start.get(timestamp)
+        if observed_record is None:
+            return False
+        for field in ("state", "sum"):
+            if field not in expected_record:
+                continue
+            expected_value = expected_record.get(field)
+            observed_value = observed_record.get(field)
+            if expected_value is None or observed_value is None:
+                if expected_value is not observed_value:
+                    return False
+                continue
+            try:
+                if not math.isclose(
+                    float(expected_value),
+                    float(observed_value),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                ):
+                    return False
+            except (TypeError, ValueError):
+                return False
+    return found_expected
+
+
+async def async_wait_for_recorder_commit(recorder: Any) -> bool:
+    """Wait until Recorder processed jobs queued before this call.
+
+    ``async_add_external_statistics`` has no completion callback.  Recorder's
+    public synchronization future is a queue barrier; callers must still read
+    the rows back because a failed import can be requeued behind that barrier.
+    """
+    try:
+        await asyncio.wait_for(
+            recorder.async_block_till_done(),
+            timeout=RECORDER_OPERATION_TIMEOUT,
+        )
+    except TimeoutError:
+        _LOGGER.warning(
+            "Timed out while waiting for smart1 statistics persistence"
+        )
+        return False
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning(
+            "Unable to confirm smart1 statistics persistence (%s)",
+            type(err).__name__,
+        )
+        return False
+    return True
+
+
+async def async_wait_for_statistics_readback(
+    expected: Iterable[Mapping[str, Any]],
+    readback: Callable[[], Awaitable[Iterable[Mapping[str, Any]]]],
+    *,
+    matcher: Callable[
+        [Iterable[Mapping[str, Any]], Iterable[Mapping[str, Any]]], bool
+    ] = statistics_are_persisted,
+) -> bool:
+    """Poll Recorder until a queued statistics batch can be read back.
+
+    A queue barrier normally makes the first read sufficient. Polling closes
+    the remaining race with an import task that has already left Recorder's
+    queue but whose transaction is not visible yet. It also allows a
+    temporarily requeued import to finish without falsely completing its
+    schema marker.
+    """
+    expected_records = tuple(expected)
+    if not expected_records:
+        return False
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + RECORDER_OPERATION_TIMEOUT
+    last_error: Exception | None = None
+    retry_delay = 0.0
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            if last_error is None:
+                _LOGGER.warning(
+                    "Timed out while reading back smart1 statistics"
+                )
+            else:
+                _LOGGER.warning(
+                    "Unable to read back smart1 statistics (%s)",
+                    type(last_error).__name__,
+                )
+            return False
+        try:
+            observed = await asyncio.wait_for(
+                readback(),
+                timeout=remaining,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            last_error = err
+        else:
+            last_error = None
+            if matcher(expected_records, observed):
+                return True
+
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(retry_delay, remaining))
+        retry_delay = 0.25 if retry_delay == 0 else min(retry_delay * 2, 4.0)
+
+
 async def async_clear_statistics(
     recorder: Any,
     statistic_ids: Iterable[str],
@@ -74,6 +229,7 @@ async def async_clear_statistics(
     validate_followup: Callable[[], None] | None = None,
     enqueue_followup: Callable[[], None] | None = None,
     on_done: Callable[[], None] | None = None,
+    on_late_done: Callable[[], None] | None = None,
 ) -> bool:
     """Queue a clear and its replacement before waiting for confirmation.
 
@@ -94,12 +250,18 @@ async def async_clear_statistics(
 
     done_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    waiting_for_callback = True
 
     def _finish_clear() -> None:
         try:
             if on_done is not None:
                 on_done()
         finally:
+            # A Recorder clear remains queued after our bounded wait expires.
+            # Give callers a chance to verify and finalize the replacement
+            # once that late callback eventually arrives.
+            if not waiting_for_callback and on_late_done is not None:
+                on_late_done()
             done_event.set()
 
     def _clear_done() -> None:
@@ -114,5 +276,13 @@ async def async_clear_statistics(
             timeout=RECORDER_OPERATION_TIMEOUT,
         )
     except asyncio.TimeoutError:
+        waiting_for_callback = False
         return False
+    except BaseException:
+        # Cancellation must never turn a later Recorder callback into a
+        # falsely synchronous completion. The late finalizer can still verify
+        # a replacement if the event loop remains alive.
+        waiting_for_callback = False
+        raise
+    waiting_for_callback = False
     return True

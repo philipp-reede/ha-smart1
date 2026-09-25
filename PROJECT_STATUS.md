@@ -87,6 +87,19 @@
 - Exact PV daily totals are distributed across UTC-aligned hours using the
   measured five-minute `pv_global` profile and normalized back to the exact
   cumulative daily value, avoiding a midnight residual-consumption spike
+- Fractional-offset time zones use the first full UTC-hour boundary within the
+  local date for a daily fallback; measured profiles receive no artificial
+  midnight bucket and retain the exact documented daily total. This is covered
+  for positive and negative fractional offsets and an Adelaide DST transition
+- PV rows created by older releases between UTC hours trigger a one-time
+  destructive repair for profiled and daily-only history. The clear occurs only
+  after a complete 365-day response; valid pre-window rows are reimported and
+  their final cumulative sum remains the replacement baseline
+- Stored hourly PV schemas remain identifiable if the live power point is
+  temporarily missing. Exact new portal totals replace only their local day;
+  missing days retain aligned hourly history, including rows before the repair
+  window. Legacy daily singleton fallbacks are remapped without preserving the
+  artificial off-hour zero bucket used by older profiled imports
 - Existing daily PV records for the deterministic legacy owner migrate in
   place under the unchanged `smart1_ems:pv_production` statistic ID; scoped
   installations use their own PV statistic IDs
@@ -127,7 +140,10 @@
   therefore performs one complete hourly repair. Its cumulative sum continues
   from the latest Recorder row before the 365-day window so history older than
   the supported import range cannot introduce a falling sum. Valid
-  pre-migration hourly data is adopted without an unnecessary annual sweep
+  pre-migration hourly data is adopted without an unnecessary annual sweep.
+  Ambiguous historical version-2 and version-3 markers are resolved from the
+  stored row shape, while current daily-only history uses the unambiguous
+  version-6 marker and does not repeatedly rebuild preserved fallback rows
 - Completed sparse derived-energy statistics may legitimately contain only
   midnight buckets and retain the normal short refresh window. Decreasing
   cumulative sums within the supported 365-day window, including the boundary
@@ -142,10 +158,17 @@
   callback before completion state is written. Replacement batches are prepared
   and validated first, then queued immediately behind the clear without an
   intervening await, so a timeout or task cancellation cannot leave a delayed
-  clear without its replacement. Late completion updates only the active,
-  unchanged schema generation and therefore neither repeats annual scans nor
-  lets an unloaded entry overwrite newer state. Failure to inspect optional
-  Recorder metadata does not block live sensors
+  clear without its replacement. Non-empty imports are marked complete only
+  after every queued state and sum can be read back from Recorder. A tracked
+  background finalizer handles delayed clears or persistence and updates only
+  the active, unchanged schema generation, so overlapping or unloaded runs
+  cannot overwrite newer state. Failure to inspect optional Recorder metadata
+  does not block live sensors
+- PV and derived-energy history schemas were advanced so completion markers
+  that an older release may have written for an empty result are revalidated
+  once; a newly confirmed empty result is then persisted normally
+- Unstructured interface values containing `photovoltaic` remain classified as
+  PV by the shared entity and discovery classifier
 - Orphaned legacy statistics have their completion marker invalidated
   synchronously after Recorder accepts the clear, because that queued operation
   cannot be cancelled. The eventual callback records cleanup from the latest

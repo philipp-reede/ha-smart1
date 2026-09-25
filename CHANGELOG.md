@@ -25,6 +25,26 @@ All notable changes to this project are documented in this file.
   discovery logs while retaining identifier-free protocol and capability data
 - Derive discovery capability flags from the same central point classifier used
   for entities, including structured `ecar` services and standalone `WP` names
+- Keep photovoltaic history on whole UTC-hour boundaries in 15-, 30- and
+  45-minute-offset time zones, without adding an artificial midnight bucket
+  to measured profiles or changing the portal's exact daily total
+- Detect PV buckets written by older releases between UTC hours and replace
+  them only after a complete 365-day fetch; valid pre-window rows and their
+  cumulative baseline are retained across the destructive repair
+- Preserve stored hourly-profile semantics when the live PV power point is
+  temporarily unavailable: missing portal days keep their hourly buckets,
+  while fresh exact daily values replace only their respective local day
+- Give the current daily-only representation an unambiguous schema marker and
+  inspect the actual Recorder row shape for historical version-2 and version-3
+  markers, so upgrades neither adopt a contaminated daily marker nor repeat a
+  full-year repair for deliberately preserved hourly fallback days
+- Recognize unstructured photovoltaic interface values through the central
+  classifier again, so their entities and discovery capabilities stay aligned
+- Revalidate legitimately empty PV and derived-energy history once after the
+  schema upgrade, repairing completion markers written by older releases
+- Mark PV and derived-energy history complete only after every queued Recorder
+  statistic has been read back, with generation-safe background finalization
+  for delayed clears and persistence beyond the bounded foreground wait
 
 ### Testing
 
@@ -35,6 +55,16 @@ All notable changes to this project are documented in this file.
 - Cover mixed completed and pending roles during current-day refresh, orphan
   cleanup across timeout and reload, structured and unparsed interface
   redaction, and shared discovery/classifier positive and negative cases
+- Cover profiled and daily-fallback photovoltaic history in Kolkata, Kathmandu
+  and Adelaide, including DST transitions, negative fractional offsets and a
+  UTC bucket that straddles local midnight
+- Cover the upgrade of both profiled and daily-only fractional-offset history,
+  incomplete replacement fetches and a combined forced/alignment rebuild
+- Cover hourly-to-daily cross-mode upgrades for historical schema versions 2
+  through 5, including sparse profiles, fresh overrides, incomplete-fetch
+  protection, pre-window preservation and the return to hourly storage
+- Cover unstructured photovoltaic discovery, old empty-marker revalidation,
+  delayed Recorder visibility, barrier timeouts and superseded finalizers
 
 ## [0.7.2] - 2026-09-25
 

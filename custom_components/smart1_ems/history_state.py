@@ -11,9 +11,19 @@ HISTORY_SCHEMA_VERSIONS_KEY = "history_schema_versions"
 HISTORY_DATA_PRESENCE_KEY = "history_data_presence"
 LEGACY_HISTORY_REBUILD_KEY = "legacy_history_rebuild"
 
-PV_DAILY_HISTORY_SCHEMA_VERSION = 2
-PV_HISTORY_SCHEMA_VERSION = 4
-DERIVED_HISTORY_SCHEMA_VERSION = 1
+# Version 6 gives current daily-only history an unambiguous completion marker.
+# Historical versions overlap by mode: v2 was normally daily, v3 could be
+# either daily or hourly, and v4/v5 were hourly.  Some v0.7.2 mode switches
+# could additionally leave hourly-shaped rows behind a v2 marker. Importers
+# therefore inspect legacy row structure before adopting versions 2 through 5.
+PV_DAILY_HISTORY_SCHEMA_VERSION = 6
+# Version 5 applies the same recovery to hourly version-4 markers.  Non-empty
+# hourly history is adopted by the importers without a redundant full fetch.
+PV_HISTORY_SCHEMA_VERSION = 5
+# Apply the same one-time recovery to derived statistics.  A genuinely empty
+# role is marked complete at version 2 after the successful 365-day check, so
+# it returns to the normal short refresh window instead of rebuilding forever.
+DERIVED_HISTORY_SCHEMA_VERSION = 2
 
 
 def statistics_namespace_for_device(device_id: str) -> str:
