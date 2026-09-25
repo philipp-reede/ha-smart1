@@ -78,6 +78,37 @@ class Smart1HistoryState:
             return None
         return self._data_presence.get(statistic_id, {}).get(schema_version)
 
+    def forget_statistics(self, statistic_ids: set[str]) -> None:
+        """Discard completion state for Recorder statistics being removed."""
+        changed = False
+        for statistic_id in statistic_ids:
+            changed = self._versions.pop(statistic_id, None) is not None or changed
+            changed = (
+                self._data_presence.pop(statistic_id, None) is not None
+                or changed
+            )
+        if not changed:
+            return
+
+        self._hass.config_entries.async_update_entry(
+            self._entry,
+            data={
+                **self._entry.data,
+                HISTORY_SCHEMA_VERSIONS_KEY: dict(self._versions),
+                HISTORY_DATA_PRESENCE_KEY: {
+                    stored_statistic_id: {
+                        str(stored_schema_version): stored_has_data
+                        for stored_schema_version, stored_has_data in sorted(
+                            schema_versions.items()
+                        )
+                    }
+                    for stored_statistic_id, schema_versions in (
+                        self._data_presence.items()
+                    )
+                },
+            },
+        )
+
     def mark_complete(
         self,
         statistic_id: str,

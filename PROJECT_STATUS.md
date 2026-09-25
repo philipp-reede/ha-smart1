@@ -15,8 +15,13 @@
   the established unscoped IDs and therefore its existing Energy Dashboard
   selections; additional existing entries and all new entries receive stable,
   installation-specific IDs. When several legacy installations may already
-  have shared those IDs, the retained statistics are cleared and rebuilt from
-  a complete replacement fetch for their deterministic owner
+  have shared those IDs, every unscoped statistic is discovered from all
+  config-entry state and Recorder metadata. Statistics the deterministic
+  legacy owner can still manage are rebuilt only after a complete replacement
+  fetch; orphaned IDs are removed even when that owner currently has no
+  matching PV capability or selected Energy role. Persisted cleanup state
+  prevents repeated clears and is rearmed if a removed statistic later
+  reappears
 - Rejected API keys trigger a translated Home Assistant reauthentication flow.
   A replacement key is stored only when it still exposes the original plant;
   temporary portal and network failures continue through normal retries
@@ -93,11 +98,16 @@
   with the same 365-day import and three-day refresh behavior
 - Derived power history is split into UTC-aligned hourly energy statistics;
   existing daily statistics migrate in place without changing statistic IDs
-- Daily-only or non-monotonic derived statistics are cleared only after a
-  complete replacement fetch and then rebuilt under the same statistic IDs;
-  exact PV history and statistics from other integrations are not cleared
-- A role without replacement data no longer blocks repairs for other roles;
-  transient detailed-history requests are retried before a repair is deferred
+- Daily-only or non-monotonic derived statistics are repaired under the same
+  statistic IDs with non-destructive upserts across the supported 365-day
+  window. Existing rows outside that window and dates for which the portal
+  returns no samples are preserved. Only an explicit legacy-owner migration
+  clears a statistic, and only after a complete replacement fetch; exact PV
+  history and statistics from other integrations are not cleared
+- A role without replacement samples no longer blocks repairs for other roles
+  and its successful empty repair is persisted instead of starting another
+  annual scan six hours later. Transient detailed-history requests are retried
+  before any repair is accepted as complete
 - Since version 0.6.4, an initial PV or derived-energy backfill is written only
   after the complete requested history range has been fetched. Temporary daily
   request failures are retried and an incomplete initial import is deferred
@@ -111,8 +121,10 @@
   being mistaken for a legitimately empty history
 - The active PV history representation is tracked separately from schemas
   completed in the past. Switching from hourly to daily storage and back
-  therefore performs one complete hourly repair, while valid pre-migration
-  hourly data is adopted without an unnecessary 365-day request sweep
+  therefore performs one complete hourly repair. Its cumulative sum continues
+  from the latest Recorder row before the 365-day window so history older than
+  the supported import range cannot introduce a falling sum. Valid
+  pre-migration hourly data is adopted without an unnecessary annual sweep
 - Completed sparse derived-energy statistics may legitimately contain only
   midnight buckets and retain the normal short refresh window. Decreasing
   cumulative sums still trigger a full rebuild, and successfully refreshed
@@ -120,10 +132,20 @@
 - Current-day PV and derived statistics refresh every 15 minutes while the
   wider historical window continues to refresh every six hours. A pending
   initial repair is not restarted by every current-day refresh
+- Destructive history cleanup waits for Recorder's per-operation completion
+  callback before state is removed or replacement rows are queued. A bounded
+  timeout aborts the replacement instead of risking a clear/import race;
+  failure to inspect optional Recorder metadata does not block live sensors
 - Five-minute power integration preserves both occurrences of naive local
   timestamps during the autumn daylight-saving-time fold; timestamps that
-  already include an offset continue to be used directly. Interleaved naive
-  rows for the two repeated wall-clock hours retain both UTC occurrences
+  already include an offset continue to be used exactly. Because naive portal
+  timestamps contain neither a fold marker nor a documented row-order
+  guarantee, distinct fold values are assigned with a deterministic
+  minimum-variation path supported by the nearest samples outside the repeated
+  hour. Complete grouped, interleaved, reversed, shuffled and duplicated rows
+  therefore retain separate profiles and both UTC occurrences; a genuinely
+  ambiguous profile remains an informed reconstruction rather than
+  API-provided truth
 - Redacted diagnostics expose the history import result and repair state
   without statistic source IDs or measurement values
 - Derived grid import and export statistics were accepted by the real Home
@@ -174,13 +196,23 @@
 - Historical rows that multiple pre-migration config entries may already have
   written into the former shared external-statistic IDs cannot be attributed
   to their originating installations. Migration therefore discards those
-  shared rows after a complete replacement fetch, rebuilds up to 365 available
-  days for the deterministic legacy owner and starts isolated histories for
-  the other entries; unavailable older shared history cannot be recovered
+  shared rows after a complete replacement fetch where the deterministic owner
+  can rebuild them, removes orphaned shared IDs independently of that owner's
+  current capabilities, and starts isolated histories for the other entries;
+  unavailable older shared history cannot be recovered
 - The version 0.6.4 backfill protection is preventive. Existing historical
   gaps are not rebuilt automatically because a date for which the portal
   supplied no data cannot be distinguished reliably from an earlier failed
   fetch
+- Naive portal timestamps contain no daylight-saving-time fold marker and
+  their response order is not assumed to be meaningful. Distinct repeated-hour
+  profiles are assigned by minimizing adjacent power changes and using nearby
+  boundary samples. Abrupt or crossing profiles can remain intrinsically
+  ambiguous. Systematic response-wide duplication is normalized when multiple
+  non-ambiguous timestamps establish a common factor. An isolated exact
+  duplicate is still indistinguishable from an identical sample in both folds
+  when the counterpart is missing, so remaining multiplicity is treated as
+  fold evidence; only an explicit UTC offset permits exact fold attribution
 
 ## Remaining work
 

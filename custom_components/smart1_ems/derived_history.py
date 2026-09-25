@@ -28,17 +28,25 @@ from homeassistant.util.unit_conversion import EnergyConverter
 from .api import Smart1Api, Smart1ApiError, describe_api_error
 from .const import DOMAIN
 from .energy_roles import ENERGY_ROLES_BY_KEY, statistic_id_for_role
-from .history import HISTORY_DAYS, REFRESH_DAYS
+from .history import (
+    HISTORY_DAYS,
+    MAX_HOURLY_RECORDS_PER_DAY,
+    REFRESH_DAYS,
+)
 from .history_state import (
     DERIVED_HISTORY_SCHEMA_VERSION,
     Smart1HistoryState,
 )
 from .point import Smart1Point
 from .power_integration import integrate_power_rows
+from .recorder_helpers import async_clear_statistics
 
 _LOGGER = logging.getLogger(__name__)
 
-STATISTICS_LOOKBACK = HISTORY_DAYS + REFRESH_DAYS + 7
+# ``get_last_statistics`` counts records rather than days.  Derived history is
+# hourly, so retain enough rows to reconstruct the complete supported history
+# when a legacy statistic must be cleared and written again.
+STATISTICS_LOOKBACK = HISTORY_DAYS * MAX_HOURLY_RECORDS_PER_DAY
 FETCH_ATTEMPTS = 3
 
 
@@ -123,6 +131,28 @@ def determine_hourly_import_window(
         local_tz,
         initial_backfill_complete=initial_backfill_complete,
     ):
+        preceding = [
+            record
+            for record in records
+            if record.get("sum") is not None
+            and _statistics_start(record).astimezone(local_tz).date()
+            < initial_start
+        ]
+        if preceding:
+            baseline = max(preceding, key=_statistics_start)
+            return initial_start, float(baseline["sum"])
+
+        boundary = [
+            record
+            for record in records
+            if record.get("sum") is not None
+            and record.get("state") is not None
+            and _statistics_start(record).astimezone(local_tz).date()
+            == initial_start
+        ]
+        if boundary:
+            first = min(boundary, key=_statistics_start)
+            return initial_start, float(first["sum"]) - float(first["state"])
         return initial_start, 0.0
 
     refresh_start = today - timedelta(days=refresh_days - 1)
@@ -285,12 +315,13 @@ class Smart1DerivedEnergyImporter:
     async def _existing_statistics(
         self,
         statistic_id: str,
+        record_count: int = STATISTICS_LOOKBACK,
     ) -> list[Mapping[str, Any]]:
         """Return recent records for one derived statistic."""
         result = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics,
             self.hass,
-            STATISTICS_LOOKBACK,
+            record_count,
             statistic_id,
             True,
             {"state", "sum"},
@@ -368,8 +399,16 @@ class Smart1DerivedEnergyImporter:
                 )
                 for role_key, point in self.role_points.items()
             }
+            record_count = (
+                STATISTICS_LOOKBACK
+                if repair
+                else (refresh_days + 1) * MAX_HOURLY_RECORDS_PER_DAY
+            )
             records_by_role = {
-                role_key: await self._existing_statistics(statistic_id)
+                role_key: await self._existing_statistics(
+                    statistic_id,
+                    record_count,
+                )
                 for role_key, statistic_id in statistic_ids.items()
             }
             complete_roles = {
@@ -466,11 +505,6 @@ class Smart1DerivedEnergyImporter:
                 )
                 self._last_result = "incomplete_fetch"
                 return
-            missing_replacements = {
-                role_key
-                for role_key in rebuild_roles - forced_rebuild_roles
-                if not fetched_by_role[role_key]
-            }
             if rebuild_roles and not fetch_completed:
                 _LOGGER.warning(
                     "Keeping existing smart1 energy statistics because the "
@@ -479,29 +513,35 @@ class Smart1DerivedEnergyImporter:
                 self._last_result = "incomplete_fetch"
                 return
 
-            rebuildable_roles = rebuild_roles - missing_replacements
+            # A completed repair can legitimately contain empty days (or be
+            # completely empty) because the detailed endpoint is queried with
+            # ``missing_ok=True``. Only explicit legacy rebuilds clear the
+            # complete statistic. Detected daily/decreasing data is repaired
+            # by upserting the supported window so older valid history stays
+            # untouched.
+            rebuildable_roles = rebuild_roles
             if repair:
-                self._roles_without_replacement = tuple(
-                    sorted(missing_replacements)
-                )
+                self._roles_without_replacement = ()
                 self._cleared_rebuild_roles = ()
-            if missing_replacements:
-                _LOGGER.warning(
-                    "Keeping %d smart1 derived energy statistics because no "
-                    "replacement data was available",
-                    len(missing_replacements),
-                )
 
             recorder = get_instance(self.hass)
-            if rebuildable_roles:
+            if forced_rebuild_roles:
                 rebuild_statistic_ids = [
                     statistic_ids[role_key]
-                    for role_key in sorted(rebuildable_roles)
+                    for role_key in sorted(forced_rebuild_roles)
                 ]
-                recorder.async_clear_statistics(rebuild_statistic_ids)
-                await recorder.async_block_till_done()
+                if not await async_clear_statistics(
+                    recorder,
+                    rebuild_statistic_ids,
+                ):
+                    _LOGGER.warning(
+                        "Timed out while clearing smart1 derived energy "
+                        "statistics before a required rebuild"
+                    )
+                    self._last_result = "clear_timeout"
+                    return
                 self._cleared_rebuild_roles = tuple(
-                    sorted(rebuildable_roles)
+                    sorted(forced_rebuild_roles)
                 )
                 _LOGGER.info(
                     "Cleared %d smart1 derived energy statistics before rebuild",
@@ -512,15 +552,13 @@ class Smart1DerivedEnergyImporter:
             for role_key, point in self.role_points.items():
                 if role_key not in refreshable_roles:
                     continue
-                if role_key in missing_replacements:
-                    continue
                 role_start, baseline_sum = windows[role_key]
                 fetched_energy = [
                     item
                     for item in fetched_by_role[role_key]
                     if item[0].astimezone(local_tz).date() >= role_start
                 ]
-                if role_key in rebuildable_roles:
+                if role_key in forced_rebuild_roles:
                     hourly_energy = sorted(fetched_energy)
                 else:
                     hourly_energy = merge_hourly_energy(
@@ -559,20 +597,20 @@ class Smart1DerivedEnergyImporter:
                 )
 
             completed_roles = (
-                initial_backfill_roles - missing_replacements
+                initial_backfill_roles | rebuildable_roles
                 if fetch_completed
                 else set()
             )
-            if rebuildable_roles or (
-                self.history_state
-                and (completed_roles or roles_with_statistics)
-            ):
-                await recorder.async_block_till_done()
-
             for role_key in completed_roles:
                 self._mark_complete(
                     statistic_ids[role_key],
-                    has_data=role_key in roles_with_statistics,
+                    has_data=(
+                        role_key in roles_with_statistics
+                        or (
+                            role_key not in forced_rebuild_roles
+                            and bool(records_by_role[role_key])
+                        )
+                    ),
                 )
             for role_key in roles_with_statistics - completed_roles:
                 if self._data_presence(statistic_ids[role_key]) is not True:
@@ -582,11 +620,7 @@ class Smart1DerivedEnergyImporter:
                     )
 
             self._last_result = (
-                "completed_with_preserved_roles"
-                if missing_replacements
-                else (
-                    "completed"
-                    if fetch_completed
-                    else "completed_with_partial_fetch"
-                )
+                "completed"
+                if fetch_completed
+                else "completed_with_partial_fetch"
             )

@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import timedelta
 import logging
 
@@ -20,20 +21,27 @@ from .const import DOMAIN
 from .coordinator import Smart1Coordinator
 from .derived_history import Smart1DerivedEnergyImporter
 from .discovery import Smart1Discovery
-from .energy_roles import ENERGY_ROLES_BY_KEY, energy_candidates
-from .history import Smart1PvHistoryImporter
+from .energy_roles import (
+    ENERGY_ROLES_BY_KEY,
+    energy_candidates,
+    statistic_id_for_role,
+)
+from .history import PV_STATISTIC_ID, Smart1PvHistoryImporter
 from .history_state import (
+    HISTORY_SCHEMA_VERSIONS_KEY,
     LEGACY_HISTORY_REBUILD_KEY,
     STATISTICS_NAMESPACE_KEY,
     Smart1HistoryState,
     statistics_namespace_for_device,
 )
+from .recorder_helpers import async_clear_statistics
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
 HISTORY_UPDATE_INTERVAL = timedelta(hours=6)
 CURRENT_DAY_UPDATE_INTERVAL = timedelta(minutes=15)
+LEGACY_ORPHAN_CLEANUP_KEY = "legacy_orphan_cleanup_ids"
 
 _INVERTER_ID_COLUMNS = {"Inverter Id", "InverterId", '"Inverter Id"'}
 _MODULE_FIELD_ID_COLUMNS = {
@@ -54,6 +62,124 @@ def _discovery_probe_is_authoritative(
         probe.get("endpoint_result") in {"data_returned", "empty_response"}
         and isinstance(columns, list)
         and bool(id_columns.intersection(columns))
+    )
+
+
+def _is_unscoped_legacy_statistic_id(statistic_id: object) -> bool:
+    """Return whether an ID belongs to the shared pre-migration namespace."""
+    if statistic_id == PV_STATISTIC_ID:
+        return True
+    if not isinstance(statistic_id, str):
+        return False
+
+    for role_key in ENERGY_ROLES_BY_KEY:
+        prefix = f"{DOMAIN}:{role_key}_"
+        source_hash = statistic_id.removeprefix(prefix)
+        if (
+            statistic_id.startswith(prefix)
+            and len(source_hash) == 8
+            and all(
+                character in "0123456789abcdef"
+                for character in source_hash
+            )
+        ):
+            return True
+    return False
+
+
+def _legacy_statistic_ids(entries: list[ConfigEntry]) -> set[str]:
+    """Collect every discoverable statistic ID from the shared namespace."""
+    statistic_ids = {PV_STATISTIC_ID}
+    for candidate in entries:
+        selected_roles = candidate.options.get("energy_roles", {})
+        if isinstance(selected_roles, Mapping):
+            statistic_ids.update(
+                statistic_id_for_role(role_key, point_id)
+                for role_key, point_id in selected_roles.items()
+                if role_key in ENERGY_ROLES_BY_KEY
+                and isinstance(point_id, str)
+                and point_id
+            )
+
+        # Retain coverage for a role that was deselected after it had already
+        # written legacy statistics. Scoped IDs are deliberately ignored.
+        raw_versions = candidate.data.get(HISTORY_SCHEMA_VERSIONS_KEY, {})
+        if isinstance(raw_versions, Mapping):
+            statistic_ids.update(
+                statistic_id
+                for statistic_id in raw_versions
+                if _is_unscoped_legacy_statistic_id(statistic_id)
+            )
+    return statistic_ids
+
+
+def _stored_orphan_cleanup_ids(data: Mapping[str, object]) -> set[str]:
+    """Return previously cleared legacy statistic IDs."""
+    raw_ids = data.get(LEGACY_ORPHAN_CLEANUP_KEY, [])
+    if not isinstance(raw_ids, (list, tuple)):
+        return set()
+    return {
+        statistic_id
+        for statistic_id in raw_ids
+        if isinstance(statistic_id, str)
+    }
+
+
+async def _async_recorder_legacy_statistic_ids(
+    hass: HomeAssistant,
+) -> set[str]:
+    """Discover pre-marker statistics that config-entry state cannot name."""
+    from homeassistant.components.recorder.statistics import (
+        async_list_statistic_ids,
+    )
+
+    metadata = await async_list_statistic_ids(hass, None)
+    statistic_ids: set[str] = set()
+    for item in metadata:
+        statistic_id = item.get("statistic_id")
+        if (
+            item.get("source") == DOMAIN
+            and isinstance(statistic_id, str)
+            and _is_unscoped_legacy_statistic_id(statistic_id)
+        ):
+            statistic_ids.add(statistic_id)
+    return statistic_ids
+
+
+async def _async_clear_orphaned_legacy_statistics(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    history_state: Smart1HistoryState,
+    statistic_ids: set[str],
+) -> None:
+    """Delete shared statistics that the selected legacy owner cannot rebuild."""
+    if not statistic_ids:
+        return
+
+    # Import lazily so config-entry migration remains recorder-independent.
+    from homeassistant.components.recorder import get_instance
+
+    recorder = get_instance(hass)
+    if not await async_clear_statistics(recorder, statistic_ids):
+        _LOGGER.warning(
+            "Timed out while removing unscoped smart1 history statistics"
+        )
+        return
+
+    # A later options change may make the owner capable of rebuilding one of
+    # these IDs. Remove stale completion state so that change triggers a full
+    # backfill instead of treating the now-empty Recorder series as current.
+    history_state.forget_statistics(statistic_ids)
+    updated_data = dict(entry.data)
+    cleaned_ids = _stored_orphan_cleanup_ids(updated_data)
+    cleaned_ids.update(statistic_ids)
+    updated_data[LEGACY_ORPHAN_CLEANUP_KEY] = sorted(cleaned_ids)
+    hass.config_entries.async_update_entry(entry, data=updated_data)
+
+    _LOGGER.warning(
+        "Removed %d unscoped smart1 history statistics that cannot be "
+        "attributed to the selected legacy installation",
+        len(statistic_ids),
     )
 
 
@@ -195,6 +321,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     history_importers = []
+    managed_legacy_statistic_ids: set[str] = set()
     if discovery_result.has_pv:
         pv_power_point = next(
             (
@@ -206,16 +333,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ),
             None,
         )
-        history_importers.append(
-            Smart1PvHistoryImporter(
-                hass,
-                api,
-                pv_power_point,
-                statistics_namespace=statistics_namespace,
-                history_state=history_state,
-                force_initial_rebuild=force_legacy_history_rebuild,
-            )
+        pv_importer = Smart1PvHistoryImporter(
+            hass,
+            api,
+            pv_power_point,
+            statistics_namespace=statistics_namespace,
+            history_state=history_state,
+            force_initial_rebuild=force_legacy_history_rebuild,
         )
+        history_importers.append(pv_importer)
+        if not statistics_namespace:
+            managed_legacy_statistic_ids.add(pv_importer.statistic_id)
 
     points_by_id = {point.id: point for point in devices}
     selected_roles = entry.options.get("energy_roles", {})
@@ -245,23 +373,79 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_initial_rebuild=force_legacy_history_rebuild,
             )
         )
+        if not statistics_namespace:
+            managed_legacy_statistic_ids.update(
+                statistic_id_for_role(role_key, point.id)
+                for role_key, point in role_points.items()
+            )
+
+    legacy_cleanup_required = (
+        force_legacy_history_rebuild and not statistics_namespace
+    )
 
     if history_importers:
         hass.data[DOMAIN][entry.entry_id]["history_importers"] = history_importers
 
-        async def _async_refresh_history(_now=None) -> None:
-            for history_importer in history_importers:
-                await history_importer.async_import()
+    async def _async_refresh_history(_now=None) -> None:
+        for history_importer in history_importers:
+            await history_importer.async_import()
 
-        async def _async_refresh_current_day(_now=None) -> None:
-            for history_importer in history_importers:
-                await history_importer.async_import(1, repair=False)
+    async def _async_refresh_current_day(_now=None) -> None:
+        for history_importer in history_importers:
+            await history_importer.async_import(1, repair=False)
 
+    async def _async_initial_history_import() -> None:
+        if legacy_cleanup_required:
+            candidate_ids = _legacy_statistic_ids(
+                list(hass.config_entries.async_entries(DOMAIN))
+            )
+            recorder_ids: set[str] = set()
+            try:
+                recorder_ids = await _async_recorder_legacy_statistic_ids(
+                    hass
+                )
+            except Exception as err:  # noqa: BLE001
+                # Cleanup is best effort and must never prevent live sensors
+                # from loading. A later reload retries the metadata scan.
+                _LOGGER.warning(
+                    "Unable to inspect unscoped smart1 history statistics "
+                    "(%s)",
+                    type(err).__name__,
+                )
+            candidate_ids.update(recorder_ids)
+
+            cleaned_ids = _stored_orphan_cleanup_ids(entry.data)
+            raw_versions = entry.data.get(HISTORY_SCHEMA_VERSIONS_KEY, {})
+            rebuilt_ids = (
+                set(raw_versions).intersection(cleaned_ids)
+                if isinstance(raw_versions, Mapping)
+                else set()
+            )
+            # Recorder metadata is authoritative for whether a previously
+            # cleared ID is still empty. This also rearms cleanup when a
+            # cancelled rebuild queued rows before persisting schema state.
+            still_clean_ids = cleaned_ids - rebuilt_ids - recorder_ids
+            orphaned_legacy_statistic_ids = (
+                candidate_ids
+                - managed_legacy_statistic_ids
+                - still_clean_ids
+            )
+            await _async_clear_orphaned_legacy_statistics(
+                hass,
+                entry,
+                history_state,
+                orphaned_legacy_statistic_ids,
+            )
+        await _async_refresh_history()
+
+    if history_importers or legacy_cleanup_required:
         entry.async_create_background_task(
             hass,
-            _async_refresh_history(),
+            _async_initial_history_import(),
             "smart1 EMS history import",
         )
+
+    if history_importers:
         entry.async_on_unload(
             async_track_time_interval(
                 hass,

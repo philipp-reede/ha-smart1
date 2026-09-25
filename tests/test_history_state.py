@@ -124,6 +124,44 @@ class Smart1HistoryStateTest(unittest.TestCase):
         self.assertTrue(state.is_current_schema("smart1_ems:pv", 2))
         self.assertEqual(len(manager.calls), 4)
 
+    def test_forgetting_statistics_prevents_completion_state_resurrection(
+        self,
+    ) -> None:
+        removed_id = "smart1_ems:grid_import_deadbeef"
+        retained_id = "smart1_ems:pv_production"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(
+            data={
+                HISTORY_SCHEMA_VERSIONS_KEY: {
+                    removed_id: 1,
+                    retained_id: 4,
+                },
+                HISTORY_DATA_PRESENCE_KEY: {
+                    removed_id: {"1": False},
+                    retained_id: {"4": True},
+                },
+            }
+        )
+        state = Smart1HistoryState(hass, entry)
+
+        state.forget_statistics({removed_id})
+        state.mark_complete("smart1_ems:battery_charge_cafebabe", 1, has_data=True)
+
+        self.assertNotIn(
+            removed_id,
+            entry.data[HISTORY_SCHEMA_VERSIONS_KEY],
+        )
+        self.assertNotIn(
+            removed_id,
+            entry.data[HISTORY_DATA_PRESENCE_KEY],
+        )
+        self.assertEqual(
+            entry.data[HISTORY_SCHEMA_VERSIONS_KEY][retained_id],
+            4,
+        )
+        self.assertEqual(len(manager.calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

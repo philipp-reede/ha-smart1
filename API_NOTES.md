@@ -170,6 +170,21 @@ Before deriving non-PV energy, diagnostics compare one completed day of the
 Detailed W samples are integrated in UTC using the trapezoidal rule. Intervals
 longer than 15 minutes are skipped so missing data is never bridged.
 
+The API document does not define CSV row order and its examples use local
+timestamps without an explicit UTC offset or daylight-saving-time fold marker.
+Offset-aware timestamps are therefore used exactly. When a naive timestamp
+occurs twice during the autumn clock change, the integration retains both
+observed profiles and assigns their values to the two UTC hours using a
+deterministic minimum-variation path plus the nearest samples outside the
+repeated hour. This is order-independent and avoids averaging the two profiles,
+but a naive response whose two profiles are intrinsically indistinguishable
+cannot be resolved from the documented fields alone. In particular, an exact
+duplicate cannot be distinguished from identical values in both folds when a
+counterpart is missing. A common response-wide duplication factor is removed
+when at least two non-ambiguous timestamps establish it; remaining row
+multiplicity is treated as fold evidence once the repeated hour is otherwise
+established.
+
 The diagnostic result exposes only coverage, sample and gap counts, and the
 relative percentage difference. It excludes the linear ID, timestamps, raw
 power, derived kWh and reference kWh. A difference up to 5% is classified as
@@ -199,6 +214,11 @@ five-minute power values. This is deliberately opt-in:
   creates a new statistic instead of combining incompatible histories.
 - The initial import covers 365 days; the latest three days are refreshed
   every six hours.
+- Detected legacy or non-monotonic statistics are repaired by upserting the
+  supported window. Valid older rows and successful no-data dates are retained;
+  a successful empty repair is marked complete so it is not repeated every six
+  hours. A destructive clear is reserved for an explicit multi-installation
+  legacy migration and is accepted only after Recorder confirms completion.
 
 These values are estimates derived from power samples, not native smart1
 meter totals. Missing coverage can therefore make them lower than the actual
@@ -221,6 +241,9 @@ requests the day endpoint once per date when importing history.
 - A zero-valued local-midnight bucket replaces the former single daily bucket
   during migration under the unchanged statistic ID.
 - Missing dates remain unknown and are not converted to zero production.
+- A daily-to-hourly schema repair continues its cumulative sum from the newest
+  Recorder row before the 365-day window, preserving monotonicity when older
+  statistics remain stored.
 - The import runs in the background and is stored as external Home Assistant
   long-term statistics under `smart1_ems:pv_production`.
 
