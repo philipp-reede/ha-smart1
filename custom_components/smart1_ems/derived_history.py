@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 from math import fsum
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientError
 
@@ -41,9 +41,15 @@ from .history_state import (
     DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION,
     DERIVED_HISTORY_SCHEMA_VERSION,
     Smart1HistoryState,
+    recorded_source_time_zone,
+    source_time_zone_requires_audit,
+    source_time_zone_requires_rebuild,
 )
 from .point import Smart1Point
-from .power_integration import integrate_power_rows
+from .power_integration import (
+    integrate_power_samples,
+    normalize_power_rows,
+)
 from .recorder_helpers import (
     async_clear_statistics,
     async_wait_for_recorder_commit,
@@ -107,6 +113,28 @@ def _utc_hours_overlapping_local_dates(
     return result
 
 
+def _local_dates_with_interval_energy(
+    start: datetime,
+    end: datetime,
+    local_tz: ZoneInfo,
+) -> set[date]:
+    """Return local dates intersected by a positive-duration interval."""
+    utc_start = start.astimezone(timezone.utc)
+    utc_end = end.astimezone(timezone.utc)
+    if utc_end <= utc_start:
+        return set()
+
+    result: set[date] = set()
+    target_date = utc_start.astimezone(local_tz).date()
+    final_date = utc_end.astimezone(local_tz).date()
+    while target_date <= final_date:
+        day_start, day_end = _local_day_bounds_utc(target_date, local_tz)
+        if max(utc_start, day_start) < min(utc_end, day_end):
+            result.add(target_date)
+        target_date += timedelta(days=1)
+    return result
+
+
 def _boundary_context_dates(
     target_date: date,
     local_tz: ZoneInfo,
@@ -124,38 +152,88 @@ def _boundary_context_dates(
 def incomplete_boundary_hours(
     records: list[Mapping[str, Any]],
     source_days: set[date],
+    completed_boundary_dates: set[date],
     start_date: date,
     end_date: date,
     local_tz: ZoneInfo,
 ) -> set[datetime]:
-    """Return stored UTC buckets with only one fresh local-day fragment."""
+    """Return stored UTC buckets without a fresh cross-midnight interval."""
     existing_hours = {_statistics_start(record) for record in records}
     result: set[datetime] = set()
     boundary_date = start_date
     # Check the opening boundary of every requested day and the closing
-    # boundary after the final day. Either side can share one UTC bucket with
-    # an adjacent local date in fractional-offset zones.
+    # boundary after the final day. Fractional-offset zones share the UTC
+    # bucket containing local midnight. In whole-hour zones the cross-day
+    # interval belongs to the preceding UTC bucket instead.
     while boundary_date <= end_date + timedelta(days=1):
         boundary_start, _boundary_end = _local_day_bounds_utc(
             boundary_date,
             local_tz,
         )
-        if (
+        fractional_boundary = (
             boundary_start.minute
             or boundary_start.second
             or boundary_start.microsecond
-        ):
-            left_has_data = boundary_date - timedelta(days=1) in source_days
-            right_has_data = boundary_date in source_days
+        )
+        has_fresh_data = (
+            boundary_date - timedelta(days=1) in source_days
+            or boundary_date in source_days
+        )
+        if fractional_boundary:
             boundary_hour = boundary_start.replace(
                 minute=0,
                 second=0,
                 microsecond=0,
             )
-            if left_has_data != right_has_data and boundary_hour in existing_hours:
-                result.add(boundary_hour)
+        else:
+            boundary_hour = boundary_start - timedelta(hours=1)
+        if (
+            has_fresh_data
+            and boundary_date not in completed_boundary_dates
+            and boundary_hour in existing_hours
+        ):
+            result.add(boundary_hour)
         boundary_date += timedelta(days=1)
     return result
+
+
+def missing_whole_hour_boundary_context(
+    records: list[Mapping[str, Any]],
+    source_days: set[date],
+    completed_boundary_dates: set[date],
+    start_date: date,
+    end_date: date,
+    local_tz: ZoneInfo,
+) -> bool:
+    """Return whether stored neighbouring data lacks fresh retry context."""
+    existing_dates = {
+        _statistics_start(record).astimezone(local_tz).date()
+        for record in records
+        if record.get("state") is not None
+    }
+    target_date = start_date
+    while target_date <= end_date:
+        day_start, _day_end = _local_day_bounds_utc(target_date, local_tz)
+        if (
+            target_date in source_days
+            and day_start.minute == 0
+            and day_start.second == 0
+            and day_start.microsecond == 0
+            and (
+                (
+                    target_date not in completed_boundary_dates
+                    and target_date - timedelta(days=1) in existing_dates
+                )
+                or (
+                    target_date + timedelta(days=1)
+                    not in completed_boundary_dates
+                    and target_date + timedelta(days=1) in existing_dates
+                )
+            )
+        ):
+            return True
+        target_date += timedelta(days=1)
+    return False
 
 
 def _uses_fractional_utc_offset(
@@ -413,6 +491,7 @@ def merge_hourly_energy(
     *,
     replacement_dates: set[date] | None = None,
     preserve_hours: set[datetime] | None = None,
+    records_tz: ZoneInfo | None = None,
 ) -> list[tuple[datetime, float]]:
     """Replace fetched local days while preserving temporarily missing days.
 
@@ -433,10 +512,17 @@ def merge_hourly_energy(
         replacement_dates = {
             start.astimezone(local_tz).date() for start in fetched_by_hour
         }
+    records_tz = records_tz or local_tz
     replacement_hours = _utc_hours_overlapping_local_dates(
         replacement_dates,
         local_tz,
-    ) - preserve_hours
+    )
+    if records_tz != local_tz:
+        replacement_hours |= _utc_hours_overlapping_local_dates(
+            replacement_dates,
+            records_tz,
+        )
+    replacement_hours -= preserve_hours
 
     for record in records:
         energy_kwh = record.get("state")
@@ -444,11 +530,22 @@ def merge_hourly_energy(
             continue
 
         start = _statistics_start(record)
-        if _hour_overlaps_local_date_range(
-            start,
-            start_date,
-            end_date,
-            local_tz,
+        if (
+            _hour_overlaps_local_date_range(
+                start,
+                start_date,
+                end_date,
+                local_tz,
+            )
+            or (
+                records_tz != local_tz
+                and _hour_overlaps_local_date_range(
+                    start,
+                    start_date,
+                    end_date,
+                    records_tz,
+                )
+            )
         ):
             energy_by_hour[start] = (
                 0.0
@@ -630,6 +727,7 @@ class Smart1DerivedEnergyImporter:
         nonempty_days_by_role: Mapping[str, set[date]] | None = None,
         retried_days: Mapping[str, date] | None = None,
         today: date | None = None,
+        source_time_zone: str | None = None,
     ) -> set[str]:
         """Verify queued derived imports and complete only persisted roles."""
         if not role_keys or not self.history_state:
@@ -695,6 +793,7 @@ class Smart1DerivedEnergyImporter:
                     else None
                 ),
                 checked_on=(today if retried_day is not None else None),
+                source_time_zone=source_time_zone,
             )
             if not marked:
                 marked = bool(
@@ -717,6 +816,14 @@ class Smart1DerivedEnergyImporter:
                             or date.min
                         )
                         >= checked_through
+                    )
+                    and (
+                        source_time_zone is None
+                        or not source_time_zone_requires_audit(
+                            self.history_state,
+                            statistic_ids[role_key],
+                            source_time_zone,
+                        )
                     )
                 )
             return role_key, marked
@@ -742,6 +849,7 @@ class Smart1DerivedEnergyImporter:
         nonempty_days_by_role: Mapping[str, set[date]] | None = None,
         retried_days: Mapping[str, date] | None = None,
         today: date | None = None,
+        source_time_zone: str | None = None,
     ) -> None:
         """Finalize replacements after a delayed clear callback."""
         persisted_roles = await self._async_confirm_statistics_persistence(
@@ -756,6 +864,7 @@ class Smart1DerivedEnergyImporter:
             nonempty_days_by_role,
             retried_days,
             today,
+            source_time_zone,
         )
         if persistence_generation != self._persistence_generation:
             return
@@ -813,16 +922,23 @@ class Smart1DerivedEnergyImporter:
         bool,
         date | None,
         dict[str, set[date]],
+        dict[str, set[date]],
     ]:
         """Fetch local days and integrate complete UTC boundary buckets.
 
-        A fractional UTC offset places local midnight inside a UTC hour. The
-        preceding local day is therefore required to complete the first
-        bucket. A single-day retry also loads the following day so its final
-        boundary bucket cannot overwrite a stored neighbouring fragment.
+        Adjacent responses are stitched with one carried sample so the
+        five-minute interval across local midnight is retained without keeping
+        a supported year's raw rows in memory. A fractional-offset zone loads
+        the preceding local day to complete the first shared UTC bucket. A
+        single-day retry loads both adjacent days in every time zone so its
+        opening and closing intervals can be rebuilt.
         """
         hourly_energy = {role_key: [] for role_key in self.role_points}
         nonempty_days = {role_key: set() for role_key in self.role_points}
+        completed_boundary_dates = {
+            role_key: set() for role_key in self.role_points
+        }
+        carry_samples: dict[str, tuple[datetime, float]] = {}
         checked_through: date | None = None
         linear_ids = list(
             dict.fromkeys(point.id for point in self.role_points.values())
@@ -832,15 +948,20 @@ class Smart1DerivedEnergyImporter:
             start_date - timedelta(days=1),
             end_date + timedelta(days=1),
         )
+        # Fractional local midnight shares a UTC bucket with the preceding
+        # source day. A bounded single-day retry also needs that predecessor
+        # in every time zone: when D was previously empty, the final
+        # D-1 23:55-to-D 00:00 interval could not have been integrated.
+        # Ordinary whole-hour scans still start exactly at ``start_date``.
         target_date = (
             start_date - timedelta(days=1)
-            if fractional_offset
+            if fractional_offset or include_following_boundary
             else start_date
         )
-        fetch_end_date = (
-            end_date + timedelta(days=1)
-            if fractional_offset and include_following_boundary
-            else end_date
+        fetch_end_date = end_date + (
+            timedelta(days=1)
+            if include_following_boundary
+            else timedelta()
         )
 
         while target_date <= fetch_end_date:
@@ -869,16 +990,53 @@ class Smart1DerivedEnergyImporter:
                             False,
                             checked_through,
                             nonempty_days,
+                            completed_boundary_dates,
                         )
                     await asyncio.sleep(2**attempt)
 
             for role_key, point in self.role_points.items():
-                integration = integrate_power_rows(rows, point.id, local_tz)
+                samples = normalize_power_rows(rows, point.id, local_tz)
+                samples = tuple(
+                    sample
+                    for sample in samples
+                    if sample[0].astimezone(local_tz).date() == target_date
+                )
+                if not samples:
+                    continue
+
+                integration = integrate_power_samples(samples)
                 if integration.integrated_intervals:
                     nonempty_days[role_key].add(target_date)
                     hourly_energy[role_key].extend(
                         integration.hourly_energy_kwh
                     )
+
+                carry = carry_samples.get(role_key)
+                if carry is not None:
+                    boundary_integration = integrate_power_samples(
+                        (carry, samples[0])
+                    )
+                    if boundary_integration.integrated_intervals:
+                        carry_date = carry[0].astimezone(local_tz).date()
+                        sample_date = samples[0][0].astimezone(local_tz).date()
+                        if carry_date != sample_date:
+                            # Store the right-hand local date as the identity
+                            # of this exact cross-midnight boundary. Day-level
+                            # data presence cannot prove that the carry pair
+                            # itself was within the permitted gap.
+                            completed_boundary_dates[role_key].add(sample_date)
+                        nonempty_days[role_key].update(
+                            _local_dates_with_interval_energy(
+                                carry[0],
+                                samples[0][0],
+                                local_tz,
+                            )
+                        )
+                        hourly_energy[role_key].extend(
+                            boundary_integration.hourly_energy_kwh
+                        )
+
+                carry_samples[role_key] = samples[-1]
 
             if start_date <= target_date <= end_date:
                 checked_through = target_date
@@ -886,7 +1044,13 @@ class Smart1DerivedEnergyImporter:
 
         for role_key, energy in hourly_energy.items():
             hourly_energy[role_key] = normalize_hourly_energy(energy)
-        return hourly_energy, True, checked_through, nonempty_days
+        return (
+            hourly_energy,
+            True,
+            checked_through,
+            nonempty_days,
+            completed_boundary_dates,
+        )
 
     async def async_import(
         self,
@@ -911,7 +1075,8 @@ class Smart1DerivedEnergyImporter:
             self._last_result = "running"
             self._last_mode = "history_repair" if repair else "current_day"
             self._last_fetch_completed = None
-            local_tz = ZoneInfo(self.hass.config.time_zone)
+            source_time_zone = self.hass.config.time_zone
+            local_tz = ZoneInfo(source_time_zone)
             today = datetime.now(local_tz).date()
             statistic_ids = {
                 role_key: statistic_id_for_role(
@@ -921,15 +1086,20 @@ class Smart1DerivedEnergyImporter:
                 )
                 for role_key, point in self.role_points.items()
             }
-            required_schema_version = (
-                DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION
-                if _uses_fractional_utc_offset(
-                    local_tz,
-                    today - timedelta(days=HISTORY_DAYS - 1),
-                    today,
+            records_tz_by_role: dict[str, ZoneInfo] = {}
+            for role_key, statistic_id in statistic_ids.items():
+                recorded_time_zone = recorded_source_time_zone(
+                    self.history_state,
+                    statistic_id,
+                    source_time_zone,
                 )
-                else DERIVED_HISTORY_SCHEMA_VERSION
-            )
+                try:
+                    records_tz_by_role[role_key] = ZoneInfo(
+                        recorded_time_zone
+                    )
+                except ZoneInfoNotFoundError:
+                    records_tz_by_role[role_key] = local_tz
+            required_schema_version = DERIVED_HISTORY_SCHEMA_VERSION
             # A later Home Assistant time-zone change must never downgrade a
             # statistic that already completed the boundary-safe schema.
             persisted_schema_version = max(
@@ -995,26 +1165,43 @@ class Smart1DerivedEnergyImporter:
                     == 0
                 )
             }
-            # Only fractional-offset installations need the v3 migration.
-            # Do not adopt v2 rows as generic valid hourly storage: every
-            # affected role must be replaced over the supported window once.
+            # Version 4 integrates the 23:55-to-00:00 interval across portal
+            # day responses. Every older schema needs one supported-window
+            # upsert, including whole-hour time zones and the fractional v3.
             schema_upgrade_roles = {
                 role_key
                 for role_key, statistic_id in statistic_ids.items()
-                if self._schema_version
-                >= DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION
-                and (
-                    not self.history_state
-                    or self.history_state.current_schema_version(statistic_id)
-                    < DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION
+                if self.history_state
+                and self.history_state.current_schema_version(statistic_id)
+                    < DERIVED_HISTORY_SCHEMA_VERSION
+            }
+            time_zone_rebuild_roles = {
+                role_key
+                for role_key, statistic_id in statistic_ids.items()
+                if self.history_state
+                and source_time_zone_requires_rebuild(
+                    self.history_state,
+                    statistic_id,
+                    source_time_zone,
                 )
             }
-            # The fractional-offset migration is a full supported-window
-            # upsert, not a whole-ID clear: Recorder history older than the API
-            # window must remain intact.
+            time_zone_audit_roles = {
+                role_key
+                for role_key, statistic_id in statistic_ids.items()
+                if self.history_state
+                and source_time_zone_requires_audit(
+                    self.history_state,
+                    statistic_id,
+                    source_time_zone,
+                )
+            }
+            # Schema and time-zone migrations are supported-window upserts,
+            # not whole-ID clears: older Recorder history remains intact.
             forced_rebuild_roles = legacy_forced_rebuild_roles
             detected_rebuild_roles |= (
-                forced_rebuild_roles | schema_upgrade_roles
+                forced_rebuild_roles
+                | schema_upgrade_roles
+                | time_zone_audit_roles
             )
             self._detected_rebuild_roles = tuple(
                 sorted(detected_rebuild_roles)
@@ -1075,6 +1262,7 @@ class Smart1DerivedEnergyImporter:
                     ),
                     force_supported_rebuild=(
                         role_key in schema_upgrade_roles
+                        or role_key in time_zone_audit_roles
                     ),
                     required_start=required_starts[role_key],
                 )
@@ -1120,7 +1308,18 @@ class Smart1DerivedEnergyImporter:
                 if len(main_checked) > 1
                 else {}
             )
+            main_completed_boundary_dates = (
+                {
+                    role_key: set(boundary_dates)
+                    for role_key, boundary_dates in main_checked[2].items()
+                }
+                if len(main_checked) > 2
+                else {}
+            )
             preserve_boundary_hours_by_role: dict[str, set[datetime]] = {
+                role_key: set() for role_key in refreshable_roles
+            }
+            retry_opening_hours_by_role: dict[str, set[datetime]] = {
                 role_key: set() for role_key in refreshable_roles
             }
             fractional_window = _uses_fractional_utc_offset(
@@ -1128,28 +1327,30 @@ class Smart1DerivedEnergyImporter:
                 main_start_date - timedelta(days=1),
                 today,
             )
-            if fractional_window:
-                for role_key in refreshable_roles:
-                    source_days = main_nonempty_source_days.get(role_key)
-                    if source_days is None:
-                        continue
-                    role_start = windows[role_key][0]
-                    # One successful-empty API source day leaves its shared
-                    # bucket partial. Preserve an existing combined value in
-                    # either direction instead of overwriting it.
-                    preserve_boundary_hours_by_role[role_key].update(
-                        incomplete_boundary_hours(
-                            records_by_role[role_key],
-                            source_days,
-                            role_start,
-                            # The regular refresh has no D+1 context for
-                            # ``today``. Do not preserve tomorrow's shared
-                            # boundary: its current-day fragment is still
-                            # expected to advance during late-evening polls.
-                            today - timedelta(days=1),
-                            local_tz,
-                        )
+            for role_key in refreshable_roles:
+                replacement_days = main_nonempty_source_days.get(role_key)
+                if replacement_days is None:
+                    continue
+                role_start = windows[role_key][0]
+                # One successful-empty API source day leaves its neighbouring
+                # bucket partial. Fractional-offset zones share the UTC hour
+                # containing local midnight; whole-hour zones lose the final
+                # five-minute interval in the preceding hour. Preserve an
+                # existing complete value in either direction.
+                preserve_boundary_hours_by_role[role_key].update(
+                    incomplete_boundary_hours(
+                        records_by_role[role_key],
+                        replacement_days,
+                        main_completed_boundary_dates.get(role_key, set()),
+                        role_start,
+                        # The regular refresh has no D+1 context for
+                        # ``today``. Do not preserve tomorrow's shared
+                        # boundary: its current-day fragment is still
+                        # expected to advance during late-evening polls.
+                        today - timedelta(days=1),
+                        local_tz,
                     )
+                )
             main_fetched_by_role = {
                 role_key: list(fetched_energy)
                 for role_key, fetched_energy in fetched_by_role.items()
@@ -1172,7 +1373,7 @@ class Smart1DerivedEnergyImporter:
                         retry_completed,
                         *retry_details,
                     ) = retry_fetch_result
-                    retry_source_days = (
+                    retry_nonempty_days_by_role = (
                         {
                             role_key: set(source_days)
                             for role_key, source_days in retry_details[1].items()
@@ -1180,17 +1381,29 @@ class Smart1DerivedEnergyImporter:
                         if len(retry_details) > 1
                         else {}
                     )
+                    retry_completed_boundaries_by_role = (
+                        {
+                            role_key: set(boundary_dates)
+                            for role_key, boundary_dates in (
+                                retry_details[2].items()
+                            )
+                        }
+                        if len(retry_details) > 2
+                        else {}
+                    )
                     if not retry_completed:
                         continue
                     for role_key, role_retry_date in retry_dates.items():
                         if role_retry_date != retry_date:
                             continue
-                        role_source_days = retry_source_days.get(role_key)
-                        has_source_provenance = role_source_days is not None
-                        if role_source_days is None:
+                        role_nonempty_days = retry_nonempty_days_by_role.get(
+                            role_key
+                        )
+                        has_source_provenance = role_nonempty_days is not None
+                        if role_nonempty_days is None:
                             # Compatibility for tests and third-party wrappers
                             # mocking the legacy three-item fetch result.
-                            role_source_days = {
+                            role_nonempty_days = {
                                 retry_date
                                 for start, _energy in (
                                     retry_fetched_by_role[role_key]
@@ -1198,13 +1411,19 @@ class Smart1DerivedEnergyImporter:
                                 if start.astimezone(local_tz).date()
                                 == retry_date
                             }
+                        completed_boundary_dates = (
+                            retry_completed_boundaries_by_role.get(
+                                role_key, set()
+                            )
+                        )
                         completed_retry_roles.add(role_key)
                         retry_nonempty_source_days[role_key].update(
-                            role_source_days
+                            role_nonempty_days
                         )
-                        if retry_date not in role_source_days:
+                        if retry_date not in role_nonempty_days:
                             continue
 
+                        retry_preserve_hours: set[datetime] = set()
                         if has_source_provenance:
                             # Sparse consumers commonly have legitimately
                             # empty neighbouring days. Their absence must not
@@ -1213,7 +1432,8 @@ class Smart1DerivedEnergyImporter:
                             # local-day fragments are not both available.
                             retry_preserve_hours = incomplete_boundary_hours(
                                 records_by_role[role_key],
-                                role_source_days,
+                                role_nonempty_days,
+                                completed_boundary_dates,
                                 retry_date,
                                 retry_date,
                                 local_tz,
@@ -1221,15 +1441,47 @@ class Smart1DerivedEnergyImporter:
                             preserve_boundary_hours_by_role[role_key].update(
                                 retry_preserve_hours
                             )
-                            if retry_preserve_hours:
+                            boundary_context_missing = (
+                                missing_whole_hour_boundary_context(
+                                    records_by_role[role_key],
+                                    role_nonempty_days,
+                                    completed_boundary_dates,
+                                    retry_date,
+                                    retry_date,
+                                    local_tz,
+                                )
+                            )
+                            if (
+                                retry_preserve_hours
+                                or boundary_context_missing
+                            ):
                                 # The safe interior buckets can be imported,
                                 # but keep D in the bounded retry rotation
                                 # until both boundary fragments can be rebuilt.
                                 partial_retry_roles.add(role_key)
 
-                        # The context fetch contains D-1/D/D+1. Replace only
-                        # buckets intersecting D, but use their fully combined
-                        # values so an upsert cannot discard either neighbour.
+                            day_start, _day_end = _local_day_bounds_utc(
+                                retry_date,
+                                local_tz,
+                            )
+                            if (
+                                day_start.minute == 0
+                                and day_start.second == 0
+                                and day_start.microsecond == 0
+                                and retry_date in completed_boundary_dates
+                            ):
+                                # In a whole-hour zone the opening interval
+                                # belongs to the final UTC bucket of D-1, so
+                                # it does not geometrically overlap D. Keep it
+                                # explicitly when both source days are known.
+                                retry_opening_hours_by_role[role_key].add(
+                                    day_start - timedelta(hours=1)
+                                )
+
+                        # The context fetch contains D-1/D/D+1. Replace
+                        # buckets intersecting D plus the whole-hour opening
+                        # bucket from D-1, using fully combined values so an
+                        # upsert cannot discard either neighbour.
                         retry_buckets = {
                             start: energy
                             for start, energy in normalize_hourly_energy(
@@ -1241,7 +1493,21 @@ class Smart1DerivedEnergyImporter:
                                 retry_date,
                                 local_tz,
                             )
+                            or start
+                            in retry_opening_hours_by_role[role_key]
                         }
+                        if has_source_provenance:
+                            # The main scan can preserve a boundary solely
+                            # because it starts after D. A context-rich retry
+                            # for D supersedes that earlier uncertainty for
+                            # every bucket it rebuilt completely. Retain only
+                            # boundaries that the retry itself still proved
+                            # incomplete.
+                            preserve_boundary_hours_by_role[
+                                role_key
+                            ].difference_update(
+                                set(retry_buckets) - retry_preserve_hours
+                            )
                         combined = dict(
                             normalize_hourly_energy(
                                 fetched_by_role[role_key]
@@ -1269,6 +1535,7 @@ class Smart1DerivedEnergyImporter:
             }
             empty_days_by_role: dict[str, set[date]] = {}
             nonempty_days_by_role: dict[str, set[date]] = {}
+            checked_days_by_role: dict[str, set[date]] = {}
             nonempty_retry_roles: set[str] = set()
             for role_key in refreshable_roles:
                 source_days = main_nonempty_source_days.get(role_key)
@@ -1292,6 +1559,7 @@ class Smart1DerivedEnergyImporter:
                     if role_key in coverage_targets
                     else set()
                 )
+                checked_days_by_role[role_key] = checked_days
                 retry_nonempty_days = (
                     {retry_dates[role_key]}
                     if role_key in completed_retry_roles
@@ -1303,13 +1571,19 @@ class Smart1DerivedEnergyImporter:
                 if role_key in completed_retry_roles:
                     if retry_nonempty_days:
                         nonempty_retry_roles.add(role_key)
+                        retry_required_start = retry_dates[role_key]
+                        if retry_opening_hours_by_role[role_key]:
+                            retry_required_start = max(
+                                retry_required_start - timedelta(days=1),
+                                today - timedelta(days=HISTORY_DAYS - 1),
+                            )
                         windows[role_key] = determine_hourly_import_window(
                             records_by_role[role_key],
                             today,
                             local_tz,
                             refresh_days,
                             initial_backfill_complete=True,
-                            required_start=retry_dates[role_key],
+                            required_start=retry_required_start,
                         )
                         if role_key in partial_retry_roles:
                             empty_days.add(retry_dates[role_key])
@@ -1369,12 +1643,23 @@ class Smart1DerivedEnergyImporter:
                         role_start,
                         today,
                         local_tz,
-                        replacement_dates=nonempty_days_by_role[role_key],
-                        preserve_hours=(
-                            preserve_boundary_hours_by_role[role_key]
+                        replacement_dates=(
+                            checked_days_by_role[role_key]
+                            if role_key in time_zone_rebuild_roles
+                            and fetch_completed
+                            else nonempty_days_by_role[role_key]
                         ),
+                        preserve_hours=(
+                            set()
+                            if role_key in time_zone_rebuild_roles
+                            else preserve_boundary_hours_by_role[role_key]
+                        ),
+                        records_tz=records_tz_by_role[role_key],
                     )
-                if fractional_window and role_key not in forced_rebuild_roles:
+                if (
+                    fractional_window
+                    or role_key in time_zone_rebuild_roles
+                ) and role_key not in forced_rebuild_roles:
                     baseline_sum = baseline_before_first_hour(
                         records_by_role[role_key],
                         hourly_energy,
@@ -1459,6 +1744,7 @@ class Smart1DerivedEnergyImporter:
                                 today - timedelta(days=HISTORY_DAYS - 1)
                             ),
                             checked_on=None,
+                            source_time_zone=source_time_zone,
                         )
 
                 late_rebuild_roles = (
@@ -1493,6 +1779,7 @@ class Smart1DerivedEnergyImporter:
                             nonempty_days_by_role,
                             retry_dates,
                             today,
+                            source_time_zone,
                         )
                     )
 
@@ -1568,6 +1855,7 @@ class Smart1DerivedEnergyImporter:
                             and required_starts[role_key] is not None
                         )
                         or role_key in completed_retry_roles
+                        or role_key in time_zone_audit_roles
                     )
                 }
 
@@ -1591,6 +1879,7 @@ class Smart1DerivedEnergyImporter:
                     nonempty_days_by_role,
                     retry_dates,
                     today,
+                    source_time_zone,
                 )
             )
 
@@ -1632,6 +1921,7 @@ class Smart1DerivedEnergyImporter:
                         if role_key in completed_retry_roles
                         else None
                     ),
+                    source_time_zone=source_time_zone,
                 )
             for role_key in roles_with_statistics - completed_roles:
                 if self._data_presence(statistic_ids[role_key]) is not True:
@@ -1672,6 +1962,7 @@ class Smart1DerivedEnergyImporter:
                             if role_key in completed_retry_roles
                             else None
                         ),
+                        source_time_zone=source_time_zone,
                     )
 
             if pending_marker_roles:
@@ -1711,6 +2002,7 @@ class Smart1DerivedEnergyImporter:
                             nonempty_days_by_role,
                             retry_dates,
                             today,
+                            source_time_zone,
                         )
                     )
                 return

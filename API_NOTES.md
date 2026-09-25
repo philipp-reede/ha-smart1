@@ -241,18 +241,32 @@ five-minute power values. This is deliberately opt-in:
 - Detected points are suggested, but the user must save the selection before
   any derived statistic is created.
 - Each date is fetched once for all selected points and integrated with the
-  calibrated trapezoidal method.
+  calibrated trapezoidal method. The final normalized sample of one response
+  is carried into the next response, preserving the five-minute interval over
+  local midnight without retaining a full year's raw rows in memory. The same
+  15-minute gap guard still rejects a discontinuous boundary.
 - In time zones whose UTC offset is not a whole number of hours, local midnight
   splits a UTC-hour bucket across two API dates. Those fragments are combined
   before import. A single-day retry loads its adjacent context dates and only
-  replaces a shared boundary bucket when both fragments are known; otherwise
-  an existing combined bucket is preserved and the retry stays in the bounded
-  rotation. The dedicated fractional-offset schema performs one supported-
-  window repair without clearing older Recorder history. Whole-hour zones keep
-  the preceding schema and do not repeat that annual import.
+  replaces a shared boundary bucket when the exact cross-midnight sample pair
+  passes the gap guard; day-level data elsewhere cannot stand in for that
+  evidence. Otherwise an existing combined bucket is preserved and the retry
+  stays in the bounded rotation. Whole-hour refreshes use the same protection
+  for their preceding 23:00 bucket when the next response is empty or its
+  first sample is too far away. A later context-rich retry supersedes that
+  provisional protection only for the exact boundary buckets it reconstructs
+  completely. A sample exactly at midnight proves energy only for the interval
+  that ends there; it does not make the new source day replaceable by itself. The
+  continuous-integration schema performs one supported-window
+  repair for every derived statistic, including the earlier fractional-offset
+  representation, without clearing older Recorder history.
 - Gaps longer than 15 minutes are excluded rather than estimated.
 - Statistics use kWh and a source-specific ID. Changing the selected source
   creates a new statistic instead of combining incompatible histories.
+- The Home Assistant time zone used to map portal dates is stored per
+  statistic. If it changes, the integration performs one non-destructive
+  supported-window rebuild using both the old and new UTC boundaries; the
+  marker advances only after Recorder readback succeeds.
 - The initial import covers 365 days; the latest three days are refreshed
   every six hours.
 - Per-role coverage advances through the contiguous successfully checked
@@ -341,7 +355,12 @@ requests the day endpoint once per date when importing history.
 - If a stored hourly PV profile exists while its live power point is temporarily
   unavailable, the importer retains profile semantics from schema state and row
   shape. A newly returned exact daily total replaces that local day; a
-  successful `missing_ok` day keeps its existing aligned hourly buckets. Legacy
+  successful `missing_ok` day normally keeps its existing aligned hourly
+  buckets. If the source time zone changes during the profile-to-daily switch,
+  those buckets, including pre-window rows that must survive a whole-statistic
+  rebuild, are first aggregated by their old source date and remapped to the
+  new zone's daily bucket. This retains their energy without leaving an
+  old-zone UTC tail. A later bounded retry replaces that bucket in place. Legacy
   positive singleton fallbacks are remapped only when no hourly profile exists
   for that day, while artificial off-hour zero buckets are discarded.
 - Historical schema markers 2 and 3 can describe more than one representation

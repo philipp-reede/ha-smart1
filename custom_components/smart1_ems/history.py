@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
 import logging
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import ClientError
 
@@ -32,7 +32,10 @@ from .history_state import (
     PV_DAILY_HISTORY_SCHEMA_VERSION,
     PV_HISTORY_SCHEMA_VERSION,
     Smart1HistoryState,
+    recorded_source_time_zone,
     scoped_statistic_id,
+    source_time_zone_requires_audit,
+    source_time_zone_requires_rebuild,
 )
 from .point import Smart1Point
 from .power_integration import PowerIntegrationResult, integrate_power_rows
@@ -285,12 +288,15 @@ def _merge_profile_history_for_daily_rebuild(
     start_date: date,
     end_date: date,
     local_tz: ZoneInfo,
+    *,
+    records_tz: ZoneInfo | None = None,
 ) -> list[tuple[datetime, float]]:
     """Merge a stored hourly profile into a daily-only replacement batch."""
+    records_tz = records_tz or local_tz
     fetched_by_date = dict(fetched_energy)
     records_by_date: dict[date, list[Mapping[str, Any]]] = {}
     for record in records:
-        target_date = _statistics_date(record, local_tz)
+        target_date = _statistics_date(record, records_tz)
         if start_date <= target_date <= end_date:
             records_by_date.setdefault(target_date, []).append(record)
 
@@ -305,6 +311,25 @@ def _merge_profile_history_for_daily_rebuild(
         day_records = records_by_date.get(target_date, [])
         aligned_records = _utc_hour_aligned_records(day_records)
         if aligned_records:
+            if records_tz != local_tz:
+                # A profile-to-daily rebuild clears the complete statistic.
+                # When the source zone changed at the same time, carrying
+                # these old UTC profile buckets into the replacement would
+                # make their source day change as soon as the new fingerprint
+                # is committed. Preserve the measured total instead and map
+                # it to the daily bucket of the same old source date in the
+                # new zone. A later empty-day retry then replaces this exact
+                # bucket without leaving an old-zone UTC tail behind.
+                energy_kwh = sum(
+                    float(state)
+                    for record in aligned_records
+                    if (state := record.get("state")) is not None
+                )
+                if energy_kwh > 1e-9:
+                    energy_by_hour[
+                        _first_utc_hour_in_local_day(target_date, local_tz)
+                    ] = energy_kwh
+                continue
             for record in aligned_records:
                 state = record.get("state")
                 if state is not None:
@@ -332,18 +357,24 @@ def _merge_profile_history_for_daily_rebuild(
 def _preserved_pv_statistics_before(
     records: list[Mapping[str, Any]],
     start_date: date,
-    local_tz: ZoneInfo,
+    records_tz: ZoneInfo,
+    *,
+    target_tz: ZoneInfo | None = None,
 ) -> list[StatisticData]:
     """Keep profile rows preceding the supported rebuild window.
 
     Whole-UTC-hour rows are genuine hourly profile buckets and remain
     unchanged.  A lone positive local-midnight row is a legacy exact-daily
     fallback; remap it only when its local day has no hourly profile at all.
+    When the source time zone changed, aggregate each old source day and map
+    its exact energy to the same calendar day in the new zone. This avoids
+    dropping the old-zone UTC tail when the complete statistic is cleared.
     """
+    target_tz = target_tz or records_tz
     preserved: dict[datetime, StatisticData] = {}
     records_by_date: dict[date, list[Mapping[str, Any]]] = {}
     for record in records:
-        target_date = _statistics_date(record, local_tz)
+        target_date = _statistics_date(record, records_tz)
         if target_date >= start_date:
             continue
         records_by_date.setdefault(target_date, []).append(record)
@@ -355,10 +386,40 @@ def _preserved_pv_statistics_before(
         if remap_singleton:
             candidates = day_records
 
+        if target_tz != records_tz and candidates:
+            numeric_records: list[tuple[Mapping[str, Any], float, float]] = []
+            for record in candidates:
+                state = record.get("state")
+                cumulative_sum = record.get("sum")
+                if state is None or cumulative_sum is None:
+                    continue
+                try:
+                    numeric_records.append(
+                        (record, float(state), float(cumulative_sum))
+                    )
+                except (TypeError, ValueError):
+                    continue
+            if not numeric_records:
+                continue
+            energy_kwh = sum(item[1] for item in numeric_records)
+            if remap_singleton and energy_kwh <= 1e-9:
+                continue
+            last_record = max(
+                numeric_records,
+                key=lambda item: _statistics_start(item[0]),
+            )
+            start = _first_utc_hour_in_local_day(target_date, target_tz)
+            preserved[start] = StatisticData(
+                start=start,
+                state=energy_kwh,
+                sum=last_record[2],
+            )
+            continue
+
         for record in candidates:
             original_start = _statistics_start(record)
             start = (
-                _first_utc_hour_in_local_day(target_date, local_tz)
+                _first_utc_hour_in_local_day(target_date, records_tz)
                 if remap_singleton
                 else original_start
             )
@@ -384,13 +445,16 @@ def _preserved_pv_statistics_before(
 def _preserved_daily_pv_statistics_before(
     records: list[Mapping[str, Any]],
     start_date: date,
-    local_tz: ZoneInfo,
+    records_tz: ZoneInfo,
+    *,
+    target_tz: ZoneInfo | None = None,
 ) -> list[StatisticData]:
     """Remap exact daily PV rows preceding the supported rebuild window."""
+    target_tz = target_tz or records_tz
     preserved: dict[date, tuple[datetime, StatisticData]] = {}
     for record in records:
         original_start = _statistics_start(record)
-        target_date = original_start.astimezone(local_tz).date()
+        target_date = original_start.astimezone(records_tz).date()
         if target_date >= start_date:
             continue
         state = record.get("state")
@@ -414,7 +478,7 @@ def _preserved_daily_pv_statistics_before(
         preserved[target_date] = (
             original_start,
             StatisticData(
-                start=_first_utc_hour_in_local_day(target_date, local_tz),
+                start=_first_utc_hour_in_local_day(target_date, target_tz),
                 state=energy_kwh,
                 sum=sum_kwh,
             ),
@@ -433,9 +497,11 @@ def determine_hourly_pv_import_window(
     force_initial_rebuild: bool = False,
     force_full_refresh: bool = False,
     required_start: date | None = None,
+    records_tz: ZoneInfo | None = None,
 ) -> tuple[date, float]:
     """Return the hourly PV refresh window and preceding cumulative sum."""
     full_start = today - timedelta(days=HISTORY_DAYS - 1)
+    records_tz = records_tz or local_tz
     if force_initial_rebuild:
         return full_start, 0.0
     if not records:
@@ -445,13 +511,13 @@ def determine_hourly_pv_import_window(
         return full_start, 0.0
     if force_full_refresh or (
         not initial_backfill_complete
-        and needs_hourly_pv_migration(records, local_tz)
+        and needs_hourly_pv_migration(records, records_tz)
     ):
         preceding = [
             record
             for record in records
             if record.get("sum") is not None
-            and _statistics_date(record, local_tz) < full_start
+            and _statistics_date(record, records_tz) < full_start
         ]
         if preceding:
             baseline = max(preceding, key=_statistics_start)
@@ -462,7 +528,7 @@ def determine_hourly_pv_import_window(
             for record in records
             if record.get("sum") is not None
             and record.get("state") is not None
-            and _statistics_date(record, local_tz) == full_start
+            and _statistics_date(record, records_tz) == full_start
         ]
         if boundary:
             first = min(boundary, key=_statistics_start)
@@ -524,6 +590,9 @@ def merge_hourly_pv_energy(
     start_date: date,
     end_date: date,
     local_tz: ZoneInfo,
+    *,
+    replacement_dates: set[date] | None = None,
+    records_tz: ZoneInfo | None = None,
 ) -> list[tuple[datetime, float]]:
     """Replace fetched local days while preserving temporarily missing days.
 
@@ -536,26 +605,68 @@ def merge_hourly_pv_energy(
         start.astimezone(timezone.utc): energy_kwh
         for start, energy_kwh in fetched_energy
     }
-    replacement_dates = {
-        start.astimezone(local_tz).date() for start in fetched_by_hour
-    }
+    dates_to_replace = (
+        replacement_dates
+        if replacement_dates is not None
+        else {
+            start.astimezone(local_tz).date() for start in fetched_by_hour
+        }
+    )
+    records_tz = records_tz or local_tz
 
     for record in records:
         energy_kwh = record.get("state")
         if energy_kwh is None:
             continue
         start = _statistics_start(record)
-        target_date = start.astimezone(local_tz).date()
-        if start_date <= target_date <= end_date:
+        old_target_date = start.astimezone(records_tz).date()
+        new_target_date = start.astimezone(local_tz).date()
+        if (
+            start_date <= old_target_date <= end_date
+            or start_date <= new_target_date <= end_date
+        ):
             energy_by_hour[start] = (
                 0.0
-                if target_date in replacement_dates
+                if (
+                    old_target_date in dates_to_replace
+                    or new_target_date in dates_to_replace
+                )
                 and start not in fetched_by_hour
                 else float(energy_kwh)
             )
 
     energy_by_hour.update(fetched_by_hour)
     return sorted(energy_by_hour.items())
+
+
+def _baseline_before_first_pv_hour(
+    records: list[Mapping[str, Any]],
+    hourly_energy: list[tuple[datetime, float]],
+    fallback: float,
+) -> float:
+    """Return the cumulative sum immediately before a remapped UTC seam."""
+    if not hourly_energy:
+        return fallback
+    first_start = min(start.astimezone(timezone.utc) for start, _ in hourly_energy)
+    same_hour = [
+        record
+        for record in records
+        if record.get("sum") is not None
+        and record.get("state") is not None
+        and _statistics_start(record) == first_start
+    ]
+    if same_hour:
+        first = same_hour[0]
+        return float(first["sum"]) - float(first["state"])
+    preceding = [
+        record
+        for record in records
+        if record.get("sum") is not None
+        and _statistics_start(record) < first_start
+    ]
+    if preceding:
+        return float(max(preceding, key=_statistics_start)["sum"])
+    return fallback
 
 
 def build_hourly_pv_statistics(
@@ -735,6 +846,7 @@ class Smart1PvHistoryImporter:
         nonempty_days: set[date] | None = None,
         retried_day: date | None = None,
         today: date | None = None,
+        source_time_zone: str | None = None,
     ) -> bool:
         """Verify a queued PV import before completing its schema marker."""
         if not self.history_state:
@@ -780,6 +892,7 @@ class Smart1PvHistoryImporter:
                 else None
             ),
             checked_on=(today if retried_day is not None else None),
+            source_time_zone=source_time_zone,
         )
         if not marked:
             # A newer run may have completed the same marker while this late
@@ -806,6 +919,14 @@ class Smart1PvHistoryImporter:
                     )
                     >= checked_through
                 )
+                and (
+                    source_time_zone is None
+                    or not source_time_zone_requires_audit(
+                        self.history_state,
+                        self.statistic_id,
+                        source_time_zone,
+                    )
+                )
             )
         if marked:
             self._migration_required = False
@@ -822,6 +943,7 @@ class Smart1PvHistoryImporter:
         nonempty_days: set[date] | None = None,
         retried_day: date | None = None,
         today: date | None = None,
+        source_time_zone: str | None = None,
     ) -> None:
         """Finalize a replacement whose clear callback arrived late."""
         confirmed = await self._async_confirm_statistics_persistence(
@@ -834,6 +956,7 @@ class Smart1PvHistoryImporter:
             nonempty_days,
             retried_day,
             today,
+            source_time_zone,
         )
         if persistence_generation != self._persistence_generation:
             return
@@ -1038,7 +1161,8 @@ class Smart1PvHistoryImporter:
             persistence_generation = self._persistence_generation
             self._last_result = "running"
             self._last_refresh_days = refresh_days
-            local_tz = ZoneInfo(self.hass.config.time_zone)
+            source_time_zone = self.hass.config.time_zone
+            local_tz = ZoneInfo(source_time_zone)
             today = datetime.now(local_tz).date()
             record_count = (
                 PV_STATISTICS_LOOKBACK
@@ -1066,6 +1190,31 @@ class Smart1PvHistoryImporter:
                 self.history_state.current_schema_version(self.statistic_id)
                 if self.history_state
                 else 0
+            )
+            recorded_time_zone = recorded_source_time_zone(
+                self.history_state,
+                self.statistic_id,
+                source_time_zone,
+            )
+            try:
+                records_tz = ZoneInfo(recorded_time_zone)
+            except ZoneInfoNotFoundError:
+                records_tz = local_tz
+            time_zone_rebuild_required = bool(
+                self.history_state
+                and source_time_zone_requires_rebuild(
+                    self.history_state,
+                    self.statistic_id,
+                    source_time_zone,
+                )
+            )
+            time_zone_audit_required = bool(
+                self.history_state
+                and source_time_zone_requires_audit(
+                    self.history_state,
+                    self.statistic_id,
+                    source_time_zone,
+                )
             )
             forced_initial_rebuild = (
                 self.force_initial_rebuild
@@ -1098,7 +1247,7 @@ class Smart1PvHistoryImporter:
                 and not current_daily_schema
                 and (
                     switching_from_hourly_schema
-                    or _has_hourly_profile_semantics(records, local_tz)
+                    or _has_hourly_profile_semantics(records, records_tz)
                 )
             )
             profile_schema_rebuild_required = stored_profile_semantics
@@ -1124,6 +1273,7 @@ class Smart1PvHistoryImporter:
             self._migration_required = (
                 alignment_rebuild_required
                 or profile_schema_rebuild_required
+                or time_zone_audit_required
                 or (
                     not initial_backfill_complete
                     and (
@@ -1134,7 +1284,7 @@ class Smart1PvHistoryImporter:
                                 switching_from_daily_schema
                                 or needs_hourly_pv_migration(
                                     records,
-                                    local_tz,
+                                    records_tz,
                                 )
                             )
                         )
@@ -1178,8 +1328,10 @@ class Smart1PvHistoryImporter:
                     switching_from_daily_schema
                     or alignment_rebuild_required
                     or profile_schema_rebuild_required
+                    or time_zone_audit_required
                 ),
                 required_start=required_start,
+                records_tz=records_tz,
             )
             main_start_date = start_date
             retry_date = (
@@ -1189,7 +1341,10 @@ class Smart1PvHistoryImporter:
                 )
                 if repair
                 and initial_backfill_complete
-                and not destructive_rebuild_required
+                and not (
+                    destructive_rebuild_required
+                    or time_zone_audit_required
+                )
                 else None
             )
 
@@ -1253,6 +1408,7 @@ class Smart1PvHistoryImporter:
                             profile_merge_start,
                             today,
                             local_tz,
+                            records_tz=records_tz,
                         )
                     )
                 else:
@@ -1270,7 +1426,7 @@ class Smart1PvHistoryImporter:
                             fetched_daily_energy,
                             start_date,
                             today,
-                            local_tz,
+                            records_tz,
                         )
                     fetched_hourly_energy = [
                         (
@@ -1293,7 +1449,7 @@ class Smart1PvHistoryImporter:
                 )
             else:
                 exact_fallback = (
-                    _daily_exact_fallback(records, local_tz)
+                    _daily_exact_fallback(records, records_tz)
                     if self._migration_required
                     and not forced_initial_rebuild
                     else {}
@@ -1390,6 +1546,7 @@ class Smart1PvHistoryImporter:
                             initial_backfill_complete
                         ),
                         required_start=nonempty_retry_date,
+                        records_tz=records_tz,
                     )
                 )
 
@@ -1406,6 +1563,7 @@ class Smart1PvHistoryImporter:
                 not initial_backfill_complete
                 or alignment_rebuild_required
                 or profile_schema_rebuild_required
+                or time_zone_audit_required
             ) and not fetch_completed:
                 _LOGGER.warning(
                     "Deferring initial smart1 PV history import because "
@@ -1428,6 +1586,28 @@ class Smart1PvHistoryImporter:
                     start_date,
                     today,
                     local_tz,
+                    replacement_dates=(
+                        main_checked_days
+                        if time_zone_rebuild_required and fetch_completed
+                        else None
+                    ),
+                    records_tz=records_tz,
+                )
+            if (
+                time_zone_audit_required
+                and not forced_initial_rebuild
+                and not destructive_rebuild_required
+            ):
+                # A large offset change can place the beginning of the new
+                # source day before the end of the old source day in UTC. An
+                # older installation without a fingerprint can also have a
+                # sparse first in-window row. Start from the cumulative value
+                # immediately before the earliest preserved/replaced bucket so
+                # neither case double-counts or introduces a falling sum.
+                baseline_sum = _baseline_before_first_pv_hour(
+                    records,
+                    hourly_energy,
+                    baseline_sum,
                 )
             if (
                 alignment_rebuild_required
@@ -1437,14 +1617,16 @@ class Smart1PvHistoryImporter:
                     _preserved_daily_pv_statistics_before(
                         records,
                         start_date,
-                        local_tz,
+                        records_tz,
+                        target_tz=local_tz,
                     )
                     if self.pv_power_point is None
                     and not stored_profile_semantics
                     else _preserved_pv_statistics_before(
                         records,
                         start_date,
-                        local_tz,
+                        records_tz,
+                        target_tz=local_tz,
                     )
                 )
             else:
@@ -1467,10 +1649,10 @@ class Smart1PvHistoryImporter:
                 alignment_rebuild_required
                 or profile_schema_rebuild_required
             ):
-                statistics = [
-                    *preserved_statistics,
-                    *statistics,
-                ]
+                statistics = sorted(
+                    [*preserved_statistics, *statistics],
+                    key=lambda item: item["start"],
+                )
             metadata = StatisticMetaData(
                 mean_type=StatisticMeanType.NONE,
                 has_sum=True,
@@ -1523,6 +1705,7 @@ class Smart1PvHistoryImporter:
                                 today - timedelta(days=HISTORY_DAYS - 1)
                             ),
                             checked_on=None,
+                            source_time_zone=source_time_zone,
                         )
                     ):
                         self._migration_required = False
@@ -1541,6 +1724,7 @@ class Smart1PvHistoryImporter:
                             persisted_nonempty_days,
                             retry_date if retry_completed else None,
                             today,
+                            source_time_zone,
                         )
                     )
 
@@ -1590,6 +1774,7 @@ class Smart1PvHistoryImporter:
                         checked_on=(
                             today if retry_completed else None
                         ),
+                        source_time_zone=source_time_zone,
                     )
                     if committed:
                         self._migration_required = False
@@ -1611,6 +1796,7 @@ class Smart1PvHistoryImporter:
                     )
                     or self._data_presence() is not True
                     or alignment_rebuild_required
+                    or time_zone_audit_required
                     or (
                         main_checked_through is not None
                         and repair
@@ -1631,6 +1817,7 @@ class Smart1PvHistoryImporter:
                         persisted_nonempty_days,
                         retry_date if retry_completed else None,
                         today,
+                        source_time_zone,
                     )
                 )
                 if not persistence_confirmed:
@@ -1651,6 +1838,7 @@ class Smart1PvHistoryImporter:
                                 persisted_nonempty_days,
                                 retry_date if retry_completed else None,
                                 today,
+                                source_time_zone,
                             )
                         )
                     return

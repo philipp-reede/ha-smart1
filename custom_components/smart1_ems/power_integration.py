@@ -511,13 +511,12 @@ def _resolve_utc_timestamps(
     return tuple(candidates[0] for candidates in candidate_rows)
 
 
-def integrate_power_rows(
+def normalize_power_rows(
     rows: list[Mapping[str, Any]],
     linear_id: str,
     local_tz: ZoneInfo,
-) -> PowerIntegrationResult:
-    """Integrate one point's W samples into kWh using the trapezoidal rule."""
-    samples: dict[datetime, float] = {}
+) -> tuple[tuple[datetime, float], ...]:
+    """Return one point's deduplicated power samples on a UTC timeline."""
     parsed_samples: list[tuple[datetime, float]] = []
 
     for row in rows:
@@ -536,6 +535,7 @@ def integrate_power_rows(
         [timestamp for timestamp, _value in parsed_samples],
         local_tz,
     )
+    samples: dict[datetime, float] = {}
     for timestamp, (_parsed_timestamp, value) in zip(
         resolved_timestamps,
         parsed_samples,
@@ -543,7 +543,20 @@ def integrate_power_rows(
     ):
         samples[timestamp] = value
 
-    ordered_samples = sorted(samples.items())
+    return tuple(sorted(samples.items()))
+
+
+def integrate_power_samples(
+    samples: list[tuple[datetime, float]]
+    | tuple[tuple[datetime, float], ...],
+) -> PowerIntegrationResult:
+    """Integrate normalized UTC power samples using the trapezoidal rule."""
+    samples_by_time = {
+        timestamp.astimezone(timezone.utc): value
+        for timestamp, value in samples
+    }
+
+    ordered_samples = sorted(samples_by_time.items())
     energy_kwh = 0.0
     hourly_energy_kwh: defaultdict[datetime, float] = defaultdict(float)
     integrated_intervals = 0
@@ -606,4 +619,15 @@ def integrate_power_rows(
         integrated_intervals=integrated_intervals,
         skipped_gaps=skipped_gaps,
         covered_seconds=covered_seconds,
+    )
+
+
+def integrate_power_rows(
+    rows: list[Mapping[str, Any]],
+    linear_id: str,
+    local_tz: ZoneInfo,
+) -> PowerIntegrationResult:
+    """Integrate one point's W rows into kWh using the trapezoidal rule."""
+    return integrate_power_samples(
+        normalize_power_rows(rows, linear_id, local_tz)
     )

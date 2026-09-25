@@ -14,6 +14,7 @@ HISTORY_COVERAGE_KEY = "history_coverage"
 HISTORY_EMPTY_DAYS_KEY = "history_empty_days"
 HISTORY_EMPTY_RETRY_CURSORS_KEY = "history_empty_retry_cursors"
 HISTORY_EMPTY_RETRY_RUNS_KEY = "history_empty_retry_runs"
+HISTORY_SOURCE_TIME_ZONES_KEY = "history_source_time_zones"
 LEGACY_HISTORY_REBUILD_KEY = "legacy_history_rebuild"
 
 # Version 6 gives current daily-only history an unambiguous completion marker.
@@ -26,14 +27,14 @@ PV_DAILY_HISTORY_SCHEMA_VERSION = 6
 # hourly history can be adopted as current storage; independent coverage may
 # still request one supported-window audit.
 PV_HISTORY_SCHEMA_VERSION = 5
-# Apply the same one-time recovery to derived statistics.  A genuinely empty
-# role is marked complete at version 2 after the successful 365-day check, so
-# it returns to the normal short refresh window instead of rebuilding forever.
-DERIVED_HISTORY_SCHEMA_VERSION = 2
-# Version 3 is required only in time zones whose UTC offset is not a whole
-# number of hours.  Older imports could overwrite the two local-day fragments
-# that share one UTC-hour bucket there.  Whole-hour zones keep version 2 and do
-# not incur an unrelated 365-day rebuild.
+# Version 4 joins samples across portal-day boundaries before integration.
+# Earlier versions dropped the final 23:55-to-00:00 interval of every day.
+# Every installation therefore receives one non-destructive supported-window
+# rebuild; older Recorder history remains untouched.
+DERIVED_HISTORY_SCHEMA_VERSION = 4
+# Version 3 was the fractional-offset-only boundary-fragment repair marker.
+# Keep it named for upgrade-state compatibility; version 4 supersedes it in
+# every time zone.
 DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION = 3
 
 
@@ -48,6 +49,44 @@ def statistics_namespace_for_device(device_id: str) -> str:
 def scoped_statistic_id(statistic_id: str, namespace: str) -> str:
     """Scope a statistic ID while preserving legacy IDs for their owner."""
     return statistic_id if not namespace else f"{statistic_id}_{namespace}"
+
+
+def source_time_zone_requires_rebuild(
+    history_state: Any,
+    statistic_id: str,
+    source_time_zone: str,
+) -> bool:
+    """Return whether stored history was mapped in a known different zone.
+
+    The defensive attribute lookup keeps lightweight third-party and test
+    state implementations compatible. An absent fingerprint is deliberately
+    not treated as a proven mapping change: it needs a conservative audit that
+    preserves successful-empty days rather than destructive tombstones.
+    """
+    getter = getattr(history_state, "source_time_zone", None)
+    stored = getter(statistic_id) if callable(getter) else None
+    return bool(stored is not None and stored != source_time_zone)
+
+
+def source_time_zone_requires_audit(
+    history_state: Any,
+    statistic_id: str,
+    source_time_zone: str,
+) -> bool:
+    """Return whether a fingerprint is missing or differs from the source."""
+    getter = getattr(history_state, "source_time_zone", None)
+    return bool(callable(getter) and getter(statistic_id) != source_time_zone)
+
+
+def recorded_source_time_zone(
+    history_state: Any,
+    statistic_id: str,
+    default: str,
+) -> str:
+    """Return the stored row-mapping zone or a safe current-zone fallback."""
+    getter = getattr(history_state, "source_time_zone", None)
+    stored = getter(statistic_id) if callable(getter) else None
+    return stored if isinstance(stored, str) and stored else default
 
 
 class Smart1HistoryState:
@@ -159,6 +198,17 @@ class Smart1HistoryState:
                 }
                 if parsed_versions:
                     self._empty_retry_runs[statistic_id] = parsed_versions
+        raw_source_time_zones = entry.data.get(
+            HISTORY_SOURCE_TIME_ZONES_KEY,
+            {},
+        )
+        self._source_time_zones = {
+            str(statistic_id): time_zone
+            for statistic_id, time_zone in raw_source_time_zones.items()
+            if isinstance(statistic_id, str)
+            and isinstance(time_zone, str)
+            and time_zone
+        } if isinstance(raw_source_time_zones, dict) else {}
 
     @staticmethod
     def _parse_date(value: str) -> date | None:
@@ -237,6 +287,9 @@ class Smart1HistoryState:
                     )
                     if schema_versions
                 },
+                HISTORY_SOURCE_TIME_ZONES_KEY: dict(
+                    self._source_time_zones
+                ),
             },
         )
 
@@ -280,6 +333,10 @@ class Smart1HistoryState:
             return None
         return self._coverage.get(statistic_id, {}).get(schema_version)
 
+    def source_time_zone(self, statistic_id: str) -> str | None:
+        """Return the time zone used to map one statistic's source rows."""
+        return self._source_time_zones.get(statistic_id)
+
     def forget_statistics(self, statistic_ids: set[str]) -> None:
         """Discard completion state for Recorder statistics being removed."""
         if not self._active:
@@ -301,6 +358,10 @@ class Smart1HistoryState:
             )
             changed = (
                 self._empty_retry_runs.pop(statistic_id, None) is not None
+                or changed
+            )
+            changed = (
+                self._source_time_zones.pop(statistic_id, None) is not None
                 or changed
             )
         if not changed:
@@ -509,6 +570,7 @@ class Smart1HistoryState:
         oldest_supported: date,
         retried_day: date | None = None,
         checked_on: date | None = None,
+        source_time_zone: str | None = None,
     ) -> bool:
         """Atomically commit schema, coverage and scan-result state."""
         if (
@@ -544,6 +606,13 @@ class Smart1HistoryState:
             retried_day=retried_day,
             checked_on=checked_on,
         ) or changed
+        if (
+            source_time_zone is not None
+            and self._source_time_zones.get(statistic_id)
+            != source_time_zone
+        ):
+            self._source_time_zones[statistic_id] = source_time_zone
+            changed = True
         if changed:
             self._persist()
         return True

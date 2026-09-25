@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.7.3] - 2026-09-25
 
 ### Fixed
 
@@ -11,10 +11,24 @@ All notable changes to this project are documented in this file.
   Single-day retries now fetch both boundary context days, preserve ambiguous
   existing boundary buckets when one context day is empty, and use exact API
   source-day evidence for the bounded retry queue
-- Rebuild affected fractional-offset derived statistics once under a dedicated
-  schema without clearing valid history older than the 365-day API window;
-  whole-hour time zones retain their existing schema and avoid an unrelated
-  annual backfill
+- Carry the final normalized power sample into the following API day so the
+  five-minute interval over local midnight is included exactly once, while
+  retaining the 15-minute gap limit and constant-memory processing
+- Keep recovered whole-hour days in the bounded retry rotation when stored
+  neighbouring history lacks a successfully integrated cross-midnight sample
+  pair, even if both days contain data elsewhere, and do not treat a lone
+  midnight endpoint as energy belonging to the new source day. Fully rebuilt
+  retry boundaries now override an earlier provisional main-window guard
+- Rebuild all derived statistics once under the continuous-integration schema,
+  including the earlier fractional-offset representation, without clearing
+  valid history older than the 365-day API window
+- Persist the source time zone per statistic and remap the supported PV and
+  derived-energy window once after a Home Assistant time-zone change. The old
+  and new UTC seams are replaced together, while pre-window history and its
+  cumulative baseline remain intact. Simultaneous hourly-to-daily PV switches
+  aggregate old profile days by their source date before remapping them to the
+  new zone. Destructive alignment repairs likewise remap every pre-window
+  daily row instead of trimming an overlapping old-zone UTC tail
 - Persist the latest contiguous successfully checked day for each photovoltaic
   and derived energy statistic, resume catch-up imports after longer outages,
   and perform one full supported-window validation for existing schema markers
@@ -105,6 +119,17 @@ All notable changes to this project are documented in this file.
   directions, cumulative-sum baselines, safe single-day retry context,
   Lord Howe's whole-to-half-hour transition and one-time fractional schema
   migration with an empty predecessor day
+- Cover continuous two-day integration with 576 samples and 575 intervals,
+  reversed daily rows, variable midnight power, rejected boundary gaps,
+  whole-hour opening/closing retry context, successful-empty next days,
+  cross-midnight gaps despite data elsewhere on both days, endpoint-only
+  provenance and split-versus-continuous DST profiles
+- Cover Kathmandu-to-Berlin and Berlin-to-Kathmandu history remapping for
+  hourly PV, daily PV and derived energy, including empty history, incomplete
+  fetches, Recorder readback failure, oldest-window tombstones and no-repeat
+  completion markers, plus overlapping UTC seams during destructive
+  profile-to-daily and alignment repairs and recovery of a temporarily empty
+  profile day after the combined time-zone and storage-mode migration
 - Cover persisted PV and derived-energy catch-up after a month-long gap,
   one-time repair of pre-coverage inner gaps, successful-prefix checkpointing
   after incomplete fetches, bounded round-robin retries of old no-data days,
