@@ -175,11 +175,12 @@ relative percentage difference. It excludes the linear ID, timestamps, raw
 power, derived kWh and reference kWh. A difference up to 5% is classified as
 `good`, up to 10% as `marginal`, and above 10% as `poor`.
 
-The real-installation calibration for the previous complete day contained
-288 samples and 287 integrated intervals, covering 1,435 minutes with no
-skipped gaps. The integrated result differed from the documented PV daily
-total by 0.43%, which supports using the same guarded integration for
-explicitly selected non-PV power points.
+Real-installation calibrations for the previous complete day contained 288
+samples and 287 integrated intervals, covering 1,435 minutes with no skipped
+gaps. An earlier run differed from the documented PV daily total by 0.43%; the
+latest `v0.7.0` reference test differed by 0.78%. Both results are classified
+as `good` and support using the same guarded integration for explicitly
+selected non-PV power points.
 
 ## Derived non-PV energy
 

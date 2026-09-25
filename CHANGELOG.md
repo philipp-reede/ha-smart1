@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Documentation
+
+- Record the successful in-place upgrade and real-world validation of smart1
+  EMS `v0.7.0` on Home Assistant OS `18.3`, Supervisor `2026.09.2` and Core
+  `2026.9.3`
+
 ## [0.7.0] - 2026-09-25
 
 ### Added

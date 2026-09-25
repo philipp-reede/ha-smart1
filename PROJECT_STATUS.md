@@ -104,13 +104,19 @@
 - CI also imports every integration module against pinned Home Assistant Core
   2026.9.3 on Python 3.14, while setup tests cover startup history import and
   the separate scheduled repair and current-day refresh paths
-- Version 0.6.6 was validated on the reference installation with Energy Hero
-  software 1.28.59, Home Assistant OS 18.3 and Core 2026.9.3. It started
-  without integration warnings, retained plausible device and entity
-  assignments, completed both history importers and showed no Energy Dashboard
-  anomalies. The known `via_device` removal scheduled for Home
-  Assistant 2027.8 is covered through `via_device_id` on supported versions,
-  with a compatibility path for Home Assistant 2026.7 and earlier
+- The reference installation was upgraded in place from version 0.6.6 to 0.7.0
+  with Energy Hero software 1.28.59, Home Assistant OS 18.3 and Core 2026.9.3.
+  Supervisor was version 2026.09.2. It started without integration warnings or
+  observed anomalies, retained 77 plausible measurement points and all seven
+  Energy Dashboard roles, completed both history importers and showed no Energy
+  Dashboard anomalies. Diagnostics also confirmed one inverter with two active
+  strings, two complete module fields and a gap-free 288-sample PV calibration
+  with a 0.78% difference. This supports a non-disruptive in-place upgrade.
+  Reauthentication was not exercised, and the redacted diagnostics do not
+  expose the config-entry unique ID or schema version; those cases remain
+  covered by automated tests. The known `via_device` removal scheduled for
+  Home Assistant 2027.8 is covered through `via_device_id` on supported
+  versions, with a compatibility path for Home Assistant 2026.7 and earlier
 - The integration is designed for the documented smart1 portal API generally;
   real-world hardware validation currently covers M-TEC Energy Hero EMS,
   Energy Heater, Energy Butler inverter/storage, M-TEC AP440 heat pump and a
