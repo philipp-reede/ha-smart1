@@ -257,6 +257,10 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
         )
         configured_roles = self._configured_energy_role_keys()
         recommendations = recommend_energy_roles(points)
+        candidates_by_role = {
+            role.key: energy_candidates(points, role)
+            for role in ENERGY_ROLES
+        }
         errors = {}
 
         if user_input is not None:
@@ -266,8 +270,17 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
                 if user_input.get(role.key)
             }
             selected_ids = list(selected_roles.values())
+            invalid_selection = any(
+                selected_id != current_roles.get(role_key)
+                and selected_id not in {
+                    point.id for point in candidates_by_role[role_key]
+                }
+                for role_key, selected_id in selected_roles.items()
+            )
             if len(selected_ids) != len(set(selected_ids)):
                 errors["base"] = "duplicate_energy_point"
+            elif invalid_selection:
+                errors["base"] = "invalid_energy_point"
             else:
                 new_options = dict(self.config_entry.options)
                 new_options[ENERGY_ROLES_OPTION] = selected_roles
@@ -278,7 +291,8 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
 
         schema = {}
         for role in ENERGY_ROLES:
-            candidates = energy_candidates(points, role)
+            candidates = candidates_by_role[role.key]
+            candidate_ids = {point.id for point in candidates}
             options = [SelectOptionDict(value="", label="—")]
             options.extend(
                 SelectOptionDict(
@@ -290,10 +304,22 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
             selected = current_roles.get(role.key, "")
             if not selected and role.key not in configured_roles:
                 selected = recommendations.get(role.key, "")
-            if selected and selected not in {
-                point.id for point in candidates
-            }:
-                selected = recommendations.get(role.key, "")
+            if selected and selected not in candidate_ids:
+                saved_point = next(
+                    (point for point in points if point.id == selected),
+                    None,
+                )
+                saved_label = (
+                    f"{saved_point.name} ({saved_point.hardware})"
+                    if saved_point is not None
+                    else selected
+                )
+                options.append(
+                    SelectOptionDict(
+                        value=selected,
+                        label=f"⚠ {saved_label}",
+                    )
+                )
             schema[
                 vol.Required(role.key, default=selected)
             ] = SelectSelector(

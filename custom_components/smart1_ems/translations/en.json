@@ -47,7 +47,7 @@
     "step": {
       "init": {
         "title": "Configure derived energy",
-        "description": "Select one power point for each energy role you want to enable. The suggested points match the detected installation. Leave a role set to — to disable it. Energy is derived from five-minute power data and imported as external statistics.",
+        "description": "Select one power point for each energy role you want to enable. The suggested points match the detected installation. A saved source marked with ⚠ is currently unavailable and remains selected until you explicitly replace or disable it. Leave a role set to — to disable it. Energy is derived from five-minute power data and imported as external statistics.",
         "data": {
           "grid_import": "Grid import",
           "grid_export": "Grid export",
@@ -60,7 +60,8 @@
       }
     },
     "error": {
-      "duplicate_energy_point": "Each measurement point can be assigned to only one energy role."
+      "duplicate_energy_point": "Each measurement point can be assigned to only one energy role.",
+      "invalid_energy_point": "Select an available measurement point or keep the previously saved source."
     },
     "abort": {
       "not_loaded": "The smart1 EMS entry is not loaded. Enable it or resolve its setup error before changing these options."

@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Combine derived-energy fragments from adjacent local API days before writing
+  their shared UTC-hour bucket in 15-, 30- and 45-minute-offset time zones.
+  Single-day retries now fetch both boundary context days, preserve ambiguous
+  existing boundary buckets when one context day is empty, and use exact API
+  source-day evidence for the bounded retry queue
+- Rebuild affected fractional-offset derived statistics once under a dedicated
+  schema without clearing valid history older than the 365-day API window;
+  whole-hour time zones retain their existing schema and avoid an unrelated
+  annual backfill
 - Persist the latest contiguous successfully checked day for each photovoltaic
   and derived energy statistic, resume catch-up imports after longer outages,
   and perform one full supported-window validation for existing schema markers
@@ -92,6 +101,10 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
+- Cover additive Kathmandu boundary fragments, both partial-boundary
+  directions, cumulative-sum baselines, safe single-day retry context,
+  Lord Howe's whole-to-half-hour transition and one-time fractional schema
+  migration with an empty predecessor day
 - Cover persisted PV and derived-energy catch-up after a month-long gap,
   one-time repair of pre-coverage inner gaps, successful-prefix checkpointing
   after incomplete fetches, bounded round-robin retries of old no-data days,
