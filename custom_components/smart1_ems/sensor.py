@@ -346,6 +346,50 @@ def _device_identifier(
     return (DOMAIN, f"{entry_id}:{device_category.value}")
 
 
+def _inverter_device_identifier(
+    entry_id: str,
+    inverter: Smart1Inverter,
+) -> tuple[str, str]:
+    """Return the stable device identifier for one physical inverter."""
+    return (DOMAIN, f"{entry_id}:inverter:{inverter.id}")
+
+
+def _remove_stale_inverter_devices(
+    device_registry,
+    entity_registry,
+    entry_id: str,
+    *,
+    expected_identifiers: set[tuple[str, str]],
+    discovery_authoritative: bool,
+) -> None:
+    """Remove physical inverter devices absent from authoritative discovery."""
+    if not discovery_authoritative:
+        return
+
+    identifier_prefix = f"{entry_id}:inverter:"
+    for registry_entry in dr.async_entries_for_config_entry(
+        device_registry,
+        entry_id,
+    ):
+        inverter_identifiers = {
+            identifier
+            for identifier in registry_entry.identifiers
+            if (
+                identifier[0] == DOMAIN
+                and isinstance(identifier[1], str)
+                and identifier[1].startswith(identifier_prefix)
+            )
+        }
+        if inverter_identifiers and inverter_identifiers.isdisjoint(
+            expected_identifiers
+        ) and not er.async_entries_for_device(
+            entity_registry,
+            registry_entry.id,
+            include_disabled_entities=True,
+        ):
+            device_registry.async_remove_device(registry_entry.id)
+
+
 def _pv_device_info(entry_id: str) -> dict:
     """Return device registry information for the installation PV system."""
     return {
@@ -400,18 +444,23 @@ async def async_setup_entry(hass, entry, async_add_entities):
         False,
     )
 
+    device_registry = dr.async_get(hass)
     ems_device_id = None
     if inverters:
         # Register the parent before its inverter children. Current Home
         # Assistant versions require its registry ID; older supported versions
         # still resolve the legacy identifier tuple.
-        ems_device_id = dr.async_get(hass).async_get_or_create(
+        ems_device_id = device_registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             **_ems_device_info(entry.entry_id),
         ).id
 
     entities = []
     expected_inverter_ids: set[str] = set()
+    expected_inverter_device_ids = {
+        _inverter_device_identifier(entry.entry_id, inverter)
+        for inverter in inverters
+    }
     expected_module_field_ids: set[str] = set()
     current_module_field_ids: set[str] = set()
     expected_bus_ids: set[str] = set()
@@ -547,6 +596,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
             module_field_discovery_authoritative
         ),
         bus_discovery_authoritative=bus_discovery_authoritative,
+    )
+    # Entity registry cleanup must precede device removal so Home Assistant
+    # never retains a config-entry-owned empty inverter after authoritative
+    # topology discovery reports that the physical device disappeared.
+    _remove_stale_inverter_devices(
+        device_registry,
+        entity_registry,
+        entry.entry_id,
+        expected_identifiers=expected_inverter_device_ids,
+        discovery_authoritative=inverter_discovery_authoritative,
     )
 
     async_add_entities(entities)
@@ -789,7 +848,7 @@ def _inverter_device_info(
 ) -> dict:
     """Return device registry information for one physical inverter."""
     device_info = {
-        "identifiers": {(DOMAIN, f"{entry_id}:inverter:{inverter.id}")},
+        "identifiers": {_inverter_device_identifier(entry_id, inverter)},
         "name": inverter.name
         or f"Smart1 Inverter B{inverter.bus} A{inverter.address}",
         "manufacturer": inverter.manufacturer or "smart1",

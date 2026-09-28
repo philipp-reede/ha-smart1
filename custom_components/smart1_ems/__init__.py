@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.storage import Store
 
 from .api import (
     Smart1Api,
@@ -45,6 +46,7 @@ TOPOLOGY_RETRY_INTERVAL = timedelta(minutes=15)
 TOPOLOGY_RECOVERY_CACHE_KEY = f"{DOMAIN}_topology_recovery"
 LEGACY_ORPHAN_CLEANUP_KEY = "legacy_orphan_cleanup_ids"
 PV_CAPABILITY_CONFIRMED_KEY = "pv_capability_confirmed"
+HISTORY_MIGRATION_STORE_VERSION = 1
 
 _INVERTER_ID_COLUMNS = {"Inverter Id", "InverterId", '"Inverter Id"'}
 _MODULE_FIELD_ID_COLUMNS = {
@@ -278,12 +280,17 @@ async def _async_clear_orphaned_legacy_statistics(
     cleanup_ids = set(statistic_ids)
     recorder = get_instance(hass)
 
-    def _invalidate_queued_statistics() -> None:
-        # Once Recorder accepted the clear it can no longer be cancelled.
-        # Invalidate completion state before the helper's first await so an
-        # options reload cannot select the role with a stale short-refresh
-        # marker while the clear is still waiting in Recorder's queue.
-        history_state.forget_statistics(cleanup_ids)
+    try:
+        # Invalidate and durably journal the removal before Recorder accepts
+        # the irreversible clear. An options reload can then never select the
+        # role with a stale short-refresh marker, even across a restart.
+        await history_state.async_forget_statistics(cleanup_ids)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning(
+            "Unable to persist smart1 orphan-history cleanup state (%s)",
+            type(err).__name__,
+        )
+        return
 
     def _record_completed_cleanup() -> None:
         # Read entry.data only when the callback runs. A delayed callback may
@@ -306,7 +313,6 @@ async def _async_clear_orphaned_legacy_statistics(
     if not await async_clear_statistics(
         recorder,
         cleanup_ids,
-        enqueue_followup=_invalidate_queued_statistics,
         on_done=_record_completed_cleanup,
     ):
         _LOGGER.warning(
@@ -322,7 +328,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     force_legacy_history_rebuild = (
         entry.data.get(LEGACY_HISTORY_REBUILD_KEY) is True
     )
-    history_state = Smart1HistoryState(hass, entry)
+    history_state = Smart1HistoryState(
+        hass,
+        entry,
+        durable_store=Store(
+            hass,
+            HISTORY_MIGRATION_STORE_VERSION,
+            f"{DOMAIN}.history_migrations.{entry.entry_id}",
+            private=True,
+            atomic_writes=True,
+        ),
+    )
+    # A source-time-zone migration journal must reach disk before Recorder
+    # receives replacement statistics. Config-entry writes are deliberately
+    # delayed by Home Assistant and therefore cannot provide that ordering on
+    # their own.
+    try:
+        await history_state.async_initialize()
+    except Exception as err:  # noqa: BLE001
+        # Do not start Recorder mutations without a readable, durable journal.
+        # A transient storage problem is retryable and must never expose API
+        # credentials through its original exception text.
+        raise ConfigEntryNotReady(
+            "Unable to initialize smart1 history migration state "
+            f"({type(err).__name__})"
+        ) from None
 
     try:
         devices = await api.get_linear_devices()

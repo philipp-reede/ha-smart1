@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from importlib.util import module_from_spec, spec_from_file_location
+import logging
 from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -19,6 +20,14 @@ SPEC.loader.exec_module(recorder_helpers)
 
 
 class Smart1RecorderHelpersTest(unittest.TestCase):
+    def test_persistence_budget_is_separate_from_clear_budget(self) -> None:
+        self.assertEqual(recorder_helpers.RECORDER_OPERATION_TIMEOUT, 10)
+        self.assertEqual(recorder_helpers.RECORDER_PERSISTENCE_TIMEOUT, 120)
+        self.assertGreater(
+            recorder_helpers.RECORDER_PERSISTENCE_TIMEOUT,
+            recorder_helpers.RECORDER_OPERATION_TIMEOUT,
+        )
+
     def test_statistics_persistence_requires_every_expected_value(self) -> None:
         first = datetime(2026, 8, 4, tzinfo=timezone.utc)
         second = datetime(2026, 8, 4, 1, tzinfo=timezone.utc)
@@ -57,16 +66,47 @@ class Smart1RecorderHelpersTest(unittest.TestCase):
             async_block_till_done=AsyncMock(side_effect=never_finishes)
         )
 
-        with patch.object(
-            recorder_helpers,
-            "RECORDER_OPERATION_TIMEOUT",
-            0.001,
+        with (
+            patch.object(
+                recorder_helpers,
+                "RECORDER_PERSISTENCE_TIMEOUT",
+                0.001,
+            ),
+            self.assertLogs(
+                recorder_helpers._LOGGER,
+                level=logging.DEBUG,
+            ) as captured,
         ):
             result = asyncio.run(
                 recorder_helpers.async_wait_for_recorder_commit(recorder)
             )
 
         self.assertFalse(result)
+        self.assertEqual(
+            [record.levelno for record in captured.records],
+            [logging.DEBUG],
+        )
+
+    def test_wait_for_recorder_commit_unexpected_error_remains_warning(
+        self,
+    ) -> None:
+        recorder = Mock(
+            async_block_till_done=AsyncMock(side_effect=RuntimeError)
+        )
+
+        with self.assertLogs(
+            recorder_helpers._LOGGER,
+            level=logging.WARNING,
+        ) as captured:
+            result = asyncio.run(
+                recorder_helpers.async_wait_for_recorder_commit(recorder)
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(
+            [record.levelno for record in captured.records],
+            [logging.WARNING],
+        )
 
     def test_wait_for_recorder_commit_propagates_cancellation(self) -> None:
         recorder = Mock(
@@ -122,7 +162,7 @@ class Smart1RecorderHelpersTest(unittest.TestCase):
 
         with patch.object(
             recorder_helpers,
-            "RECORDER_OPERATION_TIMEOUT",
+            "RECORDER_PERSISTENCE_TIMEOUT",
             0.001,
         ):
             self.assertFalse(
@@ -140,7 +180,7 @@ class Smart1RecorderHelpersTest(unittest.TestCase):
 
         with patch.object(
             recorder_helpers,
-            "RECORDER_OPERATION_TIMEOUT",
+            "RECORDER_PERSISTENCE_TIMEOUT",
             0.001,
         ):
             self.assertFalse(
@@ -151,6 +191,36 @@ class Smart1RecorderHelpersTest(unittest.TestCase):
                     )
                 )
             )
+
+    def test_statistics_readback_timeout_is_debug_not_warning(self) -> None:
+        start = datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+        async def never_returns():
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(
+                recorder_helpers,
+                "RECORDER_PERSISTENCE_TIMEOUT",
+                0.001,
+            ),
+            self.assertLogs(
+                recorder_helpers._LOGGER,
+                level=logging.DEBUG,
+            ) as captured,
+        ):
+            result = asyncio.run(
+                recorder_helpers.async_wait_for_statistics_readback(
+                    [{"start": start, "state": 1.0, "sum": 1.0}],
+                    never_returns,
+                )
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(
+            [record.levelno for record in captured.records],
+            [logging.DEBUG],
+        )
 
     def test_clear_statistics_waits_for_recorder_callback(self) -> None:
         def clear_statistics(statistic_ids, *, on_done) -> None:

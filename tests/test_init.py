@@ -140,6 +140,16 @@ class Smart1SetupTest(unittest.TestCase):
             def __init__(self, *args, **kwargs) -> None:
                 self.async_import = AsyncMock()
 
+        class FakeStore:
+            def __init__(self, *args, **kwargs) -> None:
+                self.data = None
+
+            async def async_load(self):
+                return self.data
+
+            async def async_save(self, data) -> None:
+                self.data = dict(data)
+
         class FakeDiscoveryResult:
             has_pv = True
             inverter_count = 0
@@ -259,6 +269,10 @@ class Smart1SetupTest(unittest.TestCase):
             "homeassistant.helpers.event": _module(
                 "homeassistant.helpers.event",
                 async_track_time_interval=async_track_time_interval,
+            ),
+            "homeassistant.helpers.storage": _module(
+                "homeassistant.helpers.storage",
+                Store=FakeStore,
             ),
             "custom_components": custom_components,
             "custom_components.smart1_ems": smart1_package,

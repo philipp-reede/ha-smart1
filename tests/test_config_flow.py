@@ -1086,6 +1086,10 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
                 "homeassistant.helpers.event",
                 async_track_time_interval=Mock(),
             ),
+            "homeassistant.helpers.storage": _module(
+                "homeassistant.helpers.storage",
+                Store=object,
+            ),
             "custom_components.smart1_ems.coordinator": _module(
                 "custom_components.smart1_ems.coordinator",
                 Smart1Coordinator=object,

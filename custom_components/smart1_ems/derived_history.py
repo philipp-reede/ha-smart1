@@ -22,6 +22,7 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
@@ -41,6 +42,7 @@ from .history_state import (
     DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION,
     DERIVED_HISTORY_SCHEMA_VERSION,
     Smart1HistoryState,
+    UNJOURNALED_DERIVED_HISTORY_SCHEMA_VERSIONS,
     recorded_source_time_zone,
     source_time_zone_requires_audit,
     source_time_zone_requires_rebuild,
@@ -65,6 +67,7 @@ _LOGGER = logging.getLogger(__name__)
 # when a legacy statistic must be cleared and written again.
 STATISTICS_LOOKBACK = HISTORY_DAYS * MAX_HOURLY_RECORDS_PER_DAY
 FETCH_ATTEMPTS = 3
+STATISTICS_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _local_day_bounds_utc(
@@ -83,6 +86,18 @@ def _local_day_bounds_utc(
         tzinfo=local_tz,
     ).astimezone(timezone.utc)
     return start, end
+
+
+def _first_utc_hour_in_local_day(
+    target_date: date,
+    local_tz: ZoneInfo,
+) -> datetime:
+    """Return the first whole UTC-hour boundary inside a local date."""
+    local_start, _local_end = _local_day_bounds_utc(target_date, local_tz)
+    utc_hour = local_start.replace(minute=0, second=0, microsecond=0)
+    if utc_hour < local_start:
+        utc_hour += timedelta(hours=1)
+    return utc_hour
 
 
 def _hour_overlaps_local_date_range(
@@ -557,6 +572,237 @@ def merge_hourly_energy(
     return sorted(energy_by_hour.items())
 
 
+def has_positive_energy_on_dates_in_any_zone(
+    records: list[Mapping[str, Any]],
+    local_dates: set[date],
+    local_zones: tuple[ZoneInfo, ...],
+) -> bool:
+    """Return whether one positive row may overlap an empty source day."""
+    if not local_dates or not local_zones:
+        return False
+    candidate_hours_by_zone = tuple(
+        _utc_hours_overlapping_local_dates(local_dates, local_tz)
+        for local_tz in local_zones
+    )
+    for record in records:
+        state = record.get("state")
+        if state is None:
+            continue
+        try:
+            positive = float(state) > 0.0
+        except (TypeError, ValueError):
+            continue
+        start = _statistics_start(record)
+        if positive and any(
+            start in candidate_hours
+            for candidate_hours in candidate_hours_by_zone
+        ):
+            return True
+    return False
+
+
+def _positive_daily_energy_from_records(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+    target_dates: set[date],
+) -> dict[date, float]:
+    """Return exact non-negative stored totals for selected local days."""
+    totals: dict[date, float] = {}
+    for record in records:
+        state = record.get("state")
+        if state is None:
+            continue
+        try:
+            energy_kwh = float(state)
+        except (TypeError, ValueError):
+            continue
+        target_date = _statistics_start(record).astimezone(local_tz).date()
+        if energy_kwh >= 0.0 and target_date in target_dates:
+            totals[target_date] = totals.get(target_date, 0.0) + energy_kwh
+    return totals
+
+
+def _positive_daily_energy_from_hourly(
+    hourly_energy: list[tuple[datetime, float]],
+    local_tz: ZoneInfo,
+) -> dict[date, float]:
+    """Return exact non-negative target-local daily totals from a profile."""
+    totals: dict[date, float] = {}
+    for start, energy_kwh in hourly_energy:
+        if energy_kwh < 0.0:
+            continue
+        target_date = start.astimezone(local_tz).date()
+        totals[target_date] = totals.get(target_date, 0.0) + energy_kwh
+    return totals
+
+
+def _remap_unchecked_source_energy(
+    records: list[Mapping[str, Any]],
+    checked_dates: set[date],
+    records_tz: ZoneInfo,
+    target_tz: ZoneInfo,
+) -> list[tuple[datetime, float]]:
+    """Aggregate retained source-local days into the target layout."""
+    if records_tz == target_tz:
+        # Identity-layout canonicalization must retain the exact hourly
+        # profile. Aggregation is reserved for a real source-zone remap where
+        # a source-local day no longer has a one-to-one target UTC layout.
+        retained: dict[datetime, float] = {}
+        for record in records:
+            state = record.get("state")
+            if state is None:
+                continue
+            try:
+                energy_kwh = float(state)
+            except (TypeError, ValueError):
+                continue
+            start = _statistics_start(record)
+            if (
+                energy_kwh >= 0.0
+                and start.astimezone(records_tz).date() not in checked_dates
+            ):
+                retained[start] = energy_kwh
+        return sorted(retained.items())
+
+    totals: dict[date, float] = {}
+    for record in records:
+        state = record.get("state")
+        if state is None:
+            continue
+        try:
+            energy_kwh = float(state)
+        except (TypeError, ValueError):
+            continue
+        if energy_kwh < 0.0:
+            continue
+        start = _statistics_start(record)
+        source_date = start.astimezone(records_tz).date()
+        if source_date in checked_dates:
+            continue
+        totals[source_date] = totals.get(source_date, 0.0) + energy_kwh
+    return [
+        (
+            _first_utc_hour_in_local_day(source_date, target_tz),
+            energy_kwh,
+        )
+        for source_date, energy_kwh in sorted(totals.items())
+    ]
+
+
+def _baseline_before_all_records(
+    records: list[Mapping[str, Any]],
+) -> float:
+    """Return the cumulative baseline before a whole-statistic remap."""
+    numeric: list[tuple[datetime, float, float]] = []
+    for record in records:
+        state = record.get("state")
+        cumulative_sum = record.get("sum")
+        if state is None or cumulative_sum is None:
+            continue
+        try:
+            numeric.append(
+                (
+                    _statistics_start(record),
+                    float(state),
+                    float(cumulative_sum),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    if not numeric:
+        return 0.0
+    _start, state, cumulative_sum = min(numeric, key=lambda item: item[0])
+    return cumulative_sum - state
+
+
+def _apply_daily_energy_fallbacks(
+    hourly_energy: list[tuple[datetime, float]],
+    fallback_daily_energy: Mapping[date, float],
+    empty_days: set[date],
+    local_tz: ZoneInfo,
+    *,
+    additional_dates: set[date] | None = None,
+) -> list[tuple[datetime, float]]:
+    """Replace ambiguous empty target days with journaled exact totals."""
+    eligible_dates = empty_days | (additional_dates or set())
+    active_fallbacks = {
+        target_date: float(energy_kwh)
+        for target_date, energy_kwh in fallback_daily_energy.items()
+        if target_date in eligible_dates and float(energy_kwh) >= 0.0
+    }
+    if not active_fallbacks:
+        return hourly_energy
+    kept = [
+        (start, energy_kwh)
+        for start, energy_kwh in hourly_energy
+        if start.astimezone(local_tz).date() not in active_fallbacks
+    ]
+    kept.extend(
+        (
+            _first_utc_hour_in_local_day(target_date, local_tz),
+            energy_kwh,
+        )
+        for target_date, energy_kwh in active_fallbacks.items()
+    )
+    return sorted(kept)
+
+
+def _pending_fallback_daily_energy(pending: Any) -> dict[date, float]:
+    """Return fallback totals from a production or lightweight journal."""
+    getter = getattr(pending, "fallback_energy_by_date", None)
+    if callable(getter):
+        return getter()
+    raw_fallbacks = getattr(pending, "fallback_daily_energy", ())
+    if isinstance(raw_fallbacks, Mapping):
+        return dict(raw_fallbacks)
+    try:
+        return dict(raw_fallbacks)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _pending_has_complete_daily_fallback(pending: Any) -> bool:
+    """Return whether a pending journal also proves zero target days."""
+    complete = getattr(pending, "has_complete_fallback", None)
+    if complete is not None:
+        return bool(complete)
+    return getattr(pending, "fallback_daily_energy", None) is not None
+
+
+def _pending_replacement_hourly_energy(
+    pending: Any,
+) -> dict[datetime, float]:
+    """Return an exact replacement profile from a production/test journal."""
+    getter = getattr(pending, "replacement_energy_by_start", None)
+    if callable(getter):
+        return getter()
+    raw_replacement = getattr(pending, "replacement_hourly_energy", ())
+    if isinstance(raw_replacement, Mapping):
+        return dict(raw_replacement)
+    try:
+        return dict(raw_replacement)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _pending_has_complete_replacement(pending: Any) -> bool:
+    """Return whether an exact (possibly empty) replacement was journaled."""
+    complete = getattr(pending, "has_complete_replacement", None)
+    if complete is not None:
+        return bool(complete)
+    return getattr(pending, "replacement_hourly_energy", None) is not None
+
+
+def _pending_has_invalid_replacement(pending: Any) -> bool:
+    """Return whether an exact journal field was present but malformed."""
+    invalid = getattr(pending, "has_invalid_replacement", None)
+    if invalid is not None:
+        return bool(invalid)
+    return bool(
+        getattr(pending, "replacement_hourly_energy_invalid", False)
+    )
+
+
 def build_hourly_energy_statistics(
     hourly_energy: list[tuple[datetime, float]],
     baseline_sum: float,
@@ -714,6 +960,31 @@ class Smart1DerivedEnergyImporter:
         self._persistence_tasks.add(task)
         task.add_done_callback(self._persistence_tasks.discard)
 
+    async def _async_commit_history_state(
+        self,
+        statistic_id: str,
+        **commit_kwargs: Any,
+    ) -> bool:
+        """Commit state through the durable API when it is available."""
+        if not self.history_state:
+            return False
+        async_commit = getattr(
+            self.history_state,
+            "async_commit_scan_if_unchanged",
+            None,
+        )
+        if callable(async_commit):
+            return await async_commit(
+                statistic_id,
+                self._schema_version,
+                **commit_kwargs,
+            )
+        return self.history_state.commit_scan_if_unchanged(
+            statistic_id,
+            self._schema_version,
+            **commit_kwargs,
+        )
+
     async def _async_confirm_statistics_persistence(
         self,
         recorder: Any,
@@ -728,6 +999,8 @@ class Smart1DerivedEnergyImporter:
         retried_days: Mapping[str, date] | None = None,
         today: date | None = None,
         source_time_zone: str | None = None,
+        time_zone_migration_generations: Mapping[str, str] | None = None,
+        reset_history_progress_roles: set[str] | None = None,
     ) -> set[str]:
         """Verify queued derived imports and complete only persisted roles."""
         if not role_keys or not self.history_state:
@@ -774,26 +1047,38 @@ class Smart1DerivedEnergyImporter:
             retried_day = (
                 retried_days.get(role_key) if retried_days else None
             )
-            marked = self.history_state.commit_scan_if_unchanged(
-                statistic_ids[role_key],
-                self._schema_version,
-                has_data=True,
-                expected_version=expected_marker_versions[role_key],
-                checked_through=checked_through,
-                empty_days=empty_days,
-                nonempty_days=nonempty_days,
-                oldest_supported=(
+            commit_kwargs = {
+                "has_data": True,
+                "expected_version": expected_marker_versions[role_key],
+                "checked_through": checked_through,
+                "empty_days": empty_days,
+                "nonempty_days": nonempty_days,
+                "oldest_supported": (
                     today - timedelta(days=HISTORY_DAYS - 1)
                     if today is not None
                     else date.min
                 ),
-                retried_day=(
+                "retried_day": (
                     retried_day
                     if retried_day in (empty_days | nonempty_days)
                     else None
                 ),
-                checked_on=(today if retried_day is not None else None),
-                source_time_zone=source_time_zone,
+                "checked_on": (today if retried_day is not None else None),
+                "source_time_zone": source_time_zone,
+                "time_zone_migration_generation": (
+                    time_zone_migration_generations.get(role_key)
+                    if time_zone_migration_generations
+                    else None
+                ),
+                "reset_history_progress": (
+                    role_key in reset_history_progress_roles
+                    if reset_history_progress_roles
+                    else False
+                ),
+            }
+            marked = await self._async_commit_history_state(
+                statistic_ids[role_key],
+                **commit_kwargs,
             )
             if not marked:
                 marked = bool(
@@ -828,9 +1113,12 @@ class Smart1DerivedEnergyImporter:
                 )
             return role_key, marked
 
-        results = await asyncio.gather(
-            *(_confirm_role(role_key) for role_key in sorted(role_keys))
-        )
+        # Recorder serializes these executor reads internally. Starting all
+        # role readbacks together only creates a queue backlog and makes a
+        # large initial import much more likely to hit its timeout budget.
+        results = []
+        for role_key in sorted(role_keys):
+            results.append(await _confirm_role(role_key))
         return {
             role_key for role_key, persisted in results if persisted
         }
@@ -850,6 +1138,8 @@ class Smart1DerivedEnergyImporter:
         retried_days: Mapping[str, date] | None = None,
         today: date | None = None,
         source_time_zone: str | None = None,
+        time_zone_migration_generations: Mapping[str, str] | None = None,
+        reset_history_progress_roles: set[str] | None = None,
     ) -> None:
         """Finalize replacements after a delayed clear callback."""
         persisted_roles = await self._async_confirm_statistics_persistence(
@@ -865,6 +1155,8 @@ class Smart1DerivedEnergyImporter:
             retried_days,
             today,
             source_time_zone,
+            time_zone_migration_generations,
+            reset_history_progress_roles,
         )
         if persistence_generation != self._persistence_generation:
             return
@@ -910,12 +1202,30 @@ class Smart1DerivedEnergyImporter:
         )
         return result.get(statistic_id, [])
 
+    async def _all_existing_statistics(
+        self,
+        statistic_id: str,
+    ) -> list[Mapping[str, Any]]:
+        """Return the complete statistic before a time-zone clear/remap."""
+        result = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            STATISTICS_EPOCH,
+            None,
+            {statistic_id},
+            "hour",
+            None,
+            {"state", "sum"},
+        )
+        return result.get(statistic_id, [])
+
     async def _fetch_hourly_energy(
         self,
         start_date: date,
         end_date: date,
         local_tz: ZoneInfo,
         *,
+        include_preceding_boundary: bool = False,
         include_following_boundary: bool = False,
     ) -> tuple[
         dict[str, list[tuple[datetime, float]]],
@@ -930,8 +1240,10 @@ class Smart1DerivedEnergyImporter:
         five-minute interval across local midnight is retained without keeping
         a supported year's raw rows in memory. A fractional-offset zone loads
         the preceding local day to complete the first shared UTC bucket. A
-        single-day retry loads both adjacent days in every time zone so its
-        opening and closing intervals can be rebuilt.
+        resumed catch-up can load the preceding day so its opening boundary
+        bucket is rebuilt completely. A single-day retry loads both adjacent
+        days in every time zone so its opening and closing intervals can be
+        rebuilt.
         """
         hourly_energy = {role_key: [] for role_key in self.role_points}
         nonempty_days = {role_key: set() for role_key in self.role_points}
@@ -949,13 +1261,18 @@ class Smart1DerivedEnergyImporter:
             end_date + timedelta(days=1),
         )
         # Fractional local midnight shares a UTC bucket with the preceding
-        # source day. A bounded single-day retry also needs that predecessor
-        # in every time zone: when D was previously empty, the final
-        # D-1 23:55-to-D 00:00 interval could not have been integrated.
-        # Ordinary whole-hour scans still start exactly at ``start_date``.
+        # source day. A resumed catch-up and a bounded single-day retry also
+        # need that predecessor in every time zone: without it, the final
+        # D-1 23:55-to-D 00:00 interval cannot be integrated. The caller
+        # filters the predecessor to the rebuilt opening bucket, so unrelated
+        # hours from an already checked day are not imported again.
         target_date = (
             start_date - timedelta(days=1)
-            if fractional_offset or include_following_boundary
+            if (
+                fractional_offset
+                or include_preceding_boundary
+                or include_following_boundary
+            )
             else start_date
         )
         fetch_end_date = end_date + (
@@ -1075,9 +1392,6 @@ class Smart1DerivedEnergyImporter:
             self._last_result = "running"
             self._last_mode = "history_repair" if repair else "current_day"
             self._last_fetch_completed = None
-            source_time_zone = self.hass.config.time_zone
-            local_tz = ZoneInfo(source_time_zone)
-            today = datetime.now(local_tz).date()
             statistic_ids = {
                 role_key: statistic_id_for_role(
                     role_key,
@@ -1086,13 +1400,59 @@ class Smart1DerivedEnergyImporter:
                 )
                 for role_key, point in self.role_points.items()
             }
+            configured_source_time_zone = self.hass.config.time_zone
+            pending_migrations_by_role = {
+                role_key: pending
+                for role_key, statistic_id in statistic_ids.items()
+                if self.history_state
+                and (
+                    pending := self.history_state.pending_time_zone_migration(
+                        statistic_id
+                    )
+                )
+                is not None
+            }
+            recovery_targets = sorted(
+                {
+                    pending.target_time_zone
+                    for pending in pending_migrations_by_role.values()
+                    if pending.target_time_zone
+                    != configured_source_time_zone
+                }
+            )
+            if recovery_targets:
+                # Finish one durable source->target migration generation
+                # before starting any target->new-configured-zone migration.
+                # Different pending targets are recovered in deterministic
+                # groups on successive runs.
+                source_time_zone = recovery_targets[0]
+                active_role_keys = {
+                    role_key
+                    for role_key, pending in (
+                        pending_migrations_by_role.items()
+                    )
+                    if pending.target_time_zone == source_time_zone
+                }
+            else:
+                source_time_zone = configured_source_time_zone
+                active_role_keys = set(self.role_points)
+            local_tz = ZoneInfo(source_time_zone)
+            today = datetime.now(local_tz).date()
+            recorded_time_zones_by_role: dict[str, str] = {}
             records_tz_by_role: dict[str, ZoneInfo] = {}
             for role_key, statistic_id in statistic_ids.items():
-                recorded_time_zone = recorded_source_time_zone(
-                    self.history_state,
-                    statistic_id,
-                    source_time_zone,
+                pending = pending_migrations_by_role.get(role_key)
+                recorded_time_zone = (
+                    pending.source_time_zone
+                    if pending is not None
+                    and pending.target_time_zone == source_time_zone
+                    else recorded_source_time_zone(
+                        self.history_state,
+                        statistic_id,
+                        source_time_zone,
+                    )
                 )
+                recorded_time_zones_by_role[role_key] = recorded_time_zone
                 try:
                     records_tz_by_role[role_key] = ZoneInfo(
                         recorded_time_zone
@@ -1142,7 +1502,8 @@ class Smart1DerivedEnergyImporter:
             detected_rebuild_roles = {
                 role_key
                 for role_key, records in records_by_role.items()
-                if needs_hourly_rebuild(
+                if role_key in active_role_keys
+                and needs_hourly_rebuild(
                     records,
                     today,
                     local_tz,
@@ -1158,49 +1519,93 @@ class Smart1DerivedEnergyImporter:
             legacy_forced_rebuild_roles = {
                 role_key
                 for role_key, statistic_id in statistic_ids.items()
-                if self.force_initial_rebuild
+                if role_key in active_role_keys
+                and self.force_initial_rebuild
                 and (
                     not self.history_state
                     or self.history_state.current_schema_version(statistic_id)
                     == 0
                 )
             }
-            # Version 4 integrates the 23:55-to-00:00 interval across portal
-            # day responses. Every older schema needs one supported-window
-            # upsert, including whole-hour time zones and the fractional v3.
+            # Version 6 also integrates the 23:55-to-00:00 interval when a
+            # previously interrupted catch-up resumes and canonicalizes the
+            # pre-journal v4/v5 layouts. Every older schema needs one
+            # supported-window fetch, including whole-hour time zones and the
+            # fractional-offset v3.
             schema_upgrade_roles = {
                 role_key
                 for role_key, statistic_id in statistic_ids.items()
-                if self.history_state
+                if role_key in active_role_keys
+                and self.history_state
                 and self.history_state.current_schema_version(statistic_id)
                     < DERIVED_HISTORY_SCHEMA_VERSION
+            }
+            legacy_layout_canonicalization_roles = {
+                role_key
+                for role_key, statistic_id in statistic_ids.items()
+                if role_key in active_role_keys
+                and records_by_role[role_key]
+                and self.history_state
+                and self.history_state.current_schema_version(statistic_id)
+                in UNJOURNALED_DERIVED_HISTORY_SCHEMA_VERSIONS
             }
             time_zone_rebuild_roles = {
                 role_key
                 for role_key, statistic_id in statistic_ids.items()
-                if self.history_state
-                and source_time_zone_requires_rebuild(
-                    self.history_state,
-                    statistic_id,
-                    source_time_zone,
+                if role_key in active_role_keys
+                and self.history_state
+                and (
+                    role_key in legacy_layout_canonicalization_roles
+                    or source_time_zone_requires_rebuild(
+                        self.history_state,
+                        statistic_id,
+                        source_time_zone,
+                    )
                 )
             }
             time_zone_audit_roles = {
                 role_key
                 for role_key, statistic_id in statistic_ids.items()
-                if self.history_state
+                if role_key in active_role_keys
+                and self.history_state
                 and source_time_zone_requires_audit(
                     self.history_state,
                     statistic_id,
                     source_time_zone,
                 )
             }
-            # Schema and time-zone migrations are supported-window upserts,
-            # not whole-ID clears: older Recorder history remains intact.
+            pending_time_zone_roles = {
+                role_key
+                for role_key, statistic_id in statistic_ids.items()
+                if role_key in active_role_keys
+                and self.history_state
+                and (
+                    pending := self.history_state.pending_time_zone_migration(
+                        statistic_id
+                    )
+                )
+                is not None
+                and pending.target_time_zone == source_time_zone
+            }
+            time_zone_migration_roles = (
+                time_zone_rebuild_roles | pending_time_zone_roles
+            )
+            if repair:
+                for role_key in sorted(time_zone_migration_roles):
+                    if len(records_by_role[role_key]) >= record_count:
+                        records_by_role[role_key] = (
+                            await self._all_existing_statistics(
+                                statistic_ids[role_key]
+                            )
+                        )
+            # A proven time-zone change is a journaled whole-ID remap. This
+            # avoids old/new UTC seam collisions while preserving history
+            # older than the supported portal window.
             forced_rebuild_roles = legacy_forced_rebuild_roles
             detected_rebuild_roles |= (
                 forced_rebuild_roles
                 | schema_upgrade_roles
+                | time_zone_migration_roles
                 | time_zone_audit_roles
             )
             self._detected_rebuild_roles = tuple(
@@ -1212,7 +1617,8 @@ class Smart1DerivedEnergyImporter:
             # legacy/rebuild data takes the full replacement path below.
             for role_key, records in records_by_role.items():
                 if (
-                    records
+                    role_key in active_role_keys
+                    and records
                     and role_key not in complete_roles
                     and role_key not in detected_rebuild_roles
                     and role_key not in forced_rebuild_roles
@@ -1225,18 +1631,20 @@ class Smart1DerivedEnergyImporter:
 
             if repair:
                 rebuild_roles = detected_rebuild_roles
-                refreshable_roles = set(self.role_points)
+                refreshable_roles = set(active_role_keys)
             else:
                 rebuild_roles = set()
                 refreshable_roles = (
-                    set(self.role_points)
+                    set(active_role_keys)
                     - detected_rebuild_roles
                     - (roles_without_statistics - complete_roles)
                 )
                 if not refreshable_roles:
                     self._last_result = "repair_pending"
                     return
-            forced_clear_roles = forced_rebuild_roles & rebuild_roles
+            forced_clear_roles = (
+                forced_rebuild_roles | time_zone_migration_roles
+            ) & rebuild_roles
             required_starts = {
                 role_key: (
                     history_repair_start(
@@ -1262,6 +1670,7 @@ class Smart1DerivedEnergyImporter:
                     ),
                     force_supported_rebuild=(
                         role_key in schema_upgrade_roles
+                        or role_key in time_zone_migration_roles
                         or role_key in time_zone_audit_roles
                     ),
                     required_start=required_starts[role_key],
@@ -1270,6 +1679,22 @@ class Smart1DerivedEnergyImporter:
                 if role_key in refreshable_roles
             }
             main_start_date = min(window[0] for window in windows.values())
+            supported_start = today - timedelta(days=HISTORY_DAYS - 1)
+            resumed_role_starts = {
+                role_key: required_start
+                for role_key, required_start in required_starts.items()
+                if required_start is not None
+                and required_start > supported_start
+                and windows[role_key][0] == required_start
+            }
+            # When a durable partial catch-up resumes exactly after its saved
+            # coverage cursor, load D-1 as context. This reconstructs the last
+            # D-1 hour including the 23:55-to-D 00:00 interval in whole-hour
+            # zones. A normal rolling refresh already starts before any
+            # outstanding cursor and therefore has this context in-range.
+            resumes_at_main_start = (
+                main_start_date in resumed_role_starts.values()
+            )
             retry_dates = {
                 role_key: retry_date
                 for role_key in refreshable_roles
@@ -1285,10 +1710,16 @@ class Smart1DerivedEnergyImporter:
                 )
                 is not None
             }
+            main_fetch_kwargs = (
+                {"include_preceding_boundary": True}
+                if resumes_at_main_start
+                else {}
+            )
             main_fetch_result = await self._fetch_hourly_energy(
                 main_start_date,
                 today,
                 local_tz,
+                **main_fetch_kwargs,
             )
             (
                 fetched_by_role,
@@ -1322,6 +1753,9 @@ class Smart1DerivedEnergyImporter:
             retry_opening_hours_by_role: dict[str, set[datetime]] = {
                 role_key: set() for role_key in refreshable_roles
             }
+            main_opening_hours_by_role: dict[str, set[datetime]] = {
+                role_key: set() for role_key in refreshable_roles
+            }
             fractional_window = _uses_fractional_utc_offset(
                 local_tz,
                 main_start_date - timedelta(days=1),
@@ -1351,6 +1785,24 @@ class Smart1DerivedEnergyImporter:
                         local_tz,
                     )
                 )
+                if role_key in resumed_role_starts:
+                    day_start, _day_end = _local_day_bounds_utc(
+                        role_start,
+                        local_tz,
+                    )
+                    if (
+                        day_start.minute == 0
+                        and day_start.second == 0
+                        and day_start.microsecond == 0
+                        and role_start
+                        in main_completed_boundary_dates.get(role_key, set())
+                    ):
+                        # The cross-midnight interval belongs to the previous
+                        # UTC bucket in whole-hour zones. Include that rebuilt
+                        # bucket explicitly even though it does not overlap D.
+                        main_opening_hours_by_role[role_key].add(
+                            day_start - timedelta(hours=1)
+                        )
             main_fetched_by_role = {
                 role_key: list(fetched_energy)
                 for role_key, fetched_energy in fetched_by_role.items()
@@ -1606,6 +2058,182 @@ class Smart1DerivedEnergyImporter:
                 self._last_result = "incomplete_fetch"
                 return
 
+            migration_fallback_daily_energy_by_role: dict[
+                str,
+                dict[date, float],
+            ] = {}
+            clear_rebuild_baseline_by_role: dict[str, float] = {}
+            for role_key in time_zone_rebuild_roles - pending_time_zone_roles:
+                # Fractional-offset zones fetch D-1 to complete the UTC hour
+                # shared with the first supported source day.  When that
+                # context day itself returned data, its freshly integrated
+                # profile is authoritative and already present in
+                # ``fetched_by_role``.  Excluding it from the Recorder remap
+                # prevents the same day being added a second time as a
+                # retained daily total.  A successful-empty context day is
+                # deliberately not excluded, so older energy remains
+                # recoverable outside the portal-supported window.
+                authoritative_source_days = (
+                    checked_days_by_role[role_key]
+                    | main_nonempty_source_days.get(role_key, set())
+                )
+                fetched_by_role[role_key].extend(
+                    _remap_unchecked_source_energy(
+                        records_by_role[role_key],
+                        authoritative_source_days,
+                        records_tz_by_role[role_key],
+                        local_tz,
+                    )
+                )
+                clear_rebuild_baseline_by_role[role_key] = (
+                    _baseline_before_all_records(
+                        records_by_role[role_key]
+                    )
+                )
+            complete_pending_fallback_roles: set[str] = set()
+            exact_replay_roles: set[str] = set()
+            incomplete_clear_journal_roles: set[str] = set()
+            for role_key in time_zone_migration_roles:
+                pending = (
+                    self.history_state.pending_time_zone_migration(
+                        statistic_ids[role_key]
+                    )
+                    if self.history_state
+                    else None
+                )
+                if pending is not None:
+                    pending_baseline = getattr(
+                        pending,
+                        "clear_rebuild_baseline_sum",
+                        None,
+                    )
+                    pending_fallback_complete = (
+                        _pending_has_complete_daily_fallback(pending)
+                    )
+                    pending_identity_rebuild = (
+                        pending.source_time_zone
+                        == pending.target_time_zone
+                    )
+                    pending_replacement_complete = (
+                        _pending_has_complete_replacement(pending)
+                    )
+                    pending_replacement_invalid = (
+                        _pending_has_invalid_replacement(pending)
+                    )
+                    replacement_hourly_energy = (
+                        _pending_replacement_hourly_energy(pending)
+                    )
+                    if (
+                        pending_baseline is None
+                        or pending_replacement_invalid
+                        or (
+                            pending_identity_rebuild
+                            and not pending_replacement_complete
+                        )
+                        or (
+                            not pending_identity_rebuild
+                            and not pending_replacement_complete
+                            and not pending_fallback_complete
+                        )
+                    ):
+                        incomplete_clear_journal_roles.add(role_key)
+                    else:
+                        clear_rebuild_baseline_by_role[role_key] = float(
+                            pending_baseline
+                        )
+                    if pending_fallback_complete:
+                        complete_pending_fallback_roles.add(role_key)
+                    fallback_daily_energy = (
+                        _pending_fallback_daily_energy(pending)
+                    )
+                    if (
+                        not pending_replacement_complete
+                        and not fallback_daily_energy
+                        and pending_baseline is not None
+                        and float(pending_baseline) != 0.0
+                    ):
+                        incomplete_clear_journal_roles.add(role_key)
+                else:
+                    fallback_daily_energy = (
+                        _positive_daily_energy_from_hourly(
+                            fetched_by_role[role_key],
+                            local_tz,
+                        )
+                    )
+                    for target_date, energy_kwh in (
+                        _positive_daily_energy_from_records(
+                            records_by_role[role_key],
+                            records_tz_by_role[role_key],
+                            empty_days_by_role[role_key],
+                        ).items()
+                    ):
+                        fallback_daily_energy[target_date] = energy_kwh
+                migration_fallback_daily_energy_by_role[role_key] = (
+                    fallback_daily_energy
+                )
+                if pending is not None and pending_replacement_complete:
+                    # Finish the exact target batch recorded before Recorder
+                    # was cleared. Its cross-midnight buckets may depend on two
+                    # source days and cannot be selected safely by row date.
+                    # A later normal refresh applies newer portal data.
+                    fetched_by_role[role_key] = sorted(
+                        replacement_hourly_energy.items()
+                    )
+                    exact_replay_roles.add(role_key)
+                else:
+                    fetched_by_role[role_key] = _apply_daily_energy_fallbacks(
+                        fetched_by_role[role_key],
+                        fallback_daily_energy,
+                        empty_days_by_role[role_key],
+                        local_tz,
+                        additional_dates=(
+                            set(fallback_daily_energy)
+                            - checked_days_by_role[role_key]
+                            if role_key in pending_time_zone_roles
+                            else set()
+                        ),
+                    )
+            if incomplete_clear_journal_roles:
+                _LOGGER.warning(
+                    "Deferring smart1 derived energy time-zone migration for "
+                    "roles %s because the durable clear journal is incomplete",
+                    ", ".join(sorted(incomplete_clear_journal_roles)),
+                )
+                self._last_result = "migration_journal_incomplete"
+                return
+            conflicting_empty_roles = {
+                role_key
+                for role_key in time_zone_migration_roles
+                if role_key not in complete_pending_fallback_roles
+                and has_positive_energy_on_dates_in_any_zone(
+                    records_by_role[role_key],
+                    empty_days_by_role[role_key]
+                    - set(
+                        migration_fallback_daily_energy_by_role[role_key]
+                    ),
+                    (
+                        (records_tz_by_role[role_key], local_tz)
+                        if role_key in pending_time_zone_roles
+                        and records_tz_by_role[role_key] != local_tz
+                        else (records_tz_by_role[role_key],)
+                    ),
+                )
+            }
+            if conflicting_empty_roles:
+                # A successful empty API day does not prove that positive
+                # buckets mapped with the old zone became zero. Tombstoning
+                # them would destroy valid energy. Keep both rows and the
+                # durable migration journal until source data can disambiguate
+                # the remap on a later repair.
+                _LOGGER.warning(
+                    "Deferring smart1 derived energy time-zone migration for "
+                    "roles %s because empty source days overlap positive "
+                    "stored energy",
+                    ", ".join(sorted(conflicting_empty_roles)),
+                )
+                self._last_result = "time_zone_migration_pending"
+                return
+
             # A completed repair can legitimately contain empty days (or be
             # completely empty) because the detailed endpoint is queried with
             # ``missing_ok=True``. Only explicit legacy rebuilds clear the
@@ -1624,17 +2252,22 @@ class Smart1DerivedEnergyImporter:
                 if role_key not in refreshable_roles:
                     continue
                 role_start, baseline_sum = windows[role_key]
-                fetched_energy = [
-                    item
-                    for item in fetched_by_role[role_key]
-                    if _hour_overlaps_local_date_range(
-                        item[0],
-                        role_start,
-                        today,
-                        local_tz,
-                    )
-                ]
-                if role_key in forced_rebuild_roles:
+                fetched_energy = (
+                    list(fetched_by_role[role_key])
+                    if role_key in time_zone_migration_roles
+                    else [
+                        item
+                        for item in fetched_by_role[role_key]
+                        if _hour_overlaps_local_date_range(
+                            item[0],
+                            role_start,
+                            today,
+                            local_tz,
+                        )
+                        or item[0] in main_opening_hours_by_role[role_key]
+                    ]
+                )
+                if role_key in forced_clear_roles:
                     hourly_energy = sorted(fetched_energy)
                 else:
                     hourly_energy = merge_hourly_energy(
@@ -1645,25 +2278,35 @@ class Smart1DerivedEnergyImporter:
                         local_tz,
                         replacement_dates=(
                             checked_days_by_role[role_key]
-                            if role_key in time_zone_rebuild_roles
+                            if role_key in time_zone_migration_roles
                             and fetch_completed
                             else nonempty_days_by_role[role_key]
                         ),
                         preserve_hours=(
                             set()
-                            if role_key in time_zone_rebuild_roles
+                            if role_key in time_zone_migration_roles
                             else preserve_boundary_hours_by_role[role_key]
                         ),
                         records_tz=records_tz_by_role[role_key],
                     )
                 if (
                     fractional_window
-                    or role_key in time_zone_rebuild_roles
+                    or role_key in time_zone_migration_roles
+                    or main_opening_hours_by_role[role_key]
                 ) and role_key not in forced_rebuild_roles:
                     baseline_sum = baseline_before_first_hour(
                         records_by_role[role_key],
                         hourly_energy,
                         baseline_sum,
+                    )
+                if role_key in time_zone_migration_roles:
+                    baseline_sum = clear_rebuild_baseline_by_role[role_key]
+                if role_key in time_zone_migration_roles:
+                    migration_fallback_daily_energy_by_role[role_key] = (
+                        _positive_daily_energy_from_hourly(
+                            hourly_energy,
+                            local_tz,
+                        )
                     )
                 statistics = build_hourly_energy_statistics(
                     hourly_energy,
@@ -1684,6 +2327,103 @@ class Smart1DerivedEnergyImporter:
                     unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
                 )
                 roles_with_statistics.add(role_key)
+
+            time_zone_migration_generations: dict[str, str] = {}
+            if self.history_state:
+                # Journal every migration that can mutate Recorder before
+                # queueing its replacement statistics. A retry reuses the
+                # durable generation and its exact per-day fallback totals.
+                for role_key in sorted(time_zone_migration_roles):
+                    statistic_id = statistic_ids[role_key]
+                    pending = self.history_state.pending_time_zone_migration(
+                        statistic_id
+                    )
+                    if (
+                        pending is not None
+                        and pending.target_time_zone == source_time_zone
+                    ):
+                        migration_source_time_zone = (
+                            pending.source_time_zone
+                        )
+                    else:
+                        migration_source_time_zone = (
+                            recorded_time_zones_by_role[role_key]
+                        )
+                    if role_key not in roles_with_statistics:
+                        # No Recorder row will be queued for this role. The
+                        # source-zone fingerprint can therefore be committed
+                        # directly without an in-flight migration journal.
+                        if pending is not None:
+                            time_zone_migration_generations[role_key] = (
+                                pending.generation
+                            )
+                        continue
+                    begin_migration = getattr(
+                        self.history_state,
+                        "async_begin_time_zone_migration",
+                        None,
+                    )
+                    try:
+                        if callable(begin_migration):
+                            migration_kwargs: dict[str, Any] = {
+                                "replacement_hourly_energy": [
+                                    {
+                                        "start": item["start"],
+                                        "state": item["state"],
+                                    }
+                                    for item in statistics_by_role[role_key]
+                                ]
+                            }
+                            generation = await begin_migration(
+                                statistic_id,
+                                migration_source_time_zone,
+                                source_time_zone,
+                                fallback_daily_energy=(
+                                    migration_fallback_daily_energy_by_role[
+                                        role_key
+                                    ]
+                                ),
+                                clear_rebuild_baseline_sum=(
+                                    clear_rebuild_baseline_by_role[role_key]
+                                ),
+                                **migration_kwargs,
+                            )
+                        else:
+                            migration_kwargs = {
+                                "replacement_hourly_energy": [
+                                    {
+                                        "start": item["start"],
+                                        "state": item["state"],
+                                    }
+                                    for item in statistics_by_role[role_key]
+                                ]
+                            }
+                            generation = (
+                                self.history_state.begin_time_zone_migration(
+                                    statistic_id,
+                                    migration_source_time_zone,
+                                    source_time_zone,
+                                    fallback_daily_energy=(
+                                        migration_fallback_daily_energy_by_role[
+                                            role_key
+                                        ]
+                                    ),
+                                    clear_rebuild_baseline_sum=(
+                                        clear_rebuild_baseline_by_role[role_key]
+                                    ),
+                                    **migration_kwargs,
+                                )
+                            )
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Unable to persist smart1 derived energy "
+                            "time-zone migration journal for role %s (%s)",
+                            role_key,
+                            type(err).__name__,
+                        )
+                        self._last_result = "migration_journal_error"
+                        return
+                    time_zone_migration_generations[role_key] = generation
 
             def _enqueue_statistics(role_keys: set[str]) -> None:
                 for role_key in sorted(role_keys):
@@ -1709,79 +2449,138 @@ class Smart1DerivedEnergyImporter:
                 )
                 for role_key in refreshable_roles
             } if self.history_state else {}
+            # Exact recovery finishes the journaled batch atomically and
+            # intentionally discards the concurrent portal fetch.  Do not
+            # claim progress from that ignored response. Clearing target-
+            # schema coverage below forces the next normal repair to query the
+            # whole supported window and apply any newly appeared old data.
+            committed_coverage_targets = {
+                role_key: (
+                    None
+                    if role_key in exact_replay_roles
+                    else coverage_targets.get(role_key)
+                )
+                for role_key in refreshable_roles
+            }
+            committed_empty_days_by_role = {
+                role_key: (
+                    set()
+                    if role_key in exact_replay_roles
+                    else empty_days_by_role[role_key]
+                )
+                for role_key in refreshable_roles
+            }
+            committed_nonempty_days_by_role = {
+                role_key: (
+                    set()
+                    if role_key in exact_replay_roles
+                    else nonempty_days_by_role[role_key]
+                )
+                for role_key in refreshable_roles
+            }
+            committed_retry_dates = {
+                role_key: retry_date
+                for role_key, retry_date in retry_dates.items()
+                if role_key not in exact_replay_roles
+            }
             if forced_clear_roles:
                 rebuild_statistic_ids = [
                     statistic_ids[role_key]
                     for role_key in sorted(forced_clear_roles)
                 ]
 
-                def _mark_rebuild_complete() -> None:
-                    if not self.history_state:
-                        return
-                    if (
-                        persistence_generation != self._persistence_generation
-                    ):
-                        return
-                    # Empty rebuilds finish with the clear itself.  A role
-                    # with replacement rows is completed only after the
-                    # queued import has been read back from Recorder.
-                    for role_key in (
-                        forced_clear_roles - roles_with_statistics
-                    ):
-                        self.history_state.commit_scan_if_unchanged(
+                async def _async_commit_empty_rebuild_roles(
+                    role_keys: set[str],
+                ) -> None:
+                    for role_key in sorted(role_keys):
+                        await self._async_commit_history_state(
                             statistic_ids[role_key],
-                            self._schema_version,
                             has_data=False,
                             expected_version=(
                                 expected_marker_versions[role_key]
                             ),
                             checked_through=(
-                                today if fetch_completed and repair else None
+                                committed_coverage_targets.get(role_key)
+                                if fetch_completed and repair
+                                else None
                             ),
-                            empty_days=empty_days_by_role[role_key],
+                            empty_days=(
+                                committed_empty_days_by_role[role_key]
+                            ),
                             nonempty_days=set(),
                             oldest_supported=(
                                 today - timedelta(days=HISTORY_DAYS - 1)
                             ),
                             checked_on=None,
                             source_time_zone=source_time_zone,
+                            time_zone_migration_generation=(
+                                time_zone_migration_generations.get(role_key)
+                            ),
+                            reset_history_progress=(
+                                role_key in exact_replay_roles
+                            ),
                         )
+
+                def _mark_rebuild_complete() -> None:
+                    # The async caller below commits empty roles durably;
+                    # replacement rows require Recorder readback as well.
+                    return
 
                 late_rebuild_roles = (
                     forced_clear_roles & roles_with_statistics
                 )
+                empty_rebuild_roles = (
+                    forced_clear_roles - roles_with_statistics
+                )
 
                 def _finalize_late_rebuild() -> None:
-                    if not late_rebuild_roles or not self.history_state:
+                    if not self.history_state:
                         return
-                    self._schedule_persistence_task(
-                        self._async_finalize_late_clear(
-                            recorder,
-                            set(late_rebuild_roles),
-                            set(forced_clear_roles),
-                            dict(statistic_ids),
-                            {
-                                role_key: list(statistics_by_role[role_key])
-                                for role_key in late_rebuild_roles
-                            },
-                            {
-                                role_key: expected_marker_versions[role_key]
-                                for role_key in late_rebuild_roles
-                            },
-                            persistence_generation,
-                            {
-                                role_key: (
-                                    today if fetch_completed and repair else None
-                                )
-                                for role_key in late_rebuild_roles
-                            },
-                            empty_days_by_role,
-                            nonempty_days_by_role,
-                            retry_dates,
-                            today,
-                            source_time_zone,
+                    if empty_rebuild_roles:
+                        self._schedule_persistence_task(
+                            _async_commit_empty_rebuild_roles(
+                                set(empty_rebuild_roles)
+                            )
                         )
-                    )
+                    if late_rebuild_roles:
+                        self._schedule_persistence_task(
+                            self._async_finalize_late_clear(
+                                recorder,
+                                set(late_rebuild_roles),
+                                set(forced_clear_roles),
+                                dict(statistic_ids),
+                                {
+                                    role_key: list(
+                                        statistics_by_role[role_key]
+                                    )
+                                    for role_key in late_rebuild_roles
+                                },
+                                {
+                                    role_key: expected_marker_versions[
+                                        role_key
+                                    ]
+                                    for role_key in late_rebuild_roles
+                                },
+                                persistence_generation,
+                                {
+                                    role_key: (
+                                        committed_coverage_targets.get(
+                                            role_key
+                                        )
+                                        if fetch_completed and repair
+                                        else None
+                                    )
+                                    for role_key in late_rebuild_roles
+                                },
+                                committed_empty_days_by_role,
+                                committed_nonempty_days_by_role,
+                                committed_retry_dates,
+                                today,
+                                source_time_zone,
+                                time_zone_migration_generations,
+                                exact_replay_roles,
+                            )
+                        )
 
                 if not await async_clear_statistics(
                     recorder,
@@ -1814,12 +2613,16 @@ class Smart1DerivedEnergyImporter:
                 self._cleared_rebuild_roles = tuple(
                     sorted(forced_clear_roles)
                 )
+                if empty_rebuild_roles:
+                    await _async_commit_empty_rebuild_roles(
+                        set(empty_rebuild_roles)
+                    )
                 _LOGGER.info(
                     "Cleared %d smart1 derived energy statistics before rebuild",
                     len(rebuild_statistic_ids),
                 )
 
-            _enqueue_statistics(refreshable_roles - forced_rebuild_roles)
+            _enqueue_statistics(refreshable_roles - forced_clear_roles)
 
             completed_roles = (
                 initial_backfill_roles | rebuildable_roles
@@ -1869,17 +2672,19 @@ class Smart1DerivedEnergyImporter:
                     persistence_generation,
                     {
                         role_key: (
-                            coverage_targets.get(role_key)
+                            committed_coverage_targets.get(role_key)
                             if repair
                             else None
                         )
                         for role_key in marker_update_roles
                     },
-                    empty_days_by_role,
-                    nonempty_days_by_role,
-                    retry_dates,
+                    committed_empty_days_by_role,
+                    committed_nonempty_days_by_role,
+                    committed_retry_dates,
                     today,
                     source_time_zone,
+                    time_zone_migration_generations,
+                    exact_replay_roles,
                 )
             )
 
@@ -1888,7 +2693,7 @@ class Smart1DerivedEnergyImporter:
                 has_data = (
                     role_key in roles_with_statistics
                     or (
-                        role_key not in forced_rebuild_roles
+                        role_key not in forced_clear_roles
                         and bool(records_by_role[role_key])
                     )
                 )
@@ -1898,30 +2703,39 @@ class Smart1DerivedEnergyImporter:
                     continue
                 if not self.history_state:
                     continue
-                self.history_state.commit_scan_if_unchanged(
+                await self._async_commit_history_state(
                     statistic_ids[role_key],
-                    self._schema_version,
                     has_data=has_data,
                     expected_version=expected_marker_versions[role_key],
                     checked_through=(
-                        coverage_targets.get(role_key) if repair else None
+                        committed_coverage_targets.get(role_key)
+                        if repair
+                        else None
                     ),
-                    empty_days=empty_days_by_role[role_key],
-                    nonempty_days=nonempty_days_by_role[role_key],
+                    empty_days=committed_empty_days_by_role[role_key],
+                    nonempty_days=(
+                        committed_nonempty_days_by_role[role_key]
+                    ),
                     oldest_supported=(
                         today - timedelta(days=HISTORY_DAYS - 1)
                     ),
                     retried_day=(
-                        retry_dates.get(role_key)
+                        committed_retry_dates.get(role_key)
                         if role_key in completed_retry_roles
                         else None
                     ),
                     checked_on=(
                         today
-                        if role_key in completed_retry_roles
+                        if role_key in committed_retry_dates
                         else None
                     ),
                     source_time_zone=source_time_zone,
+                    time_zone_migration_generation=(
+                        time_zone_migration_generations.get(role_key)
+                    ),
+                    reset_history_progress=(
+                        role_key in exact_replay_roles
+                    ),
                 )
             for role_key in roles_with_statistics - completed_roles:
                 if self._data_presence(statistic_ids[role_key]) is not True:
@@ -1930,7 +2744,9 @@ class Smart1DerivedEnergyImporter:
 
             if repair:
                 for role_key in refreshable_roles - roles_with_statistics:
-                    checked_through = coverage_targets.get(role_key)
+                    checked_through = committed_coverage_targets.get(
+                        role_key
+                    )
                     if checked_through is None:
                         continue
                     statistic_id = statistic_ids[role_key]
@@ -1939,34 +2755,43 @@ class Smart1DerivedEnergyImporter:
                         continue
                     if not self.history_state:
                         continue
-                    self.history_state.commit_scan_if_unchanged(
+                    await self._async_commit_history_state(
                         statistic_id,
-                        self._schema_version,
                         has_data=(
                             self._data_presence(statistic_id) is True
                         ),
                         expected_version=expected_marker_versions[role_key],
                         checked_through=checked_through,
-                        empty_days=empty_days_by_role[role_key],
-                        nonempty_days=nonempty_days_by_role[role_key],
+                        empty_days=(
+                            committed_empty_days_by_role[role_key]
+                        ),
+                        nonempty_days=(
+                            committed_nonempty_days_by_role[role_key]
+                        ),
                         oldest_supported=(
                             today - timedelta(days=HISTORY_DAYS - 1)
                         ),
                         retried_day=(
-                            retry_dates.get(role_key)
+                            committed_retry_dates.get(role_key)
                             if role_key in completed_retry_roles
                             else None
                         ),
                         checked_on=(
                             today
-                            if role_key in completed_retry_roles
+                            if role_key in committed_retry_dates
                             else None
                         ),
                         source_time_zone=source_time_zone,
+                        time_zone_migration_generation=(
+                            time_zone_migration_generations.get(role_key)
+                        ),
+                        reset_history_progress=(
+                            role_key in exact_replay_roles
+                        ),
                     )
 
             if pending_marker_roles:
-                _LOGGER.warning(
+                _LOGGER.info(
                     "Deferring smart1 derived energy completion markers for "
                     "roles %s until Recorder persistence can be verified",
                     ", ".join(sorted(pending_marker_roles)),
@@ -1992,17 +2817,19 @@ class Smart1DerivedEnergyImporter:
                             persistence_generation,
                             {
                                 role_key: (
-                                    coverage_targets.get(role_key)
+                                    committed_coverage_targets.get(role_key)
                                     if repair
                                     else None
                                 )
                                 for role_key in pending_marker_roles
                             },
-                            empty_days_by_role,
-                            nonempty_days_by_role,
-                            retry_dates,
+                            committed_empty_days_by_role,
+                            committed_nonempty_days_by_role,
+                            committed_retry_dates,
                             today,
                             source_time_zone,
+                            time_zone_migration_generations,
+                            exact_replay_roles,
                         )
                     )
                 return
