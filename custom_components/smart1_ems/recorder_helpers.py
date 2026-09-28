@@ -11,6 +11,12 @@ import re
 from typing import Any
 
 RECORDER_OPERATION_TIMEOUT = 10
+# A full initial history import can queue tens of thousands of statistics
+# rows.  Recorder may legitimately need substantially longer to commit and
+# expose that batch than it needs to acknowledge the much smaller clear
+# operation.  Keep the budgets separate so extending persistence verification
+# cannot make a delayed destructive clear look synchronous.
+RECORDER_PERSISTENCE_TIMEOUT = 120
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -149,11 +155,16 @@ async def async_wait_for_recorder_commit(recorder: Any) -> bool:
     try:
         await asyncio.wait_for(
             recorder.async_block_till_done(),
-            timeout=RECORDER_OPERATION_TIMEOUT,
+            timeout=RECORDER_PERSISTENCE_TIMEOUT,
         )
     except TimeoutError:
-        _LOGGER.warning(
-            "Timed out while waiting for smart1 statistics persistence"
+        # Large initial imports can legitimately keep Recorder busy beyond the
+        # bounded confirmation window. The caller still withholds its
+        # completion marker and retries later, so this is deferred work rather
+        # than a data-loss warning.
+        _LOGGER.debug(
+            "Recorder is still processing smart1 statistics; "
+            "completion remains deferred"
         )
         return False
     except Exception as err:  # noqa: BLE001
@@ -186,15 +197,25 @@ async def async_wait_for_statistics_readback(
         return False
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + RECORDER_OPERATION_TIMEOUT
+    deadline = loop.time() + RECORDER_PERSISTENCE_TIMEOUT
     last_error: Exception | None = None
     retry_delay = 0.0
     while True:
         remaining = deadline - loop.time()
         if remaining <= 0:
             if last_error is None:
-                _LOGGER.warning(
-                    "Timed out while reading back smart1 statistics"
+                _LOGGER.debug(
+                    "smart1 statistics are not visible in Recorder yet; "
+                    "completion remains deferred"
+                )
+            elif isinstance(last_error, TimeoutError):
+                # Concurrent readbacks for every derived-energy role can all
+                # hit this expected condition during a large initial import.
+                # Keep it at debug level to avoid one warning per role while
+                # retaining the false return value and marker safety.
+                _LOGGER.debug(
+                    "Recorder readback is still busy for smart1 statistics; "
+                    "completion remains deferred"
                 )
             else:
                 _LOGGER.warning(

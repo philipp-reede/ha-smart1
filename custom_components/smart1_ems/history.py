@@ -32,6 +32,7 @@ from .history_state import (
     PV_DAILY_HISTORY_SCHEMA_VERSION,
     PV_HISTORY_SCHEMA_VERSION,
     Smart1HistoryState,
+    UNJOURNALED_PV_HISTORY_SCHEMA_VERSIONS,
     recorded_source_time_zone,
     scoped_statistic_id,
     source_time_zone_requires_audit,
@@ -74,6 +75,295 @@ def _statistics_start(record: Mapping[str, Any]) -> datetime:
 def _statistics_date(record: Mapping[str, Any], local_tz: ZoneInfo) -> date:
     """Return the local date represented by a statistics record."""
     return _statistics_start(record).astimezone(local_tz).date()
+
+
+def _has_positive_statistics_on_dates_in_any_zone(
+    records: list[Mapping[str, Any]],
+    local_dates: set[date],
+    local_zones: tuple[ZoneInfo, ...],
+) -> bool:
+    """Return whether one positive row may map to an empty source day.
+
+    During recovery from a journaled time-zone migration Recorder may contain
+    either the source or target layout. A row is unsafe to replace when its
+    local date lacks fresh source data under either possible interpretation:
+    the replacement merge clears the union of those layouts as well. A
+    genuinely ambiguous successful-empty day therefore remains pending rather
+    than risking deletion of valid energy.
+    """
+    if not local_dates or not local_zones:
+        return False
+    for record in records:
+        state = record.get("state")
+        if (
+            not isinstance(state, (int, float))
+            or isinstance(state, bool)
+            or float(state) <= 0.0
+        ):
+            continue
+        if any(
+            _statistics_date(record, local_tz) in local_dates
+            for local_tz in local_zones
+        ):
+            return True
+    return False
+
+
+def _positive_daily_energy_from_records(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+    target_dates: set[date],
+    *,
+    daily_only: bool,
+) -> dict[date, float]:
+    """Return exact non-negative stored totals for selected local days."""
+    records_by_date: dict[date, list[Mapping[str, Any]]] = {}
+    for record in records:
+        target_date = _statistics_date(record, local_tz)
+        if target_date in target_dates:
+            records_by_date.setdefault(target_date, []).append(record)
+
+    totals: dict[date, float] = {}
+    for target_date, day_records in records_by_date.items():
+        aligned = _utc_hour_aligned_records(day_records)
+        if aligned:
+            # A daily-mode statistic may still contain a preserved historical
+            # hourly profile from an earlier hourly -> daily switch. Sum that
+            # profile instead of treating its final hour as the daily total.
+            # For a legacy daily row plus its repaired off-hour duplicate,
+            # the one aligned row remains the authoritative replacement.
+            candidates = aligned
+        elif daily_only:
+            candidates = [max(day_records, key=_statistics_start)]
+        else:
+            candidates = day_records if len(day_records) == 1 else []
+        total = 0.0
+        has_numeric_state = False
+        for candidate in candidates:
+            state = candidate.get("state")
+            if state is None:
+                continue
+            try:
+                energy_kwh = float(state)
+            except (TypeError, ValueError):
+                continue
+            if energy_kwh >= 0.0:
+                has_numeric_state = True
+                total += energy_kwh
+        if has_numeric_state:
+            totals[target_date] = total
+    return totals
+
+
+def _positive_daily_energy_from_hourly(
+    hourly_energy: list[tuple[datetime, float]],
+    local_tz: ZoneInfo,
+) -> dict[date, float]:
+    """Return exact non-negative target-local daily totals from a profile."""
+    totals: dict[date, float] = {}
+    for start, energy_kwh in hourly_energy:
+        if energy_kwh < 0.0:
+            continue
+        target_date = start.astimezone(local_tz).date()
+        totals[target_date] = totals.get(target_date, 0.0) + energy_kwh
+    return totals
+
+
+def _remap_unchecked_source_energy(
+    records: list[Mapping[str, Any]],
+    checked_dates: set[date],
+    records_tz: ZoneInfo,
+    target_tz: ZoneInfo,
+    *,
+    daily_only: bool,
+    preserve_hourly_profile: bool = False,
+) -> list[tuple[datetime, float]]:
+    """Aggregate retained source-local days into the target layout.
+
+    A proven time-zone change replaces the complete statistic. Portal data is
+    authoritative for every successfully checked source date; all other dates
+    must be retained from Recorder. Rebuilding their cumulative sums later is
+    essential because a remapped future edge may sort after the refreshed
+    supported window even though its old cumulative value was smaller.
+    """
+    records_by_date: dict[date, list[Mapping[str, Any]]] = {}
+    for record in records:
+        source_date = _statistics_date(record, records_tz)
+        if source_date in checked_dates:
+            continue
+        records_by_date.setdefault(source_date, []).append(record)
+
+    totals: dict[date, float] = {}
+    retained_profile: dict[datetime, float] = {}
+    for source_date, day_records in records_by_date.items():
+        aligned = _utc_hour_aligned_records(day_records)
+        if (
+            preserve_hourly_profile
+            and records_tz == target_tz
+            and aligned
+        ):
+            for candidate in aligned:
+                state = candidate.get("state")
+                if state is None:
+                    continue
+                try:
+                    energy_kwh = float(state)
+                except (TypeError, ValueError):
+                    continue
+                if energy_kwh >= 0.0:
+                    retained_profile[_statistics_start(candidate)] = energy_kwh
+            continue
+        if aligned:
+            # A completed daily schema can retain pre-window hourly profiles
+            # from a previous mode switch. Preserve their complete total. A
+            # lone aligned row also wins over an obsolete off-hour daily row.
+            candidates = aligned
+        elif daily_only:
+            # Multiple off-hour rows are legacy/repaired daily duplicates;
+            # the later timestamp is the authoritative exact total.
+            candidates = [max(day_records, key=_statistics_start)]
+        else:
+            # Hourly profiles can coexist with an obsolete off-hour daily
+            # spike. Preserve the aligned profile only. A lone non-aligned row
+            # still represents an exact daily fallback and remains recoverable.
+            candidates = day_records if len(day_records) == 1 else []
+        total = 0.0
+        has_numeric_state = False
+        for candidate in candidates:
+            state = candidate.get("state")
+            if state is None:
+                continue
+            try:
+                energy_kwh = float(state)
+            except (TypeError, ValueError):
+                continue
+            if energy_kwh >= 0.0:
+                has_numeric_state = True
+                total += energy_kwh
+        if has_numeric_state:
+            totals[source_date] = total
+    remapped_daily = [
+        (
+            _first_utc_hour_in_local_day(source_date, target_tz),
+            energy_kwh,
+        )
+        for source_date, energy_kwh in sorted(totals.items())
+    ]
+    return sorted([*retained_profile.items(), *remapped_daily])
+
+
+def _baseline_before_all_records(
+    records: list[Mapping[str, Any]],
+) -> float:
+    """Return the cumulative baseline before a whole-statistic remap."""
+    numeric: list[tuple[datetime, float, float]] = []
+    for record in records:
+        state = record.get("state")
+        cumulative_sum = record.get("sum")
+        if state is None or cumulative_sum is None:
+            continue
+        try:
+            numeric.append(
+                (
+                    _statistics_start(record),
+                    float(state),
+                    float(cumulative_sum),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    if not numeric:
+        return 0.0
+    _start, state, cumulative_sum = min(numeric, key=lambda item: item[0])
+    return cumulative_sum - state
+
+
+def _apply_daily_energy_fallbacks(
+    hourly_energy: list[tuple[datetime, float]],
+    fallback_daily_energy: Mapping[date, float],
+    empty_days: set[date],
+    local_tz: ZoneInfo,
+    *,
+    additional_dates: set[date] | None = None,
+) -> list[tuple[datetime, float]]:
+    """Replace ambiguous empty target days with journaled exact totals."""
+    eligible_dates = empty_days | (additional_dates or set())
+    active_fallbacks = {
+        target_date: float(energy_kwh)
+        for target_date, energy_kwh in fallback_daily_energy.items()
+        if target_date in eligible_dates and float(energy_kwh) >= 0.0
+    }
+    if not active_fallbacks:
+        return hourly_energy
+    kept = [
+        (start, energy_kwh)
+        for start, energy_kwh in hourly_energy
+        if start.astimezone(local_tz).date() not in active_fallbacks
+    ]
+    kept.extend(
+        (
+            _first_utc_hour_in_local_day(target_date, local_tz),
+            energy_kwh,
+        )
+        for target_date, energy_kwh in active_fallbacks.items()
+    )
+    return sorted(kept)
+
+
+def _pending_fallback_daily_energy(pending: Any) -> dict[date, float]:
+    """Return fallback totals from a production or lightweight journal."""
+    getter = getattr(pending, "fallback_energy_by_date", None)
+    if callable(getter):
+        return getter()
+    raw_fallbacks = getattr(pending, "fallback_daily_energy", ())
+    if isinstance(raw_fallbacks, Mapping):
+        return dict(raw_fallbacks)
+    try:
+        return dict(raw_fallbacks)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _pending_has_complete_daily_fallback(pending: Any) -> bool:
+    """Return whether a pending journal also proves zero target days."""
+    complete = getattr(pending, "has_complete_fallback", None)
+    if complete is not None:
+        return bool(complete)
+    return getattr(pending, "fallback_daily_energy", None) is not None
+
+
+def _pending_replacement_hourly_energy(
+    pending: Any,
+) -> dict[datetime, float]:
+    """Return an exact replacement profile from a production/test journal."""
+    getter = getattr(pending, "replacement_energy_by_start", None)
+    if callable(getter):
+        return getter()
+    raw_replacement = getattr(pending, "replacement_hourly_energy", ())
+    if isinstance(raw_replacement, Mapping):
+        return dict(raw_replacement)
+    try:
+        return dict(raw_replacement)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _pending_has_complete_replacement(pending: Any) -> bool:
+    """Return whether an exact (possibly empty) replacement was journaled."""
+    complete = getattr(pending, "has_complete_replacement", None)
+    if complete is not None:
+        return bool(complete)
+    return getattr(pending, "replacement_hourly_energy", None) is not None
+
+
+def _pending_has_invalid_replacement(pending: Any) -> bool:
+    """Return whether an exact journal field was present but malformed."""
+    invalid = getattr(pending, "has_invalid_replacement", None)
+    if invalid is not None:
+        return bool(invalid)
+    return bool(
+        getattr(pending, "replacement_hourly_energy_invalid", False)
+    )
 
 
 def determine_import_window(
@@ -360,8 +650,9 @@ def _preserved_pv_statistics_before(
     records_tz: ZoneInfo,
     *,
     target_tz: ZoneInfo | None = None,
+    end_date: date | None = None,
 ) -> list[StatisticData]:
-    """Keep profile rows preceding the supported rebuild window.
+    """Keep profile rows outside the supported rebuild window.
 
     Whole-UTC-hour rows are genuine hourly profile buckets and remain
     unchanged.  A lone positive local-midnight row is a legacy exact-daily
@@ -375,7 +666,10 @@ def _preserved_pv_statistics_before(
     records_by_date: dict[date, list[Mapping[str, Any]]] = {}
     for record in records:
         target_date = _statistics_date(record, records_tz)
-        if target_date >= start_date:
+        if (
+            target_date >= start_date
+            and (end_date is None or target_date <= end_date)
+        ):
             continue
         records_by_date.setdefault(target_date, []).append(record)
 
@@ -448,14 +742,18 @@ def _preserved_daily_pv_statistics_before(
     records_tz: ZoneInfo,
     *,
     target_tz: ZoneInfo | None = None,
+    end_date: date | None = None,
 ) -> list[StatisticData]:
-    """Remap exact daily PV rows preceding the supported rebuild window."""
+    """Remap exact daily PV rows outside the supported rebuild window."""
     target_tz = target_tz or records_tz
     preserved: dict[date, tuple[datetime, StatisticData]] = {}
     for record in records:
         original_start = _statistics_start(record)
         target_date = original_start.astimezone(records_tz).date()
-        if target_date >= start_date:
+        if (
+            target_date >= start_date
+            and (end_date is None or target_date <= end_date)
+        ):
             continue
         state = record.get("state")
         cumulative_sum = record.get("sum")
@@ -847,6 +1145,8 @@ class Smart1PvHistoryImporter:
         retried_day: date | None = None,
         today: date | None = None,
         source_time_zone: str | None = None,
+        time_zone_migration_generation: str | None = None,
+        reset_history_progress: bool = False,
     ) -> bool:
         """Verify a queued PV import before completing its schema marker."""
         if not self.history_state:
@@ -872,28 +1172,47 @@ class Smart1PvHistoryImporter:
         if persistence_generation != self._persistence_generation:
             return False
 
-        marked = self.history_state.commit_scan_if_unchanged(
-            self.statistic_id,
-            self.schema_version,
-            has_data=True,
-            expected_version=expected_marker_version,
-            checked_through=checked_through,
-            empty_days=empty_days or set(),
-            nonempty_days=nonempty_days or set(),
-            oldest_supported=(
+        commit_kwargs = {
+            "has_data": True,
+            "expected_version": expected_marker_version,
+            "checked_through": checked_through,
+            "empty_days": empty_days or set(),
+            "nonempty_days": nonempty_days or set(),
+            "oldest_supported": (
                 today - timedelta(days=HISTORY_DAYS - 1)
                 if today is not None
                 else date.min
             ),
-            retried_day=(
+            "retried_day": (
                 retried_day
                 if retried_day
                 in ((empty_days or set()) | (nonempty_days or set()))
                 else None
             ),
-            checked_on=(today if retried_day is not None else None),
-            source_time_zone=source_time_zone,
+            "checked_on": (today if retried_day is not None else None),
+            "source_time_zone": source_time_zone,
+            "time_zone_migration_generation": (
+                time_zone_migration_generation
+            ),
+            "reset_history_progress": reset_history_progress,
+        }
+        async_commit = getattr(
+            self.history_state,
+            "async_commit_scan_if_unchanged",
+            None,
         )
+        if callable(async_commit):
+            marked = await async_commit(
+                self.statistic_id,
+                self.schema_version,
+                **commit_kwargs,
+            )
+        else:
+            marked = self.history_state.commit_scan_if_unchanged(
+                self.statistic_id,
+                self.schema_version,
+                **commit_kwargs,
+            )
         if not marked:
             # A newer run may have completed the same marker while this late
             # finalizer was waiting. Treat that current state as success but
@@ -944,6 +1263,8 @@ class Smart1PvHistoryImporter:
         retried_day: date | None = None,
         today: date | None = None,
         source_time_zone: str | None = None,
+        time_zone_migration_generation: str | None = None,
+        reset_history_progress: bool = False,
     ) -> None:
         """Finalize a replacement whose clear callback arrived late."""
         confirmed = await self._async_confirm_statistics_persistence(
@@ -957,6 +1278,8 @@ class Smart1PvHistoryImporter:
             retried_day,
             today,
             source_time_zone,
+            time_zone_migration_generation,
+            reset_history_progress,
         )
         if persistence_generation != self._persistence_generation:
             return
@@ -1161,7 +1484,36 @@ class Smart1PvHistoryImporter:
             persistence_generation = self._persistence_generation
             self._last_result = "running"
             self._last_refresh_days = refresh_days
-            source_time_zone = self.hass.config.time_zone
+            configured_time_zone = self.hass.config.time_zone
+            pending_time_zone_migration = (
+                self.history_state.pending_time_zone_migration(
+                    self.statistic_id
+                )
+                if self.history_state
+                and callable(
+                    getattr(
+                        self.history_state,
+                        "pending_time_zone_migration",
+                        None,
+                    )
+                )
+                else None
+            )
+            pending_fallback_complete = bool(
+                pending_time_zone_migration is not None
+                and _pending_has_complete_daily_fallback(
+                    pending_time_zone_migration
+                )
+            )
+            # A crash can happen either before or after Recorder applies the
+            # queued replacement. Finish the journaled source -> target step
+            # first, even when Home Assistant has meanwhile changed to a third
+            # zone. A later repair then performs target -> configured zone.
+            source_time_zone = (
+                pending_time_zone_migration.target_time_zone
+                if pending_time_zone_migration is not None
+                else configured_time_zone
+            )
             local_tz = ZoneInfo(source_time_zone)
             today = datetime.now(local_tz).date()
             record_count = (
@@ -1191,21 +1543,34 @@ class Smart1PvHistoryImporter:
                 if self.history_state
                 else 0
             )
-            recorded_time_zone = recorded_source_time_zone(
-                self.history_state,
-                self.statistic_id,
-                source_time_zone,
+            recorded_time_zone = (
+                pending_time_zone_migration.source_time_zone
+                if pending_time_zone_migration is not None
+                else recorded_source_time_zone(
+                    self.history_state,
+                    self.statistic_id,
+                    source_time_zone,
+                )
             )
             try:
                 records_tz = ZoneInfo(recorded_time_zone)
             except ZoneInfoNotFoundError:
                 records_tz = local_tz
+            legacy_layout_canonicalization_required = bool(
+                records
+                and stored_schema_version
+                in UNJOURNALED_PV_HISTORY_SCHEMA_VERSIONS
+            )
             time_zone_rebuild_required = bool(
-                self.history_state
-                and source_time_zone_requires_rebuild(
-                    self.history_state,
-                    self.statistic_id,
-                    source_time_zone,
+                pending_time_zone_migration is not None
+                or legacy_layout_canonicalization_required
+                or (
+                    self.history_state
+                    and source_time_zone_requires_rebuild(
+                        self.history_state,
+                        self.statistic_id,
+                        source_time_zone,
+                    )
                 )
             )
             time_zone_audit_required = bool(
@@ -1223,31 +1588,46 @@ class Smart1PvHistoryImporter:
             alignment_rebuild_required = needs_utc_hour_alignment_rebuild(
                 records
             )
+            stored_daily_schema = stored_schema_version in {
+                2,
+                6,
+                PV_DAILY_HISTORY_SCHEMA_VERSION,
+            }
             switching_from_daily_schema = bool(
                 self.pv_power_point is not None
                 and self.history_state
-                and self.history_state.is_current_schema(
-                    self.statistic_id,
-                    PV_DAILY_HISTORY_SCHEMA_VERSION,
-                )
+                and stored_daily_schema
             )
             switching_from_hourly_schema = bool(
                 self.pv_power_point is None
                 and stored_schema_version
                 in {
-                    PV_HISTORY_SCHEMA_VERSION - 1,
+                    4,
+                    5,
                     PV_HISTORY_SCHEMA_VERSION,
                 }
             )
             current_daily_schema = (
                 stored_schema_version == PV_DAILY_HISTORY_SCHEMA_VERSION
             )
+            records_have_hourly_profile = _has_hourly_profile_semantics(
+                records,
+                records_tz,
+            )
             stored_profile_semantics = bool(
                 self.pv_power_point is None
                 and not current_daily_schema
                 and (
                     switching_from_hourly_schema
-                    or _has_hourly_profile_semantics(records, records_tz)
+                    or records_have_hourly_profile
+                )
+            )
+            stored_daily_semantics = bool(
+                stored_daily_schema
+                or switching_from_daily_schema
+                or (
+                    not records_have_hourly_profile
+                    and needs_hourly_pv_migration(records, records_tz)
                 )
             )
             profile_schema_rebuild_required = stored_profile_semantics
@@ -1255,14 +1635,17 @@ class Smart1PvHistoryImporter:
                 forced_initial_rebuild
                 or alignment_rebuild_required
                 or profile_schema_rebuild_required
+                or time_zone_rebuild_required
+            )
+            journaled_rebuild_required = (
+                alignment_rebuild_required
+                or profile_schema_rebuild_required
+                or time_zone_rebuild_required
             )
             if (
                 repair
                 and not forced_initial_rebuild
-                and (
-                    alignment_rebuild_required
-                    or profile_schema_rebuild_required
-                )
+                and destructive_rebuild_required
                 and len(records) >= record_count
             ):
                 # A whole-ID clear removes every row, not only the bounded
@@ -1273,6 +1656,7 @@ class Smart1PvHistoryImporter:
             self._migration_required = (
                 alignment_rebuild_required
                 or profile_schema_rebuild_required
+                or time_zone_rebuild_required
                 or time_zone_audit_required
                 or (
                     not initial_backfill_complete
@@ -1328,6 +1712,7 @@ class Smart1PvHistoryImporter:
                     switching_from_daily_schema
                     or alignment_rebuild_required
                     or profile_schema_rebuild_required
+                    or time_zone_rebuild_required
                     or time_zone_audit_required
                 ),
                 required_start=required_start,
@@ -1448,10 +1833,17 @@ class Smart1PvHistoryImporter:
                     )
                 )
             else:
+                # During journal recovery Recorder may contain either the
+                # source or target layout. Never reinterpret those ambiguous
+                # rows as source-local exact totals. Query the portal first;
+                # a successful-empty day is restored later from the durable
+                # target-date fallback instead.
                 exact_fallback = (
                     _daily_exact_fallback(records, records_tz)
-                    if self._migration_required
+                    if pending_time_zone_migration is None
+                    and self._migration_required
                     and not forced_initial_rebuild
+                    and not time_zone_rebuild_required
                     else {}
                 )
                 main_fetch_result = await self._fetch_hourly_energy(
@@ -1535,6 +1927,150 @@ class Smart1PvHistoryImporter:
             persisted_nonempty_days = (
                 main_nonempty_days | retry_nonempty_days
             )
+            migration_fallback_daily_energy: dict[date, float] = {}
+            pending_clear_rebuild_baseline = (
+                getattr(
+                    pending_time_zone_migration,
+                    "clear_rebuild_baseline_sum",
+                    None,
+                )
+                if pending_time_zone_migration is not None
+                else None
+            )
+            pending_fallback_daily_energy = (
+                _pending_fallback_daily_energy(
+                    pending_time_zone_migration
+                )
+                if pending_time_zone_migration is not None
+                else {}
+            )
+            pending_replacement_hourly_energy = (
+                _pending_replacement_hourly_energy(
+                    pending_time_zone_migration
+                )
+                if pending_time_zone_migration is not None
+                else {}
+            )
+            pending_identity_rebuild = bool(
+                pending_time_zone_migration is not None
+                and pending_time_zone_migration.source_time_zone
+                == pending_time_zone_migration.target_time_zone
+            )
+            pending_replacement_complete = bool(
+                pending_time_zone_migration is not None
+                and _pending_has_complete_replacement(
+                    pending_time_zone_migration
+                )
+            )
+            pending_replacement_invalid = bool(
+                pending_time_zone_migration is not None
+                and _pending_has_invalid_replacement(
+                    pending_time_zone_migration
+                )
+            )
+            replaying_exact_replacement = bool(
+                time_zone_rebuild_required
+                and pending_time_zone_migration is not None
+                and pending_replacement_complete
+            )
+            if (
+                pending_time_zone_migration is not None
+                and time_zone_rebuild_required
+                and (
+                    pending_clear_rebuild_baseline is None
+                    or pending_replacement_invalid
+                    or (
+                        pending_identity_rebuild
+                        and not pending_replacement_complete
+                    )
+                    or (
+                        not pending_identity_rebuild
+                        and not pending_replacement_complete
+                        and not pending_fallback_complete
+                    )
+                    or (
+                        not pending_replacement_complete
+                        and not pending_fallback_daily_energy
+                        and float(pending_clear_rebuild_baseline) != 0.0
+                    )
+                )
+            ):
+                # Every journal created by this release contains the complete
+                # replacement totals and the cumulative baseline. Refuse a
+                # malformed/incomplete entry before touching Recorder; unlike
+                # guessing from the current rows, this is safe whether a queued
+                # pre-crash clear already committed or not.
+                _LOGGER.warning(
+                    "Deferring smart1 PV time-zone migration because the "
+                    "durable clear journal is incomplete"
+                )
+                self._last_result = "migration_journal_incomplete"
+                return
+            if time_zone_rebuild_required:
+                if pending_time_zone_migration is not None:
+                    migration_fallback_daily_energy = dict(
+                        pending_fallback_daily_energy
+                    )
+                else:
+                    migration_fallback_daily_energy = (
+                        _positive_daily_energy_from_hourly(
+                            fetched_hourly_energy,
+                            local_tz,
+                        )
+                    )
+                    for target_date, energy_kwh in (
+                        _positive_daily_energy_from_records(
+                            records,
+                            records_tz,
+                            empty_days,
+                            daily_only=stored_daily_semantics,
+                        ).items()
+                    ):
+                        migration_fallback_daily_energy[target_date] = (
+                            energy_kwh
+                        )
+                if pending_replacement_complete:
+                    # Finish the exact batch that was durably recorded before
+                    # Recorder was cleared. Mixing a newer fetch into this
+                    # ambiguous retry could lose cross-day boundary buckets;
+                    # the next normal refresh safely applies newer portal data.
+                    fetched_hourly_energy = sorted(
+                        pending_replacement_hourly_energy.items()
+                    )
+                else:
+                    fetched_hourly_energy = _apply_daily_energy_fallbacks(
+                        fetched_hourly_energy,
+                        migration_fallback_daily_energy,
+                        empty_days,
+                        local_tz,
+                        additional_dates=(
+                            set(migration_fallback_daily_energy)
+                            - main_checked_days
+                            if pending_time_zone_migration is not None
+                            else set()
+                        ),
+                    )
+                if pending_time_zone_migration is None:
+                    # A whole-ID clear must recreate every row, not only the
+                    # portal-supported window. Aggregate all unchecked source
+                    # days by their original calendar date and map those exact
+                    # totals into the target zone. On a pending retry the same
+                    # rows come from the durable complete fallback instead.
+                    fetched_hourly_energy.extend(
+                        _remap_unchecked_source_energy(
+                            records,
+                            main_checked_days,
+                            records_tz,
+                            local_tz,
+                            daily_only=stored_daily_semantics,
+                            preserve_hourly_profile=(
+                                self.pv_power_point is not None
+                            ),
+                        )
+                    )
+                    fetched_hourly_energy = sorted(
+                        dict(fetched_hourly_energy).items()
+                    )
             if nonempty_retry_date is not None:
                 start_date, baseline_sum = (
                     determine_hourly_pv_import_window(
@@ -1563,6 +2099,7 @@ class Smart1PvHistoryImporter:
                 not initial_backfill_complete
                 or alignment_rebuild_required
                 or profile_schema_rebuild_required
+                or time_zone_rebuild_required
                 or time_zone_audit_required
             ) and not fetch_completed:
                 _LOGGER.warning(
@@ -1572,7 +2109,7 @@ class Smart1PvHistoryImporter:
                 self._last_result = "incomplete_fetch"
                 return
 
-            if forced_initial_rebuild or stored_profile_semantics:
+            if destructive_rebuild_required:
                 hourly_energy = sorted(fetched_hourly_energy)
             else:
                 merge_records = (
@@ -1612,13 +2149,18 @@ class Smart1PvHistoryImporter:
             if (
                 alignment_rebuild_required
                 or profile_schema_rebuild_required
-            ) and not forced_initial_rebuild:
+                or time_zone_rebuild_required
+            ) and not forced_initial_rebuild and (
+                pending_clear_rebuild_baseline is None
+                and not time_zone_rebuild_required
+            ):
                 preserved_statistics = (
                     _preserved_daily_pv_statistics_before(
                         records,
                         start_date,
                         records_tz,
                         target_tz=local_tz,
+                        end_date=(today if time_zone_rebuild_required else None),
                     )
                     if self.pv_power_point is None
                     and not stored_profile_semantics
@@ -1627,10 +2169,19 @@ class Smart1PvHistoryImporter:
                         start_date,
                         records_tz,
                         target_tz=local_tz,
+                        end_date=(today if time_zone_rebuild_required else None),
                     )
                 )
             else:
                 preserved_statistics = []
+            if time_zone_rebuild_required:
+                baseline_sum = (
+                    float(pending_clear_rebuild_baseline)
+                    if pending_clear_rebuild_baseline is not None
+                    else _baseline_before_all_records(records)
+                )
+            elif pending_clear_rebuild_baseline is not None:
+                baseline_sum = float(pending_clear_rebuild_baseline)
             if preserved_statistics:
                 # Schema and alignment repairs deliberately reimport valid
                 # pre-window rows. Continue from their last cumulative value
@@ -1648,10 +2199,36 @@ class Smart1PvHistoryImporter:
             if (
                 alignment_rebuild_required
                 or profile_schema_rebuild_required
+                or time_zone_rebuild_required
             ):
                 statistics = sorted(
                     [*preserved_statistics, *statistics],
                     key=lambda item: item["start"],
+                )
+            clear_rebuild_baseline_sum: float | None = None
+            if journaled_rebuild_required:
+                # Journal the complete replacement batch, including any
+                # pre-window rows that a destructive clear must recreate.
+                # A later retry can then recover both their energy and the
+                # cumulative baseline even if Recorder crashed after clear.
+                migration_fallback_daily_energy = (
+                    _positive_daily_energy_from_hourly(
+                        [
+                            (item["start"], float(item["state"]))
+                            for item in statistics
+                        ],
+                        local_tz,
+                    )
+                )
+                # The explicit value also makes an intentionally empty
+                # replacement distinguishable from an incomplete journal.
+                # Derive it from the first row of the *complete* replacement:
+                # profile/alignment rebuilds may prepend preserved rows whose
+                # cumulative sum predates the supported portal window.
+                clear_rebuild_baseline_sum = (
+                    _baseline_before_all_records(statistics)
+                    if statistics
+                    else float(baseline_sum)
                 )
             metadata = StatisticMetaData(
                 mean_type=StatisticMeanType.NONE,
@@ -1667,6 +2244,117 @@ class Smart1PvHistoryImporter:
                 if self.history_state
                 else 0
             )
+            # The recovery fetch is useful only to prove that the portal is
+            # reachable.  Exact replay deliberately ignores its content to
+            # finish the durable batch atomically, so it must not advance
+            # coverage or empty-day evidence. Resetting target-schema progress
+            # makes the next ordinary repair perform a full supported-window
+            # catch-up without another destructive clear.
+            commit_main_checked_through = (
+                None
+                if replaying_exact_replacement
+                else main_checked_through
+            )
+            commit_empty_days = (
+                set() if replaying_exact_replacement else empty_days
+            )
+            commit_nonempty_days = (
+                set()
+                if replaying_exact_replacement
+                else persisted_nonempty_days
+            )
+            commit_retry_date = (
+                None
+                if replaying_exact_replacement
+                else (retry_date if retry_completed else None)
+            )
+            time_zone_migration_generation: str | None = None
+            if self.history_state:
+                # A pending target represents the most conservative view of
+                # Recorder after a crash: its queued write may already have
+                # committed even though the fingerprint did not. Reuse that
+                # generation when retrying the same target. For a new target,
+                # persist a replacement journal entry before *any* Recorder
+                # clear/import is queued.
+                pending_time_zone_migration = (
+                    self.history_state.pending_time_zone_migration(
+                        self.statistic_id
+                    )
+                    if callable(
+                        getattr(
+                            self.history_state,
+                            "pending_time_zone_migration",
+                            None,
+                        )
+                    )
+                    else pending_time_zone_migration
+                )
+                matching_pending_migration = bool(
+                    pending_time_zone_migration is not None
+                    and pending_time_zone_migration.target_time_zone
+                    == source_time_zone
+                )
+                if (
+                    journaled_rebuild_required
+                    and (statistics or destructive_rebuild_required)
+                ):
+                    begin_migration = getattr(
+                        self.history_state,
+                        "async_begin_time_zone_migration",
+                        None,
+                    )
+                    migration_kwargs: dict[str, Any] = {
+                        "fallback_daily_energy": (
+                            migration_fallback_daily_energy
+                        )
+                    }
+                    if destructive_rebuild_required:
+                        migration_kwargs["clear_rebuild_baseline_sum"] = (
+                            clear_rebuild_baseline_sum
+                        )
+                    migration_source_time_zone = (
+                        pending_time_zone_migration.source_time_zone
+                        if matching_pending_migration
+                        else recorded_time_zone
+                    )
+                    migration_kwargs["replacement_hourly_energy"] = [
+                        {
+                            "start": item["start"],
+                            "state": item["state"],
+                        }
+                        for item in statistics
+                    ]
+                    try:
+                        if callable(begin_migration):
+                            time_zone_migration_generation = (
+                                await begin_migration(
+                                    self.statistic_id,
+                                    migration_source_time_zone,
+                                    source_time_zone,
+                                    **migration_kwargs,
+                                )
+                            )
+                        else:
+                            time_zone_migration_generation = (
+                                self.history_state.begin_time_zone_migration(
+                                    self.statistic_id,
+                                    migration_source_time_zone,
+                                    source_time_zone,
+                                    **migration_kwargs,
+                                )
+                            )
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Unable to persist smart1 PV time-zone "
+                            "migration journal (%s)",
+                            type(err).__name__,
+                        )
+                        self._last_result = "migration_journal_error"
+                        return
+                elif matching_pending_migration:
+                    time_zone_migration_generation = (
+                        pending_time_zone_migration.generation
+                    )
 
             def _enqueue_statistics() -> None:
                 async_add_external_statistics(
@@ -1679,39 +2367,70 @@ class Smart1PvHistoryImporter:
             recorder = get_instance(self.hass)
             if destructive_rebuild_required:
 
+                async def _async_commit_empty_rebuild() -> bool:
+                    if (
+                        persistence_generation
+                        != self._persistence_generation
+                        or not self.history_state
+                    ):
+                        return False
+                    commit_kwargs = {
+                        "has_data": False,
+                        "expected_version": expected_marker_version,
+                        "checked_through": (
+                            commit_main_checked_through
+                            if fetch_completed
+                            else None
+                        ),
+                        "empty_days": commit_empty_days,
+                        "nonempty_days": set(),
+                        "oldest_supported": (
+                            today - timedelta(days=HISTORY_DAYS - 1)
+                        ),
+                        "checked_on": None,
+                        "source_time_zone": source_time_zone,
+                        "time_zone_migration_generation": (
+                            time_zone_migration_generation
+                        ),
+                        "reset_history_progress": (
+                            replaying_exact_replacement
+                        ),
+                    }
+                    async_commit = getattr(
+                        self.history_state,
+                        "async_commit_scan_if_unchanged",
+                        None,
+                    )
+                    if callable(async_commit):
+                        committed = await async_commit(
+                            self.statistic_id,
+                            self.schema_version,
+                            **commit_kwargs,
+                        )
+                    else:
+                        committed = (
+                            self.history_state.commit_scan_if_unchanged(
+                                self.statistic_id,
+                                self.schema_version,
+                                **commit_kwargs,
+                            )
+                        )
+                    if committed:
+                        self._migration_required = False
+                    return committed
+
                 def _mark_rebuild_complete() -> None:
                     # A successful clear is the complete Recorder operation
                     # only when there is no replacement batch.  Non-empty
-                    # replacements are marked after queue synchronization and
-                    # an explicit statistics readback below.
-                    if (
-                        persistence_generation != self._persistence_generation
-                    ):
-                        return
-                    if not statistics and self.history_state and (
-                        self.history_state.commit_scan_if_unchanged(
-                            self.statistic_id,
-                            self.schema_version,
-                            has_data=False,
-                            expected_version=expected_marker_version,
-                            checked_through=(
-                                main_checked_through
-                                if fetch_completed
-                                else None
-                            ),
-                            empty_days=empty_days,
-                            nonempty_days=set(),
-                            oldest_supported=(
-                                today - timedelta(days=HISTORY_DAYS - 1)
-                            ),
-                            checked_on=None,
-                            source_time_zone=source_time_zone,
-                        )
-                    ):
-                        self._migration_required = False
+                    # replacements are committed by the async caller below;
+                    # non-empty replacements additionally require readback.
+                    return
 
                 def _finalize_late_rebuild() -> None:
                     if not statistics:
+                        self._schedule_persistence_task(
+                            _async_commit_empty_rebuild()
+                        )
                         return
                     self._schedule_persistence_task(
                         self._async_finalize_late_clear(
@@ -1719,12 +2438,18 @@ class Smart1PvHistoryImporter:
                             statistics,
                             expected_marker_version,
                             persistence_generation,
-                            main_checked_through if repair else None,
-                            empty_days,
-                            persisted_nonempty_days,
-                            retry_date if retry_completed else None,
+                            (
+                                commit_main_checked_through
+                                if repair
+                                else None
+                            ),
+                            commit_empty_days,
+                            commit_nonempty_days,
+                            commit_retry_date,
                             today,
                             source_time_zone,
+                            time_zone_migration_generation,
+                            replaying_exact_replacement,
                         )
                     )
 
@@ -1755,27 +2480,57 @@ class Smart1PvHistoryImporter:
             if not statistics:
                 _LOGGER.debug("No smart1 PV history available for import")
                 if self.history_state and main_checked_through is not None:
-                    committed = self.history_state.commit_scan_if_unchanged(
-                        self.statistic_id,
-                        self.schema_version,
-                        has_data=bool(records),
-                        expected_version=expected_marker_version,
-                        checked_through=(
-                            main_checked_through if repair else None
-                        ),
-                        empty_days=empty_days,
-                        nonempty_days=persisted_nonempty_days,
-                        oldest_supported=(
-                            today - timedelta(days=HISTORY_DAYS - 1)
-                        ),
-                        retried_day=(
-                            retry_date if retry_completed else None
-                        ),
-                        checked_on=(
-                            today if retry_completed else None
-                        ),
-                        source_time_zone=source_time_zone,
-                    )
+                    if destructive_rebuild_required:
+                        committed = await _async_commit_empty_rebuild()
+                    else:
+                        commit_kwargs = {
+                            "has_data": bool(records),
+                            "expected_version": expected_marker_version,
+                            "checked_through": (
+                                commit_main_checked_through
+                                if repair
+                                else None
+                            ),
+                            "empty_days": commit_empty_days,
+                            "nonempty_days": commit_nonempty_days,
+                            "oldest_supported": (
+                                today - timedelta(days=HISTORY_DAYS - 1)
+                            ),
+                            "retried_day": (
+                                commit_retry_date
+                            ),
+                            "checked_on": (
+                                today
+                                if commit_retry_date is not None
+                                else None
+                            ),
+                            "source_time_zone": source_time_zone,
+                            "time_zone_migration_generation": (
+                                time_zone_migration_generation
+                            ),
+                            "reset_history_progress": (
+                                replaying_exact_replacement
+                            ),
+                        }
+                        async_commit = getattr(
+                            self.history_state,
+                            "async_commit_scan_if_unchanged",
+                            None,
+                        )
+                        if callable(async_commit):
+                            committed = await async_commit(
+                                self.statistic_id,
+                                self.schema_version,
+                                **commit_kwargs,
+                            )
+                        else:
+                            committed = (
+                                self.history_state.commit_scan_if_unchanged(
+                                    self.statistic_id,
+                                    self.schema_version,
+                                    **commit_kwargs,
+                                )
+                            )
                     if committed:
                         self._migration_required = False
                 self._last_result = "no_data"
@@ -1796,6 +2551,8 @@ class Smart1PvHistoryImporter:
                     )
                     or self._data_presence() is not True
                     or alignment_rebuild_required
+                    or profile_schema_rebuild_required
+                    or time_zone_rebuild_required
                     or time_zone_audit_required
                     or (
                         main_checked_through is not None
@@ -1812,16 +2569,22 @@ class Smart1PvHistoryImporter:
                         statistics,
                         expected_marker_version,
                         persistence_generation,
-                        main_checked_through if repair else None,
-                        empty_days,
-                        persisted_nonempty_days,
-                        retry_date if retry_completed else None,
+                        (
+                            commit_main_checked_through
+                            if repair
+                            else None
+                        ),
+                        commit_empty_days,
+                        commit_nonempty_days,
+                        commit_retry_date,
                         today,
                         source_time_zone,
+                        time_zone_migration_generation,
+                        replaying_exact_replacement,
                     )
                 )
                 if not persistence_confirmed:
-                    _LOGGER.warning(
+                    _LOGGER.info(
                         "Deferring smart1 PV history completion marker until "
                         "Recorder persistence can be verified"
                     )
@@ -1833,12 +2596,18 @@ class Smart1PvHistoryImporter:
                                 list(statistics),
                                 expected_marker_version,
                                 persistence_generation,
-                                main_checked_through if repair else None,
-                                empty_days,
-                                persisted_nonempty_days,
-                                retry_date if retry_completed else None,
+                                (
+                                    commit_main_checked_through
+                                    if repair
+                                    else None
+                                ),
+                                commit_empty_days,
+                                commit_nonempty_days,
+                                commit_retry_date,
                                 today,
                                 source_time_zone,
+                                time_zone_migration_generation,
+                                replaying_exact_replacement,
                             )
                         )
                     return

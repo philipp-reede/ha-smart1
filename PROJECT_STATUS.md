@@ -184,7 +184,7 @@
   pre-migration hourly data is adopted without an unnecessary annual sweep.
   Ambiguous historical version-2 and version-3 markers are resolved from the
   stored row shape, while current daily-only history uses the unambiguous
-  version-6 marker and does not repeatedly rebuild preserved fallback rows
+  version-8 marker and does not repeatedly rebuild preserved fallback rows
 - Completed sparse derived-energy statistics may legitimately contain only
   midnight buckets and retain the normal short refresh window. Decreasing
   cumulative sums within the supported 365-day window, including the boundary
@@ -200,6 +200,20 @@
   Prefixes with rows advance only after Recorder confirmation. Successful
   no-data days advance coverage and are retained for bounded, rotating
   single-day rechecks
+- Source-time-zone fingerprints and in-flight migration generations are
+  written to a dedicated durable store before Recorder receives replacement
+  statistics. Each new generation retains the exact final UTC-hour replacement
+  profile, exact non-negative target-day totals for compatibility, and the
+  cumulative baseline before the replacement batch. The same journal protects
+  destructive PV storage-mode and UTC-alignment rebuilds. An interrupted exact
+  generation is replayed atomically; its coverage evidence is reset when the
+  journal closes so the next normal repair performs one complete,
+  non-destructive catch-up for data that appeared meanwhile. This recovers
+  either layout without flattening hourly profiles, losing energy, blocking
+  permanently on an adjacent empty day or repeating destructive annual scans.
+  Older real time-zone journals without an exact profile retain their
+  daily-total fallback; missing or malformed exact identity-layout journals
+  stop before Recorder is mutated
 - Destructive history rebuilds wait for Recorder's per-operation completion
   callback before completion state is written. Replacement batches are prepared
   and validated first, then queued immediately behind the clear without an
@@ -210,16 +224,17 @@
   the active, unchanged schema generation, so overlapping or unloaded runs
   cannot overwrite newer state. Failure to inspect optional Recorder metadata
   does not block live sensors
-- PV and derived-energy history schemas were advanced so completion markers
-  that an older release may have written for an empty result are revalidated
-  once; a newly confirmed empty result is then persisted normally
+- PV history schemas 7/8 and derived-energy schema 6 perform one
+  journal-protected whole-statistic canonicalization for layouts written before
+  the durable migration journal. Completion markers that an older release may
+  have written for an empty result are revalidated once; a newly confirmed
+  empty result is then persisted normally
 - Unstructured interface values containing `photovoltaic` remain classified as
   PV by the shared entity and discovery classifier
-- Orphaned legacy statistics have their completion marker invalidated
-  synchronously after Recorder accepts the clear, because that queued operation
-  cannot be cancelled. The eventual callback records cleanup from the latest
-  config-entry data without touching a marker written by a newer reload or
-  replacement import
+- Orphaned legacy statistics have their completion and source-time-zone state
+  removed durably before Recorder accepts the irreversible clear. The eventual
+  callback records cleanup from the latest config-entry data without touching
+  a marker written by a newer reload or replacement import
 - Five-minute power integration preserves both occurrences of naive local
   timestamps during the autumn daylight-saving-time fold; timestamps that
   already include an offset continue to be used exactly. Because naive portal
@@ -250,7 +265,7 @@
 - Entities use Home Assistant's device-aware naming convention
 - The repository contains HACS metadata, public installation documentation,
   English and German custom-integration translations, and automated HACS and
-  Hassfest validation for the current 0.7.3 early-beta release
+  Hassfest validation for the current 0.7.4 early-beta release
 - CI also imports every integration module against pinned Home Assistant Core
   2026.9.3 on Python 3.14, while setup tests cover startup history import and
   the separate scheduled repair and current-day refresh paths. GitHub's

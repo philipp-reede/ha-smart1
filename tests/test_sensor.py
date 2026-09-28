@@ -87,6 +87,11 @@ class FakeEntityRegistry:
 
     def async_remove(self, entity_id) -> None:
         self.removed.append(entity_id)
+        self.registry_entries = [
+            entry
+            for entry in self.registry_entries
+            if entry.entity_id != entity_id
+        ]
 
     def add_entry(
         self,
@@ -100,6 +105,7 @@ class FakeEntityRegistry:
         unit_of_measurement=None,
         options=None,
         aliases=None,
+        device_id=None,
     ) -> None:
         self.entities[(domain, platform, unique_id)] = entity_id
         self.registry_entries.append(
@@ -109,6 +115,7 @@ class FakeEntityRegistry:
                 entity_id=entity_id,
                 platform=platform,
                 unique_id=unique_id,
+                device_id=device_id,
                 name=name,
                 unit_of_measurement=unit_of_measurement,
                 options=options or {},
@@ -122,10 +129,30 @@ class FakeEntityRegistry:
 class FakeDeviceRegistry:
     def __init__(self) -> None:
         self.created = []
+        self.registry_entries = []
+        self.removed = []
 
     def async_get_or_create(self, **kwargs):
         self.created.append(kwargs)
         return types.SimpleNamespace(id="ems-device-id")
+
+    def async_remove_device(self, device_id) -> None:
+        self.removed.append(device_id)
+
+    def add_entry(
+        self,
+        device_id,
+        identifiers,
+        *,
+        config_entry_id="entry-1",
+    ) -> None:
+        self.registry_entries.append(
+            types.SimpleNamespace(
+                config_entry_id=config_entry_id,
+                id=device_id,
+                identifiers=set(identifiers),
+            )
+        )
 
 
 def async_get_device_registry(hass):
@@ -143,6 +170,13 @@ class DeviceInfo(dict):
 
 device_registry.DeviceInfo = DeviceInfo
 device_registry.async_get = async_get_device_registry
+device_registry.async_entries_for_config_entry = (
+    lambda registry, entry_id: [
+        entry
+        for entry in registry.registry_entries
+        if entry.config_entry_id == entry_id
+    ]
+)
 sys.modules["homeassistant.helpers.device_registry"] = device_registry
 
 
@@ -154,6 +188,13 @@ entity_registry.async_entries_for_config_entry = (
         entry
         for entry in registry.registry_entries
         if entry.config_entry_id == entry_id
+    ]
+)
+entity_registry.async_entries_for_device = (
+    lambda registry, device_id, include_disabled_entities=False: [
+        entry
+        for entry in registry.registry_entries
+        if entry.device_id == device_id
     ]
 )
 sys.modules["homeassistant.helpers.entity_registry"] = entity_registry
@@ -718,6 +759,170 @@ class InverterSensorTest(unittest.TestCase):
         )
 
         self.assertEqual(self.entity_registry.removed, [])
+
+    def test_authoritative_cleanup_removes_stale_inverter_device_after_entities(
+        self,
+    ) -> None:
+        operations = []
+        stale_identifier = (
+            "smart1_ems",
+            "entry-1:inverter:Inverter_B2_A2",
+        )
+        self.device_registry.add_entry("stale-device", {stale_identifier})
+        self.device_registry.add_entry(
+            "current-device",
+            {
+                (
+                    "smart1_ems",
+                    f"entry-1:inverter:{self.inverter.id}",
+                )
+            },
+        )
+        self.device_registry.add_entry(
+            "logical-device",
+            {("smart1_ems", "entry-1:pv")},
+        )
+        self.device_registry.add_entry(
+            "other-entry-device",
+            {("smart1_ems", "other-entry:inverter:Inverter_B2_A2")},
+            config_entry_id="other-entry",
+        )
+        self.entity_registry.add_entry(
+            "sensor.stale_temperature",
+            "smart1_entry-1_inverter_2_2_temperature",
+            device_id="stale-device",
+        )
+
+        original_entity_remove = self.entity_registry.async_remove
+        original_device_remove = self.device_registry.async_remove_device
+
+        def remove_entity(entity_id) -> None:
+            operations.append(("entity", entity_id))
+            original_entity_remove(entity_id)
+
+        def remove_device(device_id) -> None:
+            operations.append(("device", device_id))
+            original_device_remove(device_id)
+
+        self.entity_registry.async_remove = remove_entity
+        self.device_registry.async_remove_device = remove_device
+
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": types.SimpleNamespace(
+                            data={"pv_strings": {}}
+                        ),
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [self.inverter],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(
+            operations,
+            [
+                ("entity", "sensor.stale_temperature"),
+                ("device", "stale-device"),
+            ],
+        )
+        self.assertEqual(self.device_registry.removed, ["stale-device"])
+
+    def test_non_authoritative_cleanup_preserves_stale_inverter_device(
+        self,
+    ) -> None:
+        self.device_registry.add_entry(
+            "stale-device",
+            {("smart1_ems", "entry-1:inverter:Inverter_B2_A2")},
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": types.SimpleNamespace(
+                            data={"pv_strings": {}}
+                        ),
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": False,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(self.device_registry.removed, [])
+
+    def test_stale_inverter_device_is_kept_while_an_entity_remains(
+        self,
+    ) -> None:
+        self.device_registry.add_entry(
+            "stale-device",
+            {("smart1_ems", "entry-1:inverter:Inverter_B2_A2")},
+        )
+        self.entity_registry.add_entry(
+            "sensor.future_metric",
+            "smart1_entry-1_inverter_2_2_future_metric",
+            device_id="stale-device",
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": types.SimpleNamespace(
+                            data={"pv_strings": {}}
+                        ),
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(self.entity_registry.removed, [])
+        self.assertEqual(self.device_registry.removed, [])
 
     def test_module_capacity_waits_for_authoritative_inverter_discovery(
         self,

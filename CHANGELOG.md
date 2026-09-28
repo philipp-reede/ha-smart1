@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.4] - 2026-09-28
+
+### Fixed
+
+- Resume interrupted derived-energy catch-ups with the previous portal day as
+  boundary context, preserving the final 23:55-to-00:00 interval. Derived
+  history schema version 6 includes this repair so an already affected partial
+  import is rebuilt automatically
+- Journal source-time-zone migrations before queuing Recorder writes and only
+  commit their fingerprint after verified persistence. Successful empty API
+  days retain exact journaled non-negative daily totals during a time-zone
+  remap, including after a restart or a newer retry batch, without repeating
+  an annual scan or discarding valid PV or derived energy. PV schemas 7/8 and
+  derived schema 6 perform one journal-protected whole-statistic
+  canonicalization for layouts previously written by version 0.7.3, retaining
+  valid history outside the portal's supported repair window in the same
+  replacement batch. The same durable journal protects destructive PV
+  hourly/daily mode switches and alignment repairs. Every new journal stores
+  the exact final UTC-hour replacement profile as well as legacy daily totals,
+  so a restart after Recorder clears the statistic cannot collapse multiple
+  hourly buckets into one daily row. Recovery replays that profile atomically,
+  then schedules one complete non-destructive catch-up so portal data that
+  appeared meanwhile is not skipped. Malformed journals fail closed, while
+  explicit empty replacements and older real time-zone journals remain safe.
+  New destructive migrations are deferred while Home Assistant is stopping or
+  performing its final-write phase
+- Give large Recorder imports a dedicated persistence-verification budget and
+  verify derived-energy roles sequentially, avoiding bursts of concurrent
+  readbacks and misleading timeout warnings during the initial 365-day import
+- Remove an obsolete physical inverter device after authoritative topology
+  cleanup once none of its entities remain, while preserving devices that are
+  still referenced or whose topology result is not authoritative
+
 ## [0.7.3] - 2026-09-25
 
 ### Fixed
