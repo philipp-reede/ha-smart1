@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from hashlib import sha256
@@ -11,6 +11,7 @@ import logging
 import math
 from typing import Any, NamedTuple
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 
 STATISTICS_NAMESPACE_KEY = "statistics_namespace"
@@ -39,17 +40,69 @@ def history_store_lock(hass: Any, store_key: str | None) -> asyncio.Lock:
     Config-entry reloads create a new ``Smart1HistoryState`` and a new
     ``Store`` object while callbacks from the old runtime may still be
     finishing.  The lock therefore belongs to the Home Assistant process and
-    store key, not to either state instance.  Lightweight callers without a
+    store key, not to either state instance. The registry retains it weakly;
+    active states, holders and waiters keep the common fence alive while an
+    unused entry disappears automatically. Lightweight callers without a
     normal ``hass.data`` mapping retain an instance-local fallback lock.
     """
     hass_data = getattr(hass, "data", None)
     if not store_key or not isinstance(hass_data, dict):
         return asyncio.Lock()
-    locks = hass_data.setdefault(HISTORY_STORE_LOCKS_KEY, {})
-    if not isinstance(locks, dict):
+    locks = hass_data.get(HISTORY_STORE_LOCKS_KEY)
+    if isinstance(locks, dict):
+        # Upgrade the original strong-reference registry in place. Active
+        # states, holders and waiters retain their own strong references, so
+        # an entry can disappear only after it can no longer split the fence.
+        weak_locks: WeakValueDictionary[str, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
+        for key, lock in locks.items():
+            if isinstance(key, str) and isinstance(lock, asyncio.Lock):
+                weak_locks[key] = lock
+        hass_data[HISTORY_STORE_LOCKS_KEY] = weak_locks
+        locks = weak_locks
+    elif locks is None:
+        locks = WeakValueDictionary()
+        hass_data[HISTORY_STORE_LOCKS_KEY] = locks
+    if not isinstance(locks, WeakValueDictionary):
         # Do not replace unexpected third-party data at the private key.
         return asyncio.Lock()
     return locks.setdefault(store_key, asyncio.Lock())
+
+
+async def async_drain_store_operation(operation: Awaitable[Any]) -> Any:
+    """Finish storage I/O before propagating caller cancellation.
+
+    Home Assistant performs storage writes and removals in an executor.
+    Cancelling the awaiting task does not stop that worker thread. Callers use
+    this helper while holding the process-wide store-key lock, so an old
+    runtime cannot release the lock and later overwrite or remove state that a
+    new runtime has already persisted.
+
+    A storage exception takes precedence over delayed cancellation. The caller
+    can then run its normal rollback instead of retaining an unpersisted
+    in-memory journal generation.
+    """
+    inner = asyncio.ensure_future(operation)
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            result = await asyncio.shield(inner)
+            break
+        except asyncio.CancelledError as err:
+            if inner.cancelled():
+                raise
+            cancellation = cancellation or err
+            if not inner.done():
+                continue
+            # Retrieve a completed operation's exception before re-raising the
+            # caller cancellation. This deliberately lets Store failures reach
+            # the surrounding state rollback.
+            result = inner.result()
+            break
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 # Versions 7/8 perform one journal-protected whole-statistic canonicalization
 # after the pre-journal v0.7.3 time-zone migration. Daily remains one version
@@ -679,13 +732,20 @@ class Smart1HistoryState:
                 "Cannot persist smart1 history journal while stopping"
             )
         expected = self._durable_time_zone_state()
-        await self._durable_store.async_save(expected)
-        # Home Assistant's Store logs low-level write failures instead of
-        # propagating them. Reading the file back is therefore required before
-        # an irreversible Recorder operation may rely on this journal.
-        persisted = await self._durable_store.async_load()
-        if persisted != expected:
-            raise OSError("smart1 history migration journal was not persisted")
+
+        async def _async_save_and_verify() -> None:
+            await self._durable_store.async_save(expected)
+            # Home Assistant's Store logs low-level write failures instead of
+            # propagating them. Reading the file back is therefore required
+            # before an irreversible Recorder operation may rely on this
+            # journal.
+            persisted = await self._durable_store.async_load()
+            if persisted != expected:
+                raise OSError(
+                    "smart1 history migration journal was not persisted"
+                )
+
+        await async_drain_store_operation(_async_save_and_verify())
 
     async def async_initialize(self) -> None:
         """Load the durable migration journal before Recorder work starts."""

@@ -286,6 +286,26 @@ class Smart1ApiTest(unittest.TestCase):
                 self.assertEqual(probe["response_rows"], 1)
                 self.assertEqual(probe["unparseable_rows"], 1)
 
+    def test_topology_probe_reports_mixed_parseable_rows(self) -> None:
+        api = Smart1Api(
+            CsvSession(
+                "Inverter Id;Name\n"
+                "Inverter_B2_A1;valid\n"
+                "temporarily-invalid;private\n"
+            ),
+            "redacted",
+            "42",
+        )
+
+        values, probe = asyncio.run(
+            api.get_inverters_with_probe(missing_ok=True)
+        )
+
+        self.assertEqual([value.key for value in values], [(2, 1)])
+        self.assertEqual(probe["response_rows"], 2)
+        self.assertEqual(probe["unparseable_rows"], 1)
+        self.assertNotIn("private", str(probe))
+
     def test_module_field_probe_retains_known_empty_csv_headers(self) -> None:
         api = Smart1Api(
             CsvSession("ModulfieldId;Name;Bias;Direction\n"),

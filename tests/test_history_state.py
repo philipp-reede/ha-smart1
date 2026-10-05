@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+import gc
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import threading
 import types
 import unittest
 
@@ -33,7 +35,9 @@ HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY = (
 HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY = (
     history_state.HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY
 )
+HISTORY_STORE_LOCKS_KEY = history_state.HISTORY_STORE_LOCKS_KEY
 Smart1HistoryState = history_state.Smart1HistoryState
+history_store_lock = history_state.history_store_lock
 recorded_source_time_zone = history_state.recorded_source_time_zone
 scoped_statistic_id = history_state.scoped_statistic_id
 source_time_zone_requires_audit = (
@@ -97,7 +101,61 @@ class _SharedDurableStore:
         self._backing.saves.append((self._name, snapshot))
 
 
+class _ExecutorDurableStore(_SharedDurableStore):
+    """Model a Store write whose worker thread survives task cancellation."""
+
+    def __init__(
+        self,
+        backing: _SharedDurableStoreBacking,
+        name: str,
+        started: asyncio.Event,
+        release: threading.Event,
+        *,
+        fail_after_release: bool = False,
+    ) -> None:
+        super().__init__(backing, name)
+        self._started = started
+        self._release = release
+        self._fail_after_release = fail_after_release
+
+    def _write_snapshot(self, snapshot) -> None:
+        self._release.wait()
+        if self._fail_after_release:
+            raise OSError("executor write failed")
+        self._backing.data = snapshot
+        self._backing.saves.append((self._name, snapshot))
+
+    async def async_save(self, data) -> None:
+        snapshot = deepcopy(data)
+        self._started.set()
+        await asyncio.get_running_loop().run_in_executor(
+            None,
+            self._write_snapshot,
+            snapshot,
+        )
+
+
 class Smart1HistoryStateTest(unittest.TestCase):
+    def test_store_key_locks_are_weakly_retained_without_splitting(self) -> None:
+        """Unused per-entry locks disappear while live users share one lock."""
+        store_key = "smart1_ems.history_migrations.entry-1"
+        legacy_lock = asyncio.Lock()
+        hass = types.SimpleNamespace(
+            data={HISTORY_STORE_LOCKS_KEY: {store_key: legacy_lock}}
+        )
+
+        first = history_store_lock(hass, store_key)
+        second = history_store_lock(hass, store_key)
+
+        self.assertIs(first, legacy_lock)
+        self.assertIs(second, first)
+        self.assertIn(store_key, hass.data[HISTORY_STORE_LOCKS_KEY])
+
+        del first, second, legacy_lock
+        gc.collect()
+
+        self.assertNotIn(store_key, hass.data[HISTORY_STORE_LOCKS_KEY])
+
     def test_installation_namespace_is_stable_and_non_identifying(self) -> None:
         first = statistics_namespace_for_device(" plant-1 ")
 
@@ -680,6 +738,150 @@ class Smart1HistoryStateTest(unittest.TestCase):
                     fallback_daily_energy={date(2026, 9, 24): 2.0},
                     clear_rebuild_baseline_sum=5.0,
                 )
+
+        asyncio.run(run())
+
+    def test_cancelled_executor_write_keeps_store_key_lock_until_done(
+        self,
+    ) -> None:
+        """A cancelled old writer cannot finish after a newer journal."""
+        statistic_id = "smart1_ems:pv_production"
+        store_key = "smart1_ems.history_migrations.entry-1"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(data={}, config_entries=manager)
+        entry = types.SimpleNamespace(entry_id="entry-1", data={})
+        backing = _SharedDurableStoreBacking({})
+
+        async def run() -> None:
+            write_started = asyncio.Event()
+            release_write = threading.Event()
+            old_store = _ExecutorDurableStore(
+                backing,
+                "old",
+                write_started,
+                release_write,
+            )
+            new_store = _SharedDurableStore(backing, "new")
+            old_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=old_store,
+                durable_store_key=store_key,
+            )
+            await old_state.async_initialize()
+
+            old_write = asyncio.create_task(
+                old_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 1.0},
+                    clear_rebuild_baseline_sum=10.0,
+                )
+            )
+            await write_started.wait()
+            old_write.cancel()
+
+            deactivate = asyncio.create_task(old_state.deactivate())
+            new_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=new_store,
+                durable_store_key=store_key,
+            )
+
+            async def write_new_journal() -> str:
+                await new_state.async_initialize()
+                return await new_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 9.0},
+                    clear_rebuild_baseline_sum=20.0,
+                )
+
+            new_write = asyncio.create_task(write_new_journal())
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertFalse(old_write.done())
+            self.assertFalse(deactivate.done())
+            self.assertFalse(new_write.done())
+
+            release_write.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await old_write
+            await deactivate
+            await new_write
+
+            persisted = backing.data[
+                HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY
+            ][statistic_id]
+            self.assertEqual(
+                persisted["fallback_daily_energy"],
+                {"2026-09-24": 9.0},
+            )
+            self.assertEqual(
+                persisted["clear_rebuild_baseline_sum"],
+                20.0,
+            )
+            self.assertEqual(
+                [writer for writer, _snapshot in backing.saves],
+                ["old", "new"],
+            )
+
+        asyncio.run(run())
+
+    def test_store_error_after_cancellation_still_rolls_back_state(
+        self,
+    ) -> None:
+        """A drained write failure takes precedence over caller cancellation."""
+        statistic_id = "smart1_ems:pv_production"
+        store_key = "smart1_ems.history_migrations.entry-1"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(data={}, config_entries=manager)
+        entry = types.SimpleNamespace(entry_id="entry-1", data={})
+        backing = _SharedDurableStoreBacking({})
+
+        async def run() -> None:
+            write_started = asyncio.Event()
+            release_write = threading.Event()
+            store = _ExecutorDurableStore(
+                backing,
+                "old",
+                write_started,
+                release_write,
+                fail_after_release=True,
+            )
+            state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=store,
+                durable_store_key=store_key,
+            )
+            await state.async_initialize()
+            write = asyncio.create_task(
+                state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 1.0},
+                    clear_rebuild_baseline_sum=10.0,
+                )
+            )
+            await write_started.wait()
+            write.cancel()
+            release_write.set()
+
+            with self.assertRaisesRegex(OSError, "executor write failed"):
+                await write
+            self.assertIsNone(
+                state.pending_time_zone_migration(statistic_id)
+            )
+            self.assertEqual(
+                entry.data[HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY],
+                {},
+            )
+            self.assertEqual(backing.saves, [])
 
         asyncio.run(run())
 

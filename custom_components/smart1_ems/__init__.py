@@ -33,6 +33,7 @@ from .history_state import (
     LEGACY_HISTORY_REBUILD_KEY,
     STATISTICS_NAMESPACE_KEY,
     Smart1HistoryState,
+    async_drain_store_operation,
     history_store_lock,
     statistics_namespace_for_device,
 )
@@ -83,8 +84,13 @@ def _topology_response_is_conclusive(
     id_columns: set[str],
 ) -> bool:
     """Return whether an optional topology response can end recovery."""
-    return bool(values) or probe.get("endpoint_result") == "not_found" or (
-        _discovery_probe_is_authoritative(dict(probe), id_columns)
+    if probe.get("endpoint_result") == "not_found":
+        return True
+    if probe.get("unparseable_rows", 0) != 0:
+        return False
+    return bool(values) or _discovery_probe_is_authoritative(
+        dict(probe),
+        id_columns,
     )
 
 
@@ -1047,6 +1053,12 @@ async def async_remove_entry(
         if not domain_data:
             hass.data.pop(DOMAIN, None)
 
+    topology_cache = hass.data.get(TOPOLOGY_RECOVERY_CACHE_KEY)
+    if isinstance(topology_cache, dict):
+        topology_cache.pop(entry.entry_id, None)
+        if not topology_cache:
+            hass.data.pop(TOPOLOGY_RECOVERY_CACHE_KEY, None)
+
     store_key = _history_migration_store_key(entry.entry_id)
     store = Store(
         hass,
@@ -1059,4 +1071,4 @@ async def async_remove_entry(
     # safe even if Home Assistant invokes removal immediately after a reload
     # or an older callback is still unwinding.
     async with history_store_lock(hass, store_key):
-        await store.async_remove()
+        await async_drain_store_operation(store.async_remove())
