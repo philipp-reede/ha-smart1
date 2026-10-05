@@ -135,6 +135,38 @@ class _ExecutorDurableStore(_SharedDurableStore):
         )
 
 
+class _ExecutorLoadDurableStore(_SharedDurableStore):
+    """Model a mutating Store load whose worker survives cancellation."""
+
+    def __init__(
+        self,
+        backing: _SharedDurableStoreBacking,
+        name: str,
+        started: asyncio.Event,
+        release: threading.Event,
+        finished: threading.Event,
+    ) -> None:
+        super().__init__(backing, name)
+        self._started = started
+        self._release = release
+        self._finished = finished
+
+    def _load_and_mutate(self):
+        try:
+            self._release.wait()
+            self._backing.data = None
+            return None
+        finally:
+            self._finished.set()
+
+    async def async_load(self):
+        self._started.set()
+        return await asyncio.get_running_loop().run_in_executor(
+            None,
+            self._load_and_mutate,
+        )
+
+
 class Smart1HistoryStateTest(unittest.TestCase):
     def test_store_key_locks_are_weakly_retained_without_splitting(self) -> None:
         """Unused per-entry locks disappear while live users share one lock."""
@@ -827,6 +859,94 @@ class Smart1HistoryStateTest(unittest.TestCase):
             self.assertEqual(
                 [writer for writer, _snapshot in backing.saves],
                 ["old", "new"],
+            )
+
+        asyncio.run(run())
+
+    def test_cancelled_initial_load_keeps_store_key_lock_until_done(
+        self,
+    ) -> None:
+        """A cancelled old load cannot mutate after a newer journal write."""
+        statistic_id = "smart1_ems:pv_production"
+        store_key = "smart1_ems.history_migrations.entry-1"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(data={}, config_entries=manager)
+        entry = types.SimpleNamespace(entry_id="entry-1", data={})
+        backing = _SharedDurableStoreBacking({})
+
+        async def run() -> None:
+            load_started = asyncio.Event()
+            release_load = threading.Event()
+            load_finished = threading.Event()
+            old_store = _ExecutorLoadDurableStore(
+                backing,
+                "old",
+                load_started,
+                release_load,
+                load_finished,
+            )
+            new_store = _SharedDurableStore(backing, "new")
+            old_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=old_store,
+                durable_store_key=store_key,
+            )
+
+            old_initialize = asyncio.create_task(
+                old_state.async_initialize()
+            )
+            await load_started.wait()
+            old_initialize.cancel()
+
+            new_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=new_store,
+                durable_store_key=store_key,
+            )
+
+            async def write_new_journal() -> str:
+                await new_state.async_initialize()
+                return await new_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 9.0},
+                    clear_rebuild_baseline_sum=20.0,
+                )
+
+            new_write = asyncio.create_task(write_new_journal())
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            old_finished_early = old_initialize.done()
+            new_finished_early = new_write.done()
+
+            release_load.set()
+            try:
+                with self.assertRaises(asyncio.CancelledError):
+                    await old_initialize
+                await new_write
+            finally:
+                release_load.set()
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    load_finished.wait,
+                )
+
+            self.assertFalse(old_finished_early)
+            self.assertFalse(new_finished_early)
+
+            persisted = backing.data[
+                HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY
+            ][statistic_id]
+            self.assertEqual(
+                persisted["fallback_daily_energy"],
+                {"2026-09-24": 9.0},
+            )
+            self.assertEqual(
+                persisted["clear_rebuild_baseline_sum"],
+                20.0,
             )
 
         asyncio.run(run())

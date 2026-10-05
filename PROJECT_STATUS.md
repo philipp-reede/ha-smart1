@@ -245,10 +245,10 @@
 - Durable journal access is serialized by config-entry Store key across
   reloads. Unload marks the old state inactive and drains pending writes before
   the runtime is removed. A caller cancellation is delayed until the underlying
-  executor-backed Store operation has actually finished, so it cannot release
-  the shared lock while an old disk write is still active. Permanent
-  config-entry removal deletes the same private Store after crossing that
-  fence, then removes only that entry's transient topology cache while
+  executor-backed initial load, write or removal has actually finished, so it
+  cannot release the shared lock while an old Store operation is still active.
+  Permanent config-entry removal deletes the same private Store after crossing
+  that fence, then removes only that entry's transient topology cache while
   preserving sibling installations. The lock registry holds weak references:
   inactive, unreferenced entry locks disappear automatically, while every live
   state, holder or waiter keeps the shared fence alive

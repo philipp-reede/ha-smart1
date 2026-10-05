@@ -73,11 +73,11 @@ def history_store_lock(hass: Any, store_key: str | None) -> asyncio.Lock:
 async def async_drain_store_operation(operation: Awaitable[Any]) -> Any:
     """Finish storage I/O before propagating caller cancellation.
 
-    Home Assistant performs storage writes and removals in an executor.
-    Cancelling the awaiting task does not stop that worker thread. Callers use
-    this helper while holding the process-wide store-key lock, so an old
-    runtime cannot release the lock and later overwrite or remove state that a
-    new runtime has already persisted.
+    Home Assistant can perform storage reads, writes and removals in an
+    executor. Cancelling the awaiting task does not stop that worker thread.
+    Callers use this helper while holding the process-wide store-key lock, so
+    an old runtime cannot release the lock and later overwrite, remove or
+    replace loaded state that a new runtime has already persisted.
 
     A storage exception takes precedence over delayed cancellation. The caller
     can then run its normal rollback instead of retaining an unpersisted
@@ -754,7 +754,13 @@ class Smart1HistoryState:
         async with self._durable_store_lock:
             if not self._active:
                 raise RuntimeError("Cannot initialize an inactive history state")
-            stored = await self._durable_store.async_load()
+            # Store loads may also use an executor and mutate their Store
+            # handle after cancellation. Keep the shared fence until that
+            # worker really finishes, before any replacement runtime can load
+            # or write the same durable journal.
+            stored = await async_drain_store_operation(
+                self._durable_store.async_load()
+            )
             if stored is None:
                 # Seed the store from config-entry data for upgrades. No
                 # Recorder mutation can start until this awaited write ends.

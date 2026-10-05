@@ -8,12 +8,13 @@ All notable changes to this project are documented in this file.
 
 - Serialize durable history-journal access by config-entry store key, drain
   outstanding writes during unload and keep the shared lock held until an
-  executor-backed write or removal really finishes, even if its caller is
-  cancelled. Store-key locks are weakly retained so unused per-entry fences do
-  not accumulate, while live states, holders and waiters can never receive
-  different locks. Delete the private migration store when an entry is removed.
-  An old runtime can no longer overwrite a newer recovery journal after a
-  reload or leave exact replacement profiles behind after permanent removal
+  executor-backed initial load, write or removal really finishes, even if its
+  caller is cancelled. Store-key locks are weakly retained so unused per-entry
+  fences do not accumulate, while live states, holders and waiters can never
+  receive different locks. Delete the private migration store when an entry is
+  removed. An old runtime can no longer overwrite a newer recovery journal
+  after a reload or leave exact replacement profiles behind after permanent
+  removal
 - Replay complete PV and derived-energy replacement journals before any portal
   history request, including deliberately empty replacements. Destructive
   empty derived-energy replacements are now journaled before Recorder is
@@ -59,8 +60,8 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
-- Cover cross-reload journal write fencing, executor writes that outlive task
-  cancellation, selective transient-state cleanup and store removal,
+- Cover cross-reload journal fencing, executor loads and writes that outlive
+  task cancellation, selective transient-state cleanup and store removal,
   portal-independent exact journal replay for PV and derived energy,
   fractional-offset fail-closed role isolation, internal-empty and missing
   whole-hour boundary probes, persistent resume-boundary retries, mixed and
