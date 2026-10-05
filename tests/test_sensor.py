@@ -81,6 +81,7 @@ class FakeEntityRegistry:
         self.entities = {}
         self.registry_entries = []
         self.removed = []
+        self.updated = []
 
     def async_get_entity_id(self, domain, platform, unique_id):
         return self.entities.get((domain, platform, unique_id))
@@ -92,6 +93,17 @@ class FakeEntityRegistry:
             for entry in self.registry_entries
             if entry.entity_id != entity_id
         ]
+
+    def async_update_entity(self, entity_id, **changes):
+        self.updated.append((entity_id, changes))
+        entry = next(
+            entry
+            for entry in self.registry_entries
+            if entry.entity_id == entity_id
+        )
+        for attribute, value in changes.items():
+            setattr(entry, attribute, value)
+        return entry
 
     def add_entry(
         self,
@@ -131,13 +143,63 @@ class FakeDeviceRegistry:
         self.created = []
         self.registry_entries = []
         self.removed = []
+        self.updated = []
+        self.immutable_updates = False
 
     def async_get_or_create(self, **kwargs):
         self.created.append(kwargs)
         return types.SimpleNamespace(id="ems-device-id")
 
+    def async_get(self, device_id):
+        return next(
+            (
+                entry
+                for entry in self.registry_entries
+                if entry.id == device_id
+            ),
+            None,
+        )
+
     def async_remove_device(self, device_id) -> None:
         self.removed.append(device_id)
+        self.registry_entries = [
+            entry
+            for entry in self.registry_entries
+            if entry.id != device_id
+        ]
+
+    def async_update_device(
+        self,
+        device_id,
+        *,
+        new_identifiers=None,
+        **changes,
+    ):
+        if new_identifiers is not None:
+            self.updated.append((device_id, set(new_identifiers)))
+        entry = next(
+            entry
+            for entry in self.registry_entries
+            if entry.id == device_id
+        )
+        if self.immutable_updates:
+            replacement_values = vars(entry).copy()
+            replacement_values["identifiers"] = set(entry.identifiers)
+            replacement_values["labels"] = set(entry.labels)
+            if new_identifiers is not None:
+                replacement_values["identifiers"] = set(new_identifiers)
+            replacement_values.update(changes)
+            replacement = types.SimpleNamespace(**replacement_values)
+            self.registry_entries = [
+                replacement if item.id == device_id else item
+                for item in self.registry_entries
+            ]
+            return replacement
+        if new_identifiers is not None:
+            entry.identifiers = set(new_identifiers)
+        for attribute, value in changes.items():
+            setattr(entry, attribute, value)
+        return entry
 
     def add_entry(
         self,
@@ -145,12 +207,22 @@ class FakeDeviceRegistry:
         identifiers,
         *,
         config_entry_id="entry-1",
+        created_at=None,
+        area_id=None,
+        disabled_by=None,
+        labels=None,
+        name_by_user=None,
     ) -> None:
         self.registry_entries.append(
             types.SimpleNamespace(
+                area_id=area_id,
                 config_entry_id=config_entry_id,
+                created_at=created_at,
+                disabled_by=disabled_by,
                 id=device_id,
                 identifiers=set(identifiers),
+                labels=set(labels or ()),
+                name_by_user=name_by_user,
             )
         )
 
@@ -290,6 +362,353 @@ class InverterSensorTest(unittest.TestCase):
                 "configured_capacity_w": 6000.0,
                 "module_field": "West",
             },
+        )
+
+    def test_setup_canonicalizes_legacy_inverter_identifier_casing(self) -> None:
+        self.device_registry.add_entry(
+            "legacy-device",
+            {
+                (
+                    "smart1_ems",
+                    "entry-1:inverter:inverter_b2_a1",
+                )
+            },
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": self.coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [self.inverter],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        canonical = {
+            (
+                "smart1_ems",
+                "entry-1:inverter:Inverter_B2_A1",
+            )
+        }
+        self.assertEqual(
+            self.device_registry.updated,
+            [("legacy-device", canonical)],
+        )
+        self.assertEqual(
+            self.device_registry.registry_entries[0].identifiers,
+            canonical,
+        )
+        self.assertEqual(self.device_registry.removed, [])
+
+    def test_setup_merges_equivalent_inverter_devices(self) -> None:
+        legacy_identifier = (
+            "smart1_ems",
+            "entry-1:inverter:inverter_b02_a01",
+        )
+        canonical_identifier = (
+            "smart1_ems",
+            "entry-1:inverter:Inverter_B2_A1",
+        )
+        self.device_registry.add_entry(
+            "legacy-device",
+            {legacy_identifier},
+            created_at=types.SimpleNamespace(timestamp=lambda: 1.0),
+            area_id="existing-area",
+            labels={"existing-label"},
+        )
+        self.device_registry.add_entry(
+            "canonical-device",
+            {canonical_identifier},
+            created_at=types.SimpleNamespace(timestamp=lambda: 2.0),
+            area_id="duplicate-area",
+            disabled_by="user",
+            labels={"duplicate-label"},
+            name_by_user="Configured duplicate",
+        )
+        self.entity_registry.add_entry(
+            "sensor.legacy_temperature",
+            "smart1_entry-1_inverter_2_1_temperature",
+            device_id="legacy-device",
+        )
+        self.entity_registry.add_entry(
+            "sensor.canonical_string",
+            "smart1_entry-1_inverter_2_1_string_1_ac_power_w",
+            device_id="canonical-device",
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": self.coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [self.inverter],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        # A second setup must be idempotent: the already-consolidated device
+        # is neither moved nor removed again.
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(
+            self.entity_registry.updated,
+            [
+                (
+                    "sensor.canonical_string",
+                    {"device_id": "legacy-device"},
+                )
+            ],
+        )
+        self.assertEqual(
+            {
+                entry.device_id
+                for entry in self.entity_registry.registry_entries
+            },
+            {"legacy-device"},
+        )
+        self.assertEqual(
+            self.device_registry.removed,
+            ["canonical-device"],
+        )
+        self.assertEqual(len(self.device_registry.registry_entries), 1)
+        self.assertEqual(
+            self.device_registry.registry_entries[0].identifiers,
+            {canonical_identifier},
+        )
+        survivor = self.device_registry.registry_entries[0]
+        self.assertEqual(survivor.area_id, "existing-area")
+        self.assertEqual(survivor.name_by_user, "Configured duplicate")
+        self.assertEqual(
+            survivor.labels,
+            {"existing-label", "duplicate-label"},
+        )
+        self.assertEqual(survivor.disabled_by, "user")
+
+    def test_setup_merges_three_immutable_inverter_entries(self) -> None:
+        """Every merge must use Home Assistant's replacement entry."""
+        self.device_registry.immutable_updates = True
+        variants = (
+            (
+                "oldest-device",
+                "entry-1:inverter:inverter_b002_a0001",
+                1.0,
+                "existing-area",
+                None,
+                {"oldest-label"},
+                None,
+            ),
+            (
+                "canonical-device",
+                "entry-1:inverter:Inverter_B2_A1",
+                2.0,
+                None,
+                None,
+                {"canonical-label"},
+                "Configured inverter",
+            ),
+            (
+                "third-device",
+                "entry-1:inverter:INVERTER_B0002_A01",
+                3.0,
+                None,
+                "user",
+                {"third-label"},
+                None,
+            ),
+        )
+        for (
+            device_id,
+            identifier,
+            created_at,
+            area_id,
+            disabled_by,
+            labels,
+            name_by_user,
+        ) in variants:
+            self.device_registry.add_entry(
+                device_id,
+                {("smart1_ems", identifier)},
+                created_at=types.SimpleNamespace(
+                    timestamp=lambda value=created_at: value
+                ),
+                area_id=area_id,
+                disabled_by=disabled_by,
+                labels=labels,
+                name_by_user=name_by_user,
+            )
+            self.entity_registry.add_entry(
+                f"sensor.{device_id}",
+                f"smart1_{device_id}",
+                device_id=device_id,
+            )
+
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": self.coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [self.inverter],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        for _attempt in range(2):
+            asyncio.run(
+                sensor_module.async_setup_entry(
+                    hass,
+                    types.SimpleNamespace(entry_id="entry-1"),
+                    lambda _entities: None,
+                )
+            )
+
+        self.assertEqual(len(self.device_registry.registry_entries), 1)
+        survivor = self.device_registry.registry_entries[0]
+        self.assertEqual(survivor.id, "oldest-device")
+        self.assertEqual(
+            survivor.identifiers,
+            {
+                (
+                    "smart1_ems",
+                    "entry-1:inverter:Inverter_B2_A1",
+                )
+            },
+        )
+        self.assertEqual(survivor.area_id, "existing-area")
+        self.assertEqual(survivor.name_by_user, "Configured inverter")
+        self.assertEqual(survivor.disabled_by, "user")
+        self.assertEqual(
+            survivor.labels,
+            {
+                "oldest-label",
+                "canonical-label",
+                "third-label",
+            },
+        )
+        self.assertEqual(
+            {
+                entry.device_id
+                for entry in self.entity_registry.registry_entries
+            },
+            {"oldest-device"},
+        )
+        self.assertEqual(
+            self.device_registry.removed,
+            ["canonical-device", "third-device"],
+        )
+
+    def test_setup_keeps_older_canonical_inverter_duplicate(self) -> None:
+        legacy_identifier = (
+            "smart1_ems",
+            "entry-1:inverter:inverter_b2_a1",
+        )
+        canonical_identifier = (
+            "smart1_ems",
+            "entry-1:inverter:Inverter_B2_A1",
+        )
+        self.device_registry.add_entry(
+            "canonical-device",
+            {canonical_identifier},
+            created_at=types.SimpleNamespace(timestamp=lambda: 1.0),
+        )
+        self.device_registry.add_entry(
+            "legacy-device",
+            {legacy_identifier},
+            created_at=types.SimpleNamespace(timestamp=lambda: 2.0),
+        )
+        self.entity_registry.add_entry(
+            "sensor.legacy_temperature",
+            "smart1_entry-1_inverter_2_1_temperature",
+            device_id="legacy-device",
+        )
+        hass = types.SimpleNamespace(
+            device_registry=self.device_registry,
+            entity_registry=self.entity_registry,
+            data={
+                "smart1_ems": {
+                    "entry-1": {
+                        "coordinator": self.coordinator,
+                        "devices": [],
+                        "discovery": types.SimpleNamespace(has_pv=False),
+                        "inverters": [self.inverter],
+                        "module_fields": [],
+                        "buses": [],
+                        "inverter_discovery_authoritative": True,
+                    }
+                }
+            },
+        )
+
+        asyncio.run(
+            sensor_module.async_setup_entry(
+                hass,
+                types.SimpleNamespace(entry_id="entry-1"),
+                lambda _entities: None,
+            )
+        )
+
+        self.assertEqual(
+            self.entity_registry.updated,
+            [
+                (
+                    "sensor.legacy_temperature",
+                    {"device_id": "canonical-device"},
+                )
+            ],
+        )
+        self.assertEqual(
+            self.device_registry.removed,
+            ["legacy-device"],
+        )
+        self.assertEqual(self.device_registry.updated, [])
+        self.assertEqual(len(self.device_registry.registry_entries), 1)
+        self.assertEqual(
+            self.device_registry.registry_entries[0].identifiers,
+            {canonical_identifier},
         )
 
     def test_temperature_uses_newest_string_sample(self) -> None:

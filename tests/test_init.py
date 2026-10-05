@@ -141,14 +141,22 @@ class Smart1SetupTest(unittest.TestCase):
                 self.async_import = AsyncMock()
 
         class FakeStore:
+            instances = []
+
             def __init__(self, *args, **kwargs) -> None:
                 self.data = None
+                self.key = args[2]
+                self.removed = False
+                type(self).instances.append(self)
 
             async def async_load(self):
                 return self.data
 
             async def async_save(self, data) -> None:
                 self.data = dict(data)
+
+            async def async_remove(self) -> None:
+                self.removed = True
 
         class FakeDiscoveryResult:
             has_pv = True
@@ -343,6 +351,7 @@ class Smart1SetupTest(unittest.TestCase):
             data={},
             config_entries=types.SimpleNamespace(
                 async_forward_entry_setups=AsyncMock(),
+                async_unload_platforms=AsyncMock(return_value=True),
                 async_entries=lambda domain: list(configured_entries),
                 async_update_entry=async_update_entry,
                 async_reload=AsyncMock(),
@@ -370,6 +379,10 @@ class Smart1SetupTest(unittest.TestCase):
                 )
                 self.assertIs(FakeCoordinator.instance.config_entry, entry)
                 runtime_data = hass.data["smart1_ems"][entry.entry_id]
+                self.assertIn(
+                    runtime_data["history_state"].deactivate,
+                    entry.unload_callbacks,
+                )
                 self.assertTrue(
                     runtime_data["inverter_discovery_authoritative"]
                 )
@@ -485,6 +498,81 @@ class Smart1SetupTest(unittest.TestCase):
                         integration._INVERTER_ID_COLUMNS,
                     )
                 )
+
+                # A known CSV header does not make a data-bearing response
+                # authoritative when none of its rows can be parsed. Such a
+                # response must never enable destructive registry cleanup.
+                invalid_probe = {
+                    "endpoint_result": "data_returned",
+                    "response_columns": ["Inverter Id"],
+                    "response_rows": 1,
+                    "unparseable_rows": 1,
+                }
+                self.assertFalse(
+                    integration._discovery_probe_is_authoritative(
+                        invalid_probe,
+                        integration._INVERTER_ID_COLUMNS,
+                    )
+                )
+                self.assertTrue(
+                    integration._topology_probe_needs_retry(
+                        [],
+                        invalid_probe,
+                        integration._INVERTER_ID_COLUMNS,
+                    )
+                )
+
+                # A topology request may finish after unload/reload replaced
+                # this runtime. The stale retry must not touch any state or
+                # leave a recovery handoff for the replacement setup.
+                stale_runtime = {
+                    "inverters": [],
+                    "inverter_discovery_authoritative": False,
+                }
+                replacement_runtime = {"replacement": True}
+
+                async def finish_after_replacement(*, missing_ok):
+                    self.assertTrue(missing_ok)
+                    hass.data["smart1_ems"][entry.entry_id] = (
+                        replacement_runtime
+                    )
+                    return (
+                        [object()],
+                        {
+                            "endpoint_result": "data_returned",
+                            "response_columns": ["Inverter Id"],
+                        },
+                    )
+
+                stale_api = types.SimpleNamespace(
+                    get_inverters_with_probe=AsyncMock(
+                        side_effect=finish_after_replacement
+                    ),
+                    get_module_fields_with_probe=AsyncMock(),
+                    get_buses_with_probe=AsyncMock(),
+                )
+                stale_coordinator = types.SimpleNamespace(inverters=[])
+                stale_pending = {"inverters"}
+                hass.data["smart1_ems"][entry.entry_id] = stale_runtime
+
+                self.assertFalse(
+                    await integration._async_retry_failed_topology(
+                        hass,
+                        entry,
+                        stale_api,
+                        stale_coordinator,
+                        stale_runtime,
+                        stale_pending,
+                    )
+                )
+                self.assertEqual(stale_pending, {"inverters"})
+                self.assertEqual(stale_runtime["inverters"], [])
+                self.assertEqual(stale_coordinator.inverters, [])
+                self.assertNotIn(
+                    integration.TOPOLOGY_RECOVERY_CACHE_KEY,
+                    hass.data,
+                )
+                hass.data["smart1_ems"][entry.entry_id] = retry_runtime
 
                 recovered_inverter = object()
                 recovered_module_field = object()
@@ -868,7 +956,7 @@ class Smart1SetupTest(unittest.TestCase):
                     on_done=ANY,
                 )
                 self.assertEqual(scheduled, [])
-                self.assertEqual(len(entry.unload_callbacks), 1)
+                self.assertEqual(len(entry.unload_callbacks), 2)
                 self.assertEqual(
                     entry.data["history_schema_versions"],
                     {scoped_role_id: 1},
@@ -1019,7 +1107,7 @@ class Smart1SetupTest(unittest.TestCase):
                     entry.data,
                 )
 
-                queued_state.deactivate()
+                await queued_state.deactivate()
                 reloaded_state = integration.Smart1HistoryState(hass, entry)
                 self.assertFalse(reloaded_state.is_complete(delayed_id, 1))
                 reloaded_state.mark_complete(
@@ -1040,10 +1128,56 @@ class Smart1SetupTest(unittest.TestCase):
                 FakeDiscoveryResult.has_pv = True
                 entry.unload_callbacks[:] = initial_unload_callbacks
 
+                # Unload must await durable-state deactivation before the
+                # runtime can be replaced. Permanent removal then deletes the
+                # private Store using the exact same key as setup.
+                final_runtime = hass.data["smart1_ems"][entry.entry_id]
+                final_state = final_runtime["history_state"]
+                original_deactivate = final_state.deactivate
+                deactivate_finished = False
+
+                async def tracked_deactivate() -> None:
+                    nonlocal deactivate_finished
+                    await original_deactivate()
+                    deactivate_finished = True
+
+                final_state.deactivate = tracked_deactivate
+                self.assertTrue(
+                    await integration.async_unload_entry(hass, entry)
+                )
+                self.assertTrue(deactivate_finished)
+                self.assertNotIn("smart1_ems", hass.data)
+                hass.config_entries.async_unload_platforms.assert_awaited_once_with(
+                    entry,
+                    ["sensor"],
+                )
+
+                await integration.async_remove_entry(hass, entry)
+                removal_store = FakeStore.instances[-1]
+                self.assertEqual(
+                    removal_store.key,
+                    "smart1_ems.history_migrations.entry-1",
+                )
+                self.assertTrue(removal_store.removed)
+
+                # Removal is defensive when Home Assistant reaches it without
+                # a successful unload: drain and detach the lingering runtime
+                # before deleting the same private Store again.
+                dangling_state = types.SimpleNamespace(
+                    deactivate=AsyncMock()
+                )
+                hass.data["smart1_ems"] = {
+                    entry.entry_id: {"history_state": dangling_state}
+                }
+                await integration.async_remove_entry(hass, entry)
+                dangling_state.deactivate.assert_awaited_once_with()
+                self.assertNotIn("smart1_ems", hass.data)
+                self.assertTrue(FakeStore.instances[-1].removed)
+
         asyncio.run(run_setup_and_callbacks())
 
-        self.assertIn("entry-1", hass.data["smart1_ems"])
-        self.assertEqual(len(entry.unload_callbacks), 2)
+        self.assertNotIn("smart1_ems", hass.data)
+        self.assertEqual(len(entry.unload_callbacks), 3)
         self.assertEqual(
             hass.config_entries.async_forward_entry_setups.await_args_list,
             [

@@ -24,9 +24,32 @@ HISTORY_SOURCE_TIME_ZONES_KEY = "history_source_time_zones"
 HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY = (
     "history_pending_time_zone_migrations"
 )
+HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY = (
+    "history_deferred_time_zone_partitions"
+)
 LEGACY_HISTORY_REBUILD_KEY = "legacy_history_rebuild"
+HISTORY_STORE_LOCKS_KEY = "smart1_ems_history_store_locks"
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def history_store_lock(hass: Any, store_key: str | None) -> asyncio.Lock:
+    """Return the process-wide lock for one durable history-store key.
+
+    Config-entry reloads create a new ``Smart1HistoryState`` and a new
+    ``Store`` object while callbacks from the old runtime may still be
+    finishing.  The lock therefore belongs to the Home Assistant process and
+    store key, not to either state instance.  Lightweight callers without a
+    normal ``hass.data`` mapping retain an instance-local fallback lock.
+    """
+    hass_data = getattr(hass, "data", None)
+    if not store_key or not isinstance(hass_data, dict):
+        return asyncio.Lock()
+    locks = hass_data.setdefault(HISTORY_STORE_LOCKS_KEY, {})
+    if not isinstance(locks, dict):
+        # Do not replace unexpected third-party data at the private key.
+        return asyncio.Lock()
+    return locks.setdefault(store_key, asyncio.Lock())
 
 # Versions 7/8 perform one journal-protected whole-statistic canonicalization
 # after the pre-journal v0.7.3 time-zone migration. Daily remains one version
@@ -38,16 +61,15 @@ _LOGGER = logging.getLogger(__name__)
 PV_HISTORY_SCHEMA_VERSION = 7
 PV_DAILY_HISTORY_SCHEMA_VERSION = 8
 UNJOURNALED_PV_HISTORY_SCHEMA_VERSIONS = frozenset({5, 6})
-# Version 6 applies the journal-protected canonicalization to the v5 boundary
-# repair as well as rebuilding a resumed partial catch-up with the preceding
-# day's context. Version 4 joined complete portal days correctly, while v5
-# fixed resumed scans but still inherited the pre-journal time-zone layout.
-# Every installation therefore receives one journaled supported-window rebuild
-# while older Recorder history is retained in the same replacement batch.
-DERIVED_HISTORY_SCHEMA_VERSION = 6
+# Version 7 performs one non-destructive supported-window refresh for v6
+# histories that could have committed an incomplete cross-midnight resume or
+# an ambiguous fractional-offset time-zone remap. Versions 4/5 predate the
+# durable canonicalization journal and still require the separate whole-ID
+# replacement path; v6 must not be cleared merely for this schema upgrade.
+DERIVED_HISTORY_SCHEMA_VERSION = 7
 UNJOURNALED_DERIVED_HISTORY_SCHEMA_VERSIONS = frozenset({4, 5})
 # Version 3 was the fractional-offset-only boundary-fragment repair marker.
-# Keep it named for upgrade-state compatibility; version 6 supersedes it in
+# Keep it named for upgrade-state compatibility; version 7 supersedes it in
 # every time zone.
 DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION = 3
 
@@ -87,6 +109,18 @@ class PendingTimeZoneMigration(NamedTuple):
     def has_invalid_replacement(self) -> bool:
         """Return whether an exact field was present but malformed."""
         return self.replacement_hourly_energy_invalid
+
+
+class DeferredTimeZonePartition(NamedTuple):
+    """Persist one indivisible source-day partition awaiting new evidence."""
+
+    source_time_zone: str
+    target_time_zone: str
+    schema_version: int
+    generation: str
+    partition_dates: tuple[date, ...]
+    next_probe_on: date
+    probe_cursor: int = 0
 
 
 def statistics_namespace_for_device(device_id: str) -> str:
@@ -187,12 +221,16 @@ class Smart1HistoryState:
         entry: Any,
         *,
         durable_store: Any | None = None,
+        durable_store_key: str | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
         self._active = True
         self._durable_store = durable_store
-        self._durable_store_lock = asyncio.Lock()
+        self._durable_store_lock = history_store_lock(
+            hass,
+            durable_store_key,
+        )
         raw_versions = entry.data.get(HISTORY_SCHEMA_VERSIONS_KEY, {})
         self._versions = {
             str(statistic_id): int(version)
@@ -310,6 +348,14 @@ class Smart1HistoryState:
             self._parse_pending_time_zone_migrations(
                 entry.data.get(
                     HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY,
+                    {},
+                )
+            )
+        )
+        self._deferred_time_zone_partitions = (
+            self._parse_deferred_time_zone_partitions(
+                entry.data.get(
+                    HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY,
                     {},
                 )
             )
@@ -466,6 +512,88 @@ class Smart1HistoryState:
             )
         return parsed
 
+    @staticmethod
+    def _parse_deferred_time_zone_partitions(
+        raw_partitions: Any,
+    ) -> dict[str, DeferredTimeZonePartition]:
+        """Return valid persisted fail-closed partition evidence."""
+        parsed: dict[str, DeferredTimeZonePartition] = {}
+        if not isinstance(raw_partitions, dict):
+            return parsed
+        for statistic_id, raw_partition in raw_partitions.items():
+            if not isinstance(statistic_id, str) or not isinstance(
+                raw_partition,
+                dict,
+            ):
+                continue
+            source_time_zone = raw_partition.get("source_time_zone")
+            target_time_zone = raw_partition.get("target_time_zone")
+            schema_version = raw_partition.get("schema_version")
+            generation = raw_partition.get("generation")
+            raw_dates = raw_partition.get("partition_dates")
+            next_probe_on = raw_partition.get("next_probe_on")
+            probe_cursor = raw_partition.get("probe_cursor", 0)
+            if not (
+                isinstance(source_time_zone, str)
+                and source_time_zone
+                and isinstance(target_time_zone, str)
+                and target_time_zone
+                and isinstance(schema_version, int)
+                and not isinstance(schema_version, bool)
+                and schema_version > 0
+                and isinstance(generation, str)
+                and generation
+                and isinstance(raw_dates, list)
+                and raw_dates
+                and isinstance(next_probe_on, str)
+                and isinstance(probe_cursor, int)
+                and not isinstance(probe_cursor, bool)
+                and probe_cursor >= 0
+            ):
+                continue
+            partition_dates = {
+                parsed_date
+                for raw_date in raw_dates
+                if isinstance(raw_date, str)
+                and (parsed_date := Smart1HistoryState._parse_date(raw_date))
+                is not None
+            }
+            parsed_next_probe = Smart1HistoryState._parse_date(next_probe_on)
+            if not partition_dates or parsed_next_probe is None:
+                continue
+            parsed[statistic_id] = DeferredTimeZonePartition(
+                source_time_zone=source_time_zone,
+                target_time_zone=target_time_zone,
+                schema_version=schema_version,
+                generation=generation,
+                partition_dates=tuple(sorted(partition_dates)),
+                next_probe_on=parsed_next_probe,
+                probe_cursor=probe_cursor % len(partition_dates),
+            )
+        return parsed
+
+    def _serialized_deferred_time_zone_partitions(
+        self,
+    ) -> dict[str, dict[str, Any]]:
+        """Return durable fail-closed partition evidence."""
+        return {
+            statistic_id: {
+                "source_time_zone": partition.source_time_zone,
+                "target_time_zone": partition.target_time_zone,
+                "schema_version": partition.schema_version,
+                "generation": partition.generation,
+                "partition_dates": [
+                    partition_date.isoformat()
+                    for partition_date in partition.partition_dates
+                ],
+                "next_probe_on": partition.next_probe_on.isoformat(),
+                "probe_cursor": partition.probe_cursor,
+            }
+            for statistic_id, partition in (
+                self._deferred_time_zone_partitions.items()
+            )
+        }
+
     def _durable_time_zone_state(self) -> dict[str, Any]:
         """Return the crash-critical subset written without a delay."""
         return {
@@ -521,6 +649,9 @@ class Smart1HistoryState:
                     self._pending_time_zone_migrations.items()
                 )
             },
+            HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY: (
+                self._serialized_deferred_time_zone_partitions()
+            ),
         }
 
     async def _async_save_durable_time_zone_state(self) -> None:
@@ -561,6 +692,8 @@ class Smart1HistoryState:
         if self._durable_store is None:
             return
         async with self._durable_store_lock:
+            if not self._active:
+                raise RuntimeError("Cannot initialize an inactive history state")
             stored = await self._durable_store.async_load()
             if stored is None:
                 # Seed the store from config-entry data for upgrades. No
@@ -584,6 +717,12 @@ class Smart1HistoryState:
             durable_pending = self._parse_pending_time_zone_migrations(
                 stored.get(HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY, {})
             )
+            durable_deferred = self._parse_deferred_time_zone_partitions(
+                stored.get(
+                    HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY,
+                    {},
+                )
+            )
 
             # Once the dedicated store exists it is authoritative for both
             # source fingerprints and pending work. In particular, an absent
@@ -595,6 +734,9 @@ class Smart1HistoryState:
                 self._source_time_zones = durable_source_time_zones
             if self._pending_time_zone_migrations != durable_pending:
                 self._pending_time_zone_migrations = durable_pending
+                changed = True
+            if self._deferred_time_zone_partitions != durable_deferred:
+                self._deferred_time_zone_partitions = durable_deferred
                 changed = True
             if changed:
                 self._persist()
@@ -731,12 +873,21 @@ class Smart1HistoryState:
                         self._pending_time_zone_migrations.items()
                     )
                 },
+                HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY: (
+                    self._serialized_deferred_time_zone_partitions()
+                ),
             },
         )
 
-    def deactivate(self) -> None:
-        """Prevent callbacks from an unloaded entry mutating current state."""
+    async def deactivate(self) -> None:
+        """Deactivate this runtime and drain every durable store operation."""
+        # Set the flag before waiting. Any operation already queued ahead of
+        # this waiter must recheck it after acquiring the shared key lock and
+        # return without writing. Once the empty critical section completes,
+        # no write from this runtime can outlive the unload.
         self._active = False
+        async with self._durable_store_lock:
+            pass
 
     def current_schema_version(self, statistic_id: str) -> int:
         """Return the currently persisted schema version for a statistic."""
@@ -784,6 +935,146 @@ class Smart1HistoryState:
     ) -> PendingTimeZoneMigration | None:
         """Return the persisted in-flight time-zone migration, if any."""
         return self._pending_time_zone_migrations.get(statistic_id)
+
+    def deferred_time_zone_partition(
+        self,
+        statistic_id: str,
+    ) -> DeferredTimeZonePartition | None:
+        """Return fail-closed evidence for an indivisible date partition."""
+        return self._deferred_time_zone_partitions.get(statistic_id)
+
+    def defer_time_zone_partition(
+        self,
+        statistic_id: str,
+        source_time_zone: str,
+        target_time_zone: str,
+        schema_version: int,
+        *,
+        partition_dates: set[date],
+        next_probe_on: date,
+        probe_cursor: int = 0,
+    ) -> str:
+        """Persist a bounded-retry deferral for an indivisible UTC bucket."""
+        if not self._active:
+            raise RuntimeError("Cannot mutate an inactive history state")
+        if not isinstance(statistic_id, str) or not statistic_id:
+            raise ValueError("A statistic ID is required")
+        if not (
+            isinstance(source_time_zone, str)
+            and source_time_zone
+            and isinstance(target_time_zone, str)
+            and target_time_zone
+            and isinstance(schema_version, int)
+            and not isinstance(schema_version, bool)
+            and schema_version > 0
+            and isinstance(next_probe_on, date)
+            and not isinstance(next_probe_on, datetime)
+            and isinstance(probe_cursor, int)
+            and not isinstance(probe_cursor, bool)
+            and probe_cursor >= 0
+        ):
+            raise ValueError("Invalid time-zone partition deferral")
+        normalized_dates = {
+            partition_date
+            for partition_date in partition_dates
+            if isinstance(partition_date, date)
+            and not isinstance(partition_date, datetime)
+        }
+        if not normalized_dates or len(normalized_dates) != len(
+            partition_dates
+        ):
+            raise ValueError("Partition dates must be complete")
+        sorted_dates = tuple(sorted(normalized_dates))
+        current = self.deferred_time_zone_partition(statistic_id)
+        generation = (
+            current.generation
+            if current is not None
+            and current.source_time_zone == source_time_zone
+            and current.target_time_zone == target_time_zone
+            and current.schema_version == schema_version
+            else uuid4().hex
+        )
+        replacement = DeferredTimeZonePartition(
+            source_time_zone=source_time_zone,
+            target_time_zone=target_time_zone,
+            schema_version=schema_version,
+            generation=generation,
+            partition_dates=sorted_dates,
+            next_probe_on=next_probe_on,
+            probe_cursor=probe_cursor % len(sorted_dates),
+        )
+        if current == replacement:
+            return generation
+        self._deferred_time_zone_partitions[statistic_id] = replacement
+        self._persist()
+        return generation
+
+    async def async_defer_time_zone_partition(
+        self,
+        statistic_id: str,
+        source_time_zone: str,
+        target_time_zone: str,
+        schema_version: int,
+        *,
+        partition_dates: set[date],
+        next_probe_on: date,
+        probe_cursor: int = 0,
+    ) -> str:
+        """Durably store a deferral before ending a completed annual scan."""
+        async with self._durable_store_lock:
+            if not self._active:
+                raise RuntimeError("Cannot mutate an inactive history state")
+            previous = self.deferred_time_zone_partition(statistic_id)
+            generation = self.defer_time_zone_partition(
+                statistic_id,
+                source_time_zone,
+                target_time_zone,
+                schema_version,
+                partition_dates=partition_dates,
+                next_probe_on=next_probe_on,
+                probe_cursor=probe_cursor,
+            )
+            if self._durable_store is None:
+                return generation
+            try:
+                await self._async_save_durable_time_zone_state()
+            except Exception:
+                if previous is None:
+                    self._deferred_time_zone_partitions.pop(
+                        statistic_id,
+                        None,
+                    )
+                else:
+                    self._deferred_time_zone_partitions[statistic_id] = (
+                        previous
+                    )
+                self._persist()
+                raise
+            return generation
+
+    async def async_clear_deferred_time_zone_partition(
+        self,
+        statistic_id: str,
+        generation: str,
+    ) -> bool:
+        """Durably clear exactly one partition-deferral generation."""
+        async with self._durable_store_lock:
+            if not self._active:
+                return False
+            current = self.deferred_time_zone_partition(statistic_id)
+            if current is None or current.generation != generation:
+                return False
+            del self._deferred_time_zone_partitions[statistic_id]
+            self._persist()
+            if self._durable_store is None:
+                return True
+            try:
+                await self._async_save_durable_time_zone_state()
+            except Exception:
+                self._deferred_time_zone_partitions[statistic_id] = current
+                self._persist()
+                return False
+            return True
 
     def effective_source_time_zone(
         self,
@@ -920,6 +1211,8 @@ class Smart1HistoryState:
     ) -> str:
         """Durably journal a migration before Recorder can be mutated."""
         async with self._durable_store_lock:
+            if not self._active:
+                raise RuntimeError("Cannot mutate an inactive history state")
             previous_pending = self.pending_time_zone_migration(statistic_id)
             generation = self.begin_time_zone_migration(
                 statistic_id,
@@ -999,6 +1292,11 @@ class Smart1HistoryState:
                 is not None
                 or changed
             )
+            changed = (
+                self._deferred_time_zone_partitions.pop(statistic_id, None)
+                is not None
+                or changed
+            )
         if not changed:
             return
         self._persist()
@@ -1006,6 +1304,8 @@ class Smart1HistoryState:
     async def async_forget_statistics(self, statistic_ids: set[str]) -> None:
         """Durably discard state before Recorder removes the statistics."""
         async with self._durable_store_lock:
+            if not self._active:
+                return
             self.forget_statistics(statistic_ids)
             if self._durable_store is not None:
                 # The dedicated journal is authoritative after a restart. Its
@@ -1116,6 +1416,21 @@ class Smart1HistoryState:
                 if cursor is None or candidate > cursor
             ),
             candidates[0],
+        )
+
+    def empty_days_for_schema(
+        self,
+        statistic_id: str,
+        schema_version: int,
+    ) -> set[date]:
+        """Return a defensive copy of retryable empty/partial source days."""
+        if (
+            not self._active
+            or not self.is_current_schema(statistic_id, schema_version)
+        ):
+            return set()
+        return set(
+            self._empty_days.get(statistic_id, {}).get(schema_version, set())
         )
 
     def record_empty_day_results(
@@ -1303,6 +1618,11 @@ class Smart1HistoryState:
             # harmless.
             del self._pending_time_zone_migrations[statistic_id]
             changed = True
+            if (
+                self._deferred_time_zone_partitions.pop(statistic_id, None)
+                is not None
+            ):
+                changed = True
         if changed:
             self._persist()
         return True
@@ -1326,6 +1646,8 @@ class Smart1HistoryState:
     ) -> bool:
         """Commit scan state and durably close a migration generation."""
         async with self._durable_store_lock:
+            if not self._active:
+                return False
             missing = object()
             mutable_state = (
                 self._versions,
@@ -1336,6 +1658,7 @@ class Smart1HistoryState:
                 self._empty_retry_runs,
                 self._source_time_zones,
                 self._pending_time_zone_migrations,
+                self._deferred_time_zone_partitions,
             )
             previous_state = tuple(
                 (

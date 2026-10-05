@@ -33,6 +33,7 @@ from .history_state import (
     LEGACY_HISTORY_REBUILD_KEY,
     STATISTICS_NAMESPACE_KEY,
     Smart1HistoryState,
+    history_store_lock,
     statistics_namespace_for_device,
 )
 from .recorder_helpers import async_clear_statistics
@@ -57,6 +58,11 @@ _MODULE_FIELD_ID_COLUMNS = {
 _BUS_ID_COLUMNS = {"BusId", "Bus Id", '"BusId"'}
 
 
+def _history_migration_store_key(entry_id: str) -> str:
+    """Return the private durable history-store key for one entry."""
+    return f"{DOMAIN}.history_migrations.{entry_id}"
+
+
 def _discovery_probe_is_authoritative(
     probe: dict[str, object],
     id_columns: set[str],
@@ -67,6 +73,7 @@ def _discovery_probe_is_authoritative(
         probe.get("endpoint_result") in {"data_returned", "empty_response"}
         and isinstance(columns, list)
         and bool(id_columns.intersection(columns))
+        and probe.get("unparseable_rows", 0) == 0
     )
 
 
@@ -124,6 +131,11 @@ async def _async_retry_failed_topology(
     }
 
     for endpoint in tuple(pending_endpoints):
+        if (
+            hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            is not runtime_data
+        ):
+            return False
         fetch, id_columns, authoritative_key = endpoint_specs[endpoint]
         try:
             values, probe = await fetch(missing_ok=True)
@@ -134,6 +146,15 @@ async def _async_retry_failed_topology(
                 describe_api_error(err),
             )
             continue
+
+        # The request can outlive an unload or a replacement setup. Never let
+        # an obsolete retry mutate the new runtime, coordinator, pending set,
+        # or cross-reload recovery cache.
+        if (
+            hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            is not runtime_data
+        ):
+            return False
 
         if not _topology_response_is_conclusive(
             values,
@@ -328,17 +349,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     force_legacy_history_rebuild = (
         entry.data.get(LEGACY_HISTORY_REBUILD_KEY) is True
     )
+    history_store_key = _history_migration_store_key(entry.entry_id)
     history_state = Smart1HistoryState(
         hass,
         entry,
         durable_store=Store(
             hass,
             HISTORY_MIGRATION_STORE_VERSION,
-            f"{DOMAIN}.history_migrations.{entry.entry_id}",
+            history_store_key,
             private=True,
             atomic_writes=True,
         ),
+        durable_store_key=history_store_key,
     )
+    # Home Assistant processes async-on-unload callbacks when setup fails,
+    # whereas it calls ``async_unload_entry`` only for a successfully loaded
+    # entry. Register the same idempotent drain before any awaited setup work so
+    # a failed platform forward cannot leave an active history runtime whose
+    # delayed Recorder finalizer overwrites the next setup's recovery journal.
+    entry.async_on_unload(history_state.deactivate)
     # A source-time-zone migration journal must reach disk before Recorder
     # receives replacement statistics. Config-entry writes are deliberately
     # delayed by Home Assistant and therefore cannot provide that ordering on
@@ -986,9 +1015,48 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     runtime_data = hass.data[DOMAIN][entry.entry_id]
-    runtime_data["history_state"].deactivate()
+    await runtime_data["history_state"].deactivate()
     hass.data[DOMAIN].pop(entry.entry_id)
     if not hass.data[DOMAIN]:
         hass.data.pop(DOMAIN)
 
     return True
+
+
+async def async_remove_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Remove private durable history state with the config entry."""
+    domain_data = hass.data.get(DOMAIN)
+    runtime_data = (
+        domain_data.get(entry.entry_id)
+        if isinstance(domain_data, dict)
+        else None
+    )
+    if isinstance(runtime_data, dict):
+        history_state = runtime_data.get("history_state")
+        deactivate = getattr(history_state, "deactivate", None)
+        if callable(deactivate):
+            # Normally unload already drained this state. Failed setup/unload
+            # paths can still leave the runtime registered, so fence it again
+            # before deleting the journal it could otherwise recreate.
+            await deactivate()
+        if domain_data.get(entry.entry_id) is runtime_data:
+            domain_data.pop(entry.entry_id)
+        if not domain_data:
+            hass.data.pop(DOMAIN, None)
+
+    store_key = _history_migration_store_key(entry.entry_id)
+    store = Store(
+        hass,
+        HISTORY_MIGRATION_STORE_VERSION,
+        store_key,
+        private=True,
+        atomic_writes=True,
+    )
+    # Use the same key-wide fence as setup and unload. This makes deletion
+    # safe even if Home Assistant invokes removal immediately after a reload
+    # or an older callback is still unwinding.
+    async with history_store_lock(hass, store_key):
+        await store.async_remove()

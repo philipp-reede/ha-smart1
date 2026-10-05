@@ -41,7 +41,7 @@ battery, wallbox, heat pump and auxiliary heating.
 | Setup | Home Assistant UI with a masked personal API key |
 | Devices | EMS, PV, inverter, grid, battery, wallbox, heat pump and auxiliary heater |
 | Energy Dashboard | PV, grid, battery and selected individual consumers |
-| History | Automatic import of up to 365 days |
+| Energy history | Automatic import of up to 365 days of Energy Dashboard energy statistics |
 | Tested hardware | M-TEC Energy Hero, Energy Butler, Energy Heater, AP440 heat pump and KEBA wallbox |
 
 ## Features
@@ -53,6 +53,10 @@ battery, wallbox, heat pump and auxiliary heating.
 - Optional physical inverter devices discovered from the documented inverter
   endpoint, with per-string AC/DC power, DC voltage and inverter temperature
   diagnostic sensors
+- Stable physical-inverter device identities when the portal changes only the
+  letter case or numeric zero-padding of an inverter ID. Equivalent legacy
+  registry devices are consolidated while retaining entity assignments, areas
+  and user customizations
 - Optional PV module-field diagnostics for installed capacity, azimuth, tilt
   and configured shadow intervals
 - Optional static diagnostics for active inverter bus systems and their
@@ -65,8 +69,12 @@ battery, wallbox, heat pump and auxiliary heating.
 - Exact PV production from the documented cumulative photovoltaic endpoint
 - Energy Dashboard statistics for grid import/export, battery charge/discharge,
   wallbox, heat pump and auxiliary-heater consumption
-- Automatic background import of up to 365 days of history, with persistent
-  catch-up after longer Home Assistant or portal outages
+- Automatic background import of up to 365 days of Energy Dashboard energy
+  history, with persistent catch-up after longer Home Assistant or portal
+  outages
+- Persistent, bounded daily single-day probes for time-zone and local-day
+  boundaries that cannot yet be reconstructed safely. The affected energy role
+  remains unchanged while independent roles continue to update
 - Redacted Home Assistant diagnostics without API keys, plant IDs, linear IDs or
   measurement values
 
@@ -173,9 +181,10 @@ key, Home Assistant opens a repair flow. The replacement key is saved only if
 it still provides access to the same plant; devices, entities and Energy
 Dashboard statistics keep their existing identities.
 
-Live entities are available after setup. The historical import starts in the
-background and also runs automatically after future Home Assistant restarts.
-Depending on portal response times, the first import can take several minutes.
+Live entities are available after setup. The energy-history import starts in
+the background and also runs automatically after future Home Assistant
+restarts. Depending on portal response times, the first import can take several
+minutes.
 
 ## Energy Dashboard
 
@@ -205,6 +214,12 @@ using guarded trapezoidal integration. Gaps longer than 15 minutes are not
 bridged, so incomplete portal data can make these totals lower than actual
 consumption. Changing a selected source creates a new statistic rather than
 combining measurements from different sources.
+
+The historical import covers the Energy Dashboard's energy statistics in kWh.
+It does not backfill the Recorder history of the live power sensors in W or kW.
+Consequently, the **Power sources** graph starts when Recorder began collecting
+statistics for those live entities, even when the energy charts and totals
+reach further back through the imported portal history.
 
 ## Troubleshooting
 
@@ -239,12 +254,22 @@ redact credentials, identifiers and measurements.
 - Non-PV historical energy is derived rather than read from native cumulative
   meter totals because the tested installation does not expose usable linear
   cumulative data.
+- Historical power values for the Energy Dashboard's **Power sources** graph
+  are not backfilled. That graph uses Recorder statistics from the live power
+  entities and therefore begins when Recorder started collecting their
+  statistics; the up-to-365-day import applies only to energy statistics.
 - Persistent per-statistic coverage resumes failed or interrupted history
   requests and performs one supported-window repair for older installations.
   A successful no-data response remains unknown rather than becoming zero.
   Within the supported 365-day window it is retained for bounded round-robin
   rechecks, one old day at a time, so late portal data can be recovered without
   repeating a full backfill; data outside that window cannot be recovered.
+- During a time-zone migration, a stored positive hourly value can be
+  indivisible at a local-day partition, an internal source day can return no
+  data, or an adjacent source-day pair needed to rebuild a whole-hour boundary
+  can be missing. That role then fails closed: at most one affected date per
+  statistic is rechecked each day, while other safe roles continue and no
+  destructive replacement is attempted.
 - Device classification is based on structured interface metadata and known
   smart1 naming conventions; unusual installations may require additional
   mapping rules.
@@ -262,6 +287,9 @@ redact credentials, identifiers and measurements.
   additional EMS and inverter combinations.
 - Make the historical import range configurable if longer or shorter imports
   prove useful across installations.
+- Evaluate a Home Assistant-compatible historical power-statistics import for
+  the **Power sources** graph without overwriting Recorder-owned entity
+  statistics.
 - Complete inclusion in the default HACS catalogue and address review feedback.
 
 Technical API findings and implementation details are documented in
