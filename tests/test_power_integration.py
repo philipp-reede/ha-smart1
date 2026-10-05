@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import permutations
 from pathlib import Path
 from random import Random
@@ -133,6 +133,225 @@ class PowerIntegrationTest(unittest.TestCase):
             result.hourly_energy_kwh[0][0],
             datetime(2026, 3, 29, 0, 0, tzinfo=timezone.utc),
         )
+
+    def test_discards_nonexistent_spring_dst_rows_in_any_order(self) -> None:
+        real_rows = [
+            row(f"2026-03-29 03:{minute:02d}:00", "100")
+            for minute in range(0, 60, 5)
+        ]
+        real_rows.append(row("2026-03-29 04:00:00", "100"))
+        nonexistent = row("2026-03-29 02:30:00", "1000")
+        expected = power_integration.integrate_power_rows(
+            real_rows,
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+
+        for rows_to_integrate in (
+            [nonexistent, *real_rows],
+            [*real_rows, nonexistent],
+        ):
+            with self.subTest(rows=rows_to_integrate):
+                result = power_integration.integrate_power_rows(
+                    rows_to_integrate,
+                    "pv",
+                    ZoneInfo("Europe/Berlin"),
+                )
+
+                self.assertEqual(result, expected)
+                self.assertEqual(result.sample_count, 13)
+                self.assertEqual(result.covered_seconds, 60 * 60)
+                self.assertAlmostEqual(result.energy_kwh, 0.1)
+
+    def test_keeps_aware_absolute_instant_with_spring_gap_label(self) -> None:
+        rows = [
+            row("2026-03-29T02:30:00+01:00", "100"),
+            row("2026-03-29 03:30:00", "100"),
+            row("2026-03-29 03:35:00", "100"),
+        ]
+        expected = (
+            (datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc), 100.0),
+            (datetime(2026, 3, 29, 1, 35, tzinfo=timezone.utc), 100.0),
+        )
+
+        for rows_to_normalize in (rows, list(reversed(rows))):
+            with self.subTest(rows=rows_to_normalize):
+                self.assertEqual(
+                    power_integration.normalize_power_rows(
+                        rows_to_normalize,
+                        "pv",
+                        ZoneInfo("Europe/Berlin"),
+                    ),
+                    expected,
+                )
+
+    def test_equivalent_offset_aware_duplicates_use_absolute_time(self) -> None:
+        identical_rows = [
+            row("2026-08-03T00:00:00+00:00", "100"),
+            row("2026-08-03T02:00:00+02:00", "100"),
+            row("2026-08-03T00:05:00+00:00", "100"),
+        ]
+        expected_identical = (
+            (datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc), 100.0),
+            (datetime(2026, 8, 3, 0, 5, tzinfo=timezone.utc), 100.0),
+        )
+        conflicting_rows = [
+            row("2026-08-03T00:00:00+00:00", "100"),
+            row("2026-08-03T02:00:00+02:00", "1000"),
+            row("2026-08-03T01:00:00+00:00", "100"),
+        ]
+        expected_conflicting = (
+            (datetime(2026, 8, 3, 1, 0, tzinfo=timezone.utc), 100.0),
+        )
+
+        for rows_to_normalize in (
+            identical_rows,
+            list(reversed(identical_rows)),
+        ):
+            with self.subTest(kind="identical", rows=rows_to_normalize):
+                self.assertEqual(
+                    power_integration.normalize_power_rows(
+                        rows_to_normalize,
+                        "pv",
+                        ZoneInfo("Europe/Berlin"),
+                    ),
+                    expected_identical,
+                )
+
+        for rows_to_normalize in (
+            conflicting_rows,
+            list(reversed(conflicting_rows)),
+        ):
+            with self.subTest(kind="conflicting", rows=rows_to_normalize):
+                self.assertEqual(
+                    power_integration.normalize_power_rows(
+                        rows_to_normalize,
+                        "pv",
+                        ZoneInfo("Europe/Berlin"),
+                    ),
+                    expected_conflicting,
+                )
+
+    def test_conflicting_duplicate_invalidates_its_utc_hour(self) -> None:
+        rows = [
+            row(
+                (
+                    datetime(2026, 8, 3, tzinfo=timezone.utc)
+                    + timedelta(minutes=minute)
+                ).isoformat(),
+                "100",
+            )
+            for minute in range(0, 2 * 60 + 5, 5)
+        ]
+        conflicting = row("2026-08-03T00:30:00+00:00", "1000")
+
+        for rows_to_integrate in (
+            [conflicting, *rows],
+            [*rows, conflicting],
+        ):
+            with self.subTest(rows=rows_to_integrate):
+                result = power_integration.integrate_power_rows(
+                    rows_to_integrate,
+                    "pv",
+                    ZoneInfo("Europe/Berlin"),
+                )
+
+                self.assertEqual(result.sample_count, 13)
+                self.assertEqual(result.integrated_intervals, 12)
+                self.assertEqual(result.skipped_gaps, 0)
+                self.assertEqual(result.covered_seconds, 60 * 60)
+                self.assertAlmostEqual(result.energy_kwh, 0.1)
+                self.assertEqual(
+                    [start for start, _energy in result.hourly_energy_kwh],
+                    [datetime(2026, 8, 3, 1, tzinfo=timezone.utc)],
+                )
+
+    def test_third_fall_fold_value_invalidates_both_utc_hours(self) -> None:
+        first_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "100")
+            for minute in range(0, 60, 5)
+        ]
+        second_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "200")
+            for minute in range(0, 60, 5)
+        ]
+        conflicting = row("2026-10-25 02:30:00", "1000")
+        after_fold = row("2026-10-25 03:00:00", "200")
+        interleaved = [
+            sample
+            for pair in zip(first_fold, second_fold, strict=True)
+            for sample in pair
+        ]
+        shuffled = [*interleaved, conflicting, after_fold]
+        Random(91).shuffle(shuffled)
+        row_orders = (
+            [*first_fold, *second_fold, conflicting, after_fold],
+            [conflicting, *interleaved, after_fold],
+            [after_fold, *reversed(interleaved), conflicting],
+            shuffled,
+        )
+        expected = (
+            (datetime(2026, 10, 25, 2, tzinfo=timezone.utc), 200.0),
+        )
+
+        for index, rows_to_normalize in enumerate(row_orders):
+            with self.subTest(order=index):
+                samples = power_integration.normalize_power_rows(
+                    rows_to_normalize,
+                    "pv",
+                    ZoneInfo("Europe/Berlin"),
+                )
+
+                self.assertEqual(samples, expected)
+                result = power_integration.integrate_power_samples(samples)
+                self.assertEqual(result.sample_count, 1)
+                self.assertEqual(result.integrated_intervals, 0)
+                self.assertEqual(result.hourly_energy_kwh, ())
+
+    def test_conflicting_support_does_not_influence_fall_fold(self) -> None:
+        first_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "0")
+            for minute in range(0, 60, 5)
+        ]
+        second_fold = [
+            row(f"2026-10-25 02:{minute:02d}:00", "2000")
+            for minute in range(0, 60, 5)
+        ]
+        after_fold = row("2026-10-25 03:00:00", "1000")
+        conflicting_support = [
+            row("2026-10-25 01:55:00", "0"),
+            row("2026-10-25 01:55:00", "4000"),
+        ]
+        interleaved = [
+            sample
+            for pair in zip(first_fold, second_fold, strict=True)
+            for sample in pair
+        ]
+        baseline_rows = [*interleaved, after_fold]
+        expected = power_integration.normalize_power_rows(
+            baseline_rows,
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+        shuffled = [*baseline_rows, *conflicting_support]
+        Random(17).shuffle(shuffled)
+
+        for index, rows_to_normalize in enumerate(
+            (
+                [*conflicting_support, *baseline_rows],
+                [*baseline_rows, *reversed(conflicting_support)],
+                shuffled,
+            )
+        ):
+            with self.subTest(order=index):
+                self.assertEqual(
+                    power_integration.normalize_power_rows(
+                        rows_to_normalize,
+                        "pv",
+                        ZoneInfo("Europe/Berlin"),
+                    ),
+                    expected,
+                )
 
     def test_keeps_both_naive_fall_dst_hours_in_chronological_rows(
         self,

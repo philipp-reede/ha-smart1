@@ -225,6 +225,22 @@ class FakeHistoryState:
     ) -> FakeProgress | None:
         return self.progress.get((statistic_id, schema_version))
 
+    def forget_statistics(self, statistic_ids: set[str]) -> None:
+        for statistic_id in statistic_ids:
+            self.versions.pop(statistic_id, None)
+            self.zones.pop(statistic_id, None)
+            for store in (
+                self.presence,
+                self.coverage,
+                self.progress,
+                self.empty_days,
+                self.complete_days,
+                self.retry_runs,
+            ):
+                for key in tuple(store):
+                    if key[0] == statistic_id:
+                        del store[key]
+
     def record_incomplete_scan_if_unchanged(
         self,
         statistic_id: str,
@@ -742,6 +758,67 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(target_date, midday.complete_days["pv"])
         self.assertIn(target_date, next_day.complete_days["pv"])
         self.assertNotIn(target_date, next_day.incomplete_days["pv"])
+
+    async def test_failed_following_day_keeps_last_scanned_day_incomplete(
+        self,
+    ) -> None:
+        target_date = date(2026, 1, 2)
+        failed_date = target_date + timedelta(days=1)
+
+        class FailingBoundaryApi(FakeApi):
+            async def get_linear_detailed_rows(
+                self,
+                linear_ids: list[str],
+                *,
+                target_date: date,
+                missing_ok: bool,
+            ) -> list[dict[str, str]]:
+                if target_date == failed_date:
+                    self.calls.append(
+                        (tuple(linear_ids), target_date, missing_ok)
+                    )
+                    raise aiohttp.ClientError("temporary failure")
+                return await super().get_linear_detailed_rows(
+                    linear_ids,
+                    target_date=target_date,
+                    missing_ok=missing_ok,
+                )
+
+        importer = power_history.Smart1PowerHistoryImporter(
+            FakeHass("UTC"),
+            FailingBoundaryApi({"pv": 1000.0}),
+            pv_power_point=point("pv"),
+            role_points={},
+        )
+
+        with patch.object(
+            power_history.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ):
+            result = await importer._fetch_hourly_means(
+                target_date,
+                failed_date,
+                ZoneInfo("UTC"),
+                completed_before=datetime(
+                    2026,
+                    1,
+                    4,
+                    tzinfo=timezone.utc,
+                ),
+            )
+
+        self.assertFalse(result.completed)
+        self.assertEqual(result.checked_through, target_date)
+        self.assertNotIn(
+            datetime(2026, 1, 2, 23, tzinfo=timezone.utc),
+            dict(result.hourly_means["pv"]),
+        )
+        self.assertEqual(
+            result.incomplete_days["pv"],
+            frozenset({target_date}),
+        )
+        self.assertEqual(result.complete_days["pv"], frozenset())
 
     async def test_spring_dst_day_keeps_all_23_real_hours(self) -> None:
         target_date = date(2026, 3, 29)
@@ -1383,6 +1460,64 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
                 power_history.POWER_HISTORY_SCHEMA_VERSION,
             )
         )
+
+    async def test_invalid_incomplete_progress_restarts_supported_window(
+        self,
+    ) -> None:
+        now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+        today = now.date()
+        oldest_supported = today - timedelta(
+            days=power_history.POWER_HISTORY_DAYS - 1
+        )
+        for days_ahead in (0, 7):
+            with self.subTest(days_ahead=days_ahead):
+                state = FakeHistoryState()
+                store = FakeStatisticsStore()
+                importer: ScriptedFetchImporter
+                importer = ScriptedFetchImporter(
+                    FakeHass(),
+                    FakeApi({}),
+                    pv_power_point=point("pv"),
+                    role_points={},
+                    history_state=state,
+                    statistics_writer=store.write,
+                    persistence_checker=store.persisted,
+                    statistics_reader=store.read,
+                    fetch_factory=lambda *args: successful_fetch(importer)(
+                        *args
+                    ),
+                )
+                statistic_id = importer.channels[0].statistic_id
+                key = (
+                    statistic_id,
+                    power_history.POWER_HISTORY_SCHEMA_VERSION,
+                )
+                invalid_date = today + timedelta(days=days_ahead)
+                mark_complete(
+                    state,
+                    importer,
+                    has_data=False,
+                    checked_through=invalid_date,
+                )
+                state.progress[key] = FakeProgress(
+                    checked_through=invalid_date,
+                    has_data=False,
+                    source_time_zone="UTC",
+                    oldest_supported=oldest_supported,
+                )
+
+                await importer.async_import(now=now)
+
+                self.assertEqual(
+                    importer.windows,
+                    [(oldest_supported, today)],
+                )
+                self.assertIsNone(state.incomplete_scan_progress(*key))
+                self.assertEqual(state.checked_through(*key), today)
+                self.assertEqual(
+                    importer.diagnostic_status["last_result"],
+                    "completed",
+                )
 
     async def test_successful_empty_initial_days_are_retryable(self) -> None:
         state = FakeHistoryState()
