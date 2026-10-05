@@ -48,6 +48,74 @@ class Smart1RecorderHelpersTest(unittest.TestCase):
             recorder_helpers.statistics_are_persisted(expected, observed)
         )
 
+    def test_power_mean_persistence_is_verified(self) -> None:
+        start = datetime(2026, 8, 4, tzinfo=timezone.utc)
+        expected = [{"start": start, "mean": -1.25}]
+        observed = [{"start": start.timestamp(), "mean": -1.25}]
+
+        self.assertTrue(
+            recorder_helpers.statistics_are_persisted(expected, observed)
+        )
+        observed[0]["mean"] = -1.0
+        self.assertFalse(
+            recorder_helpers.statistics_are_persisted(expected, observed)
+        )
+
+    def test_power_statistics_validation_accepts_signed_means(self) -> None:
+        metadata = {
+            "mean_type": "arithmetic",
+            "source": "smart1_ems",
+            "statistic_id": "smart1_ems:grid_power_history_ab12",
+            "unit_class": "power",
+            "unit_of_measurement": "kW",
+        }
+        statistics = [
+            {
+                "start": datetime(2026, 8, 4, tzinfo=timezone.utc),
+                "mean": -2.5,
+            }
+        ]
+
+        recorder_helpers.validate_power_statistics_imports(
+            [(metadata, statistics)]
+        )
+
+        statistics[0]["mean"] = float("nan")
+        with self.assertRaisesRegex(ValueError, "mean must be finite"):
+            recorder_helpers.validate_power_statistics_imports(
+                [(metadata, statistics)]
+            )
+
+    def test_power_statistics_validation_requires_utc_hour(self) -> None:
+        metadata = {
+            "mean_type": "arithmetic",
+            "source": "smart1_ems",
+            "statistic_id": "smart1_ems:pv_power_history",
+            "unit_class": "power",
+            "unit_of_measurement": "kW",
+        }
+        kolkata = timezone(timedelta(hours=5, minutes=30))
+
+        with self.assertRaisesRegex(ValueError, "UTC hour boundary"):
+            recorder_helpers.validate_power_statistics_imports(
+                [
+                    (
+                        metadata,
+                        [
+                            {
+                                "start": datetime(
+                                    2026,
+                                    8,
+                                    4,
+                                    tzinfo=kolkata,
+                                ),
+                                "mean": 1.0,
+                            }
+                        ],
+                    )
+                ]
+            )
+
     def test_wait_for_recorder_commit_uses_queue_barrier(self) -> None:
         recorder = Mock(async_block_till_done=AsyncMock())
 

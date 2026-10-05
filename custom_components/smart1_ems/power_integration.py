@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import reduce
-from math import gcd
+from math import gcd, isfinite
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -38,9 +38,12 @@ def _row_value(row: Mapping[str, Any]) -> float | None:
         return None
 
     try:
-        return max(0.0, float(str(raw_value).replace(",", ".")))
+        value = float(str(raw_value).replace(",", "."))
     except ValueError:
         return None
+    if not isfinite(value):
+        return None
+    return max(0.0, value)
 
 
 def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
