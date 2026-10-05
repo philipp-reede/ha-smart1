@@ -1505,6 +1505,46 @@ class Smart1PvHistoryImporter:
                     pending_time_zone_migration
                 )
             )
+            pending_clear_rebuild_baseline = (
+                getattr(
+                    pending_time_zone_migration,
+                    "clear_rebuild_baseline_sum",
+                    None,
+                )
+                if pending_time_zone_migration is not None
+                else None
+            )
+            pending_fallback_daily_energy = (
+                _pending_fallback_daily_energy(
+                    pending_time_zone_migration
+                )
+                if pending_time_zone_migration is not None
+                else {}
+            )
+            pending_replacement_hourly_energy = (
+                _pending_replacement_hourly_energy(
+                    pending_time_zone_migration
+                )
+                if pending_time_zone_migration is not None
+                else {}
+            )
+            pending_identity_rebuild = bool(
+                pending_time_zone_migration is not None
+                and pending_time_zone_migration.source_time_zone
+                == pending_time_zone_migration.target_time_zone
+            )
+            pending_replacement_complete = bool(
+                pending_time_zone_migration is not None
+                and _pending_has_complete_replacement(
+                    pending_time_zone_migration
+                )
+            )
+            pending_replacement_invalid = bool(
+                pending_time_zone_migration is not None
+                and _pending_has_invalid_replacement(
+                    pending_time_zone_migration
+                )
+            )
             # A crash can happen either before or after Recorder applies the
             # queued replacement. Finish the journaled source -> target step
             # first, even when Home Assistant has meanwhile changed to a third
@@ -1675,6 +1715,13 @@ class Smart1PvHistoryImporter:
                     )
                 )
             )
+            replaying_exact_replacement = bool(
+                time_zone_rebuild_required
+                and pending_time_zone_migration is not None
+                and pending_clear_rebuild_baseline is not None
+                and pending_replacement_complete
+                and not pending_replacement_invalid
+            )
 
             # Existing hourly data predates the persistent completion marker.
             # Adopt its storage schema here. The independent coverage cursor
@@ -1733,7 +1780,30 @@ class Smart1PvHistoryImporter:
                 else None
             )
 
-            if self.pv_power_point is None:
+            main_fetched_daily_energy: list[tuple[date, float]] = []
+            retry_fetched_daily_energy: list[tuple[date, float]] = []
+            main_fetched_hourly_energy: list[
+                tuple[datetime, float]
+            ] = []
+            retry_fetched_hourly_energy: list[
+                tuple[datetime, float]
+            ] = []
+            retry_completed = False
+            if replaying_exact_replacement:
+                # A complete durable journal is the authoritative replacement
+                # for a clear that may already have committed. Replaying it must
+                # not depend on portal availability: the next ordinary repair
+                # performs the supported-window catch-up after the journal has
+                # been committed and cleared.
+                fetched_hourly_energy = sorted(
+                    pending_replacement_hourly_energy.items()
+                )
+                main_fetched_hourly_energy = list(fetched_hourly_energy)
+                fetch_completed = True
+                main_checked_through = None
+                distributed_days = 0
+                daily_fallback_days = 0
+            elif self.pv_power_point is None:
                 main_fetch_result = await self._fetch_daily_energy(
                     main_start_date,
                     today,
@@ -1748,8 +1818,6 @@ class Smart1PvHistoryImporter:
                         main_checked_through,
                     ) = main_fetch_result
                 main_fetched_daily_energy = list(fetched_daily_energy)
-                retry_completed = False
-                retry_fetched_daily_energy: list[tuple[date, float]] = []
                 if fetch_completed and retry_date is not None:
                     retry_fetch_result = await self._fetch_daily_energy(
                         retry_date,
@@ -1865,10 +1933,6 @@ class Smart1PvHistoryImporter:
                     else (today if fetch_completed else None)
                 )
                 main_fetched_hourly_energy = list(fetched_hourly_energy)
-                retry_completed = False
-                retry_fetched_hourly_energy: list[
-                    tuple[datetime, float]
-                ] = []
                 if fetch_completed and retry_date is not None:
                     (
                         retry_fetched_hourly_energy,
@@ -1928,51 +1992,6 @@ class Smart1PvHistoryImporter:
                 main_nonempty_days | retry_nonempty_days
             )
             migration_fallback_daily_energy: dict[date, float] = {}
-            pending_clear_rebuild_baseline = (
-                getattr(
-                    pending_time_zone_migration,
-                    "clear_rebuild_baseline_sum",
-                    None,
-                )
-                if pending_time_zone_migration is not None
-                else None
-            )
-            pending_fallback_daily_energy = (
-                _pending_fallback_daily_energy(
-                    pending_time_zone_migration
-                )
-                if pending_time_zone_migration is not None
-                else {}
-            )
-            pending_replacement_hourly_energy = (
-                _pending_replacement_hourly_energy(
-                    pending_time_zone_migration
-                )
-                if pending_time_zone_migration is not None
-                else {}
-            )
-            pending_identity_rebuild = bool(
-                pending_time_zone_migration is not None
-                and pending_time_zone_migration.source_time_zone
-                == pending_time_zone_migration.target_time_zone
-            )
-            pending_replacement_complete = bool(
-                pending_time_zone_migration is not None
-                and _pending_has_complete_replacement(
-                    pending_time_zone_migration
-                )
-            )
-            pending_replacement_invalid = bool(
-                pending_time_zone_migration is not None
-                and _pending_has_invalid_replacement(
-                    pending_time_zone_migration
-                )
-            )
-            replaying_exact_replacement = bool(
-                time_zone_rebuild_required
-                and pending_time_zone_migration is not None
-                and pending_replacement_complete
-            )
             if (
                 pending_time_zone_migration is not None
                 and time_zone_rebuild_required
@@ -2244,12 +2263,10 @@ class Smart1PvHistoryImporter:
                 if self.history_state
                 else 0
             )
-            # The recovery fetch is useful only to prove that the portal is
-            # reachable.  Exact replay deliberately ignores its content to
-            # finish the durable batch atomically, so it must not advance
-            # coverage or empty-day evidence. Resetting target-schema progress
-            # makes the next ordinary repair perform a full supported-window
-            # catch-up without another destructive clear.
+            # Exact replay deliberately performs no portal fetch and must not
+            # advance coverage or empty-day evidence. Resetting target-schema
+            # progress makes the next ordinary repair perform a full supported-
+            # window catch-up without another destructive clear.
             commit_main_checked_through = (
                 None
                 if replaying_exact_replacement
@@ -2479,7 +2496,10 @@ class Smart1PvHistoryImporter:
 
             if not statistics:
                 _LOGGER.debug("No smart1 PV history available for import")
-                if self.history_state and main_checked_through is not None:
+                if self.history_state and (
+                    main_checked_through is not None
+                    or replaying_exact_replacement
+                ):
                     if destructive_rebuild_required:
                         committed = await _async_commit_empty_rebuild()
                     else:

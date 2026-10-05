@@ -76,6 +76,14 @@ class ParseInvertersTest(unittest.TestCase):
             [],
         )
 
+    def test_canonicalizes_inverter_id_casing_for_device_identity(self) -> None:
+        inverter = INVERTER.parse_inverters(
+            [{"Inverter Id": "inverter_b02_a001", "Strings": "1"}]
+        )[0]
+
+        self.assertEqual(inverter.id, "Inverter_B2_A1")
+        self.assertEqual(inverter.key, (2, 1))
+
 
 class ParsePvStringSamplesTest(unittest.TestCase):
     def test_keeps_latest_row_for_each_string(self) -> None:

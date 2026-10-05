@@ -10,16 +10,25 @@ from urllib.parse import quote
 
 import aiohttp
 
-from .bus import Smart1BusSystem, parse_bus_systems
+from .bus import (
+    Smart1BusSystem,
+    is_parseable_bus_row,
+    parse_bus_systems,
+)
 from .const import BASE_URL
 from .inverter import (
     Smart1Inverter,
     Smart1PvStringSample,
+    is_parseable_inverter_row,
     parse_inverters,
     parse_latest_pv_string_samples,
 )
 from .interface import parse_interface
-from .module_field import Smart1ModuleField, parse_module_fields
+from .module_field import (
+    Smart1ModuleField,
+    is_parseable_module_field_row,
+    parse_module_fields,
+)
 from .point import Smart1Point
 from .pv import parse_pv_cumulative_energy
 
@@ -241,7 +250,13 @@ class Smart1Api:
             f"/inverters/{self.device_id}",
             missing_ok=missing_ok,
         )
-        return parse_inverters(result.rows), result.diagnostics()
+        probe = result.diagnostics()
+        invalid_rows = sum(
+            not is_parseable_inverter_row(row) for row in result.rows
+        )
+        if invalid_rows:
+            probe["unparseable_rows"] = invalid_rows
+        return parse_inverters(result.rows), probe
 
     async def get_module_fields(
         self,
@@ -265,7 +280,13 @@ class Smart1Api:
             f"/modulfields/{self.device_id}",
             missing_ok=missing_ok,
         )
-        return parse_module_fields(result.rows), result.diagnostics()
+        probe = result.diagnostics()
+        invalid_rows = sum(
+            not is_parseable_module_field_row(row) for row in result.rows
+        )
+        if invalid_rows:
+            probe["unparseable_rows"] = invalid_rows
+        return parse_module_fields(result.rows), probe
 
     async def get_buses(
         self,
@@ -289,7 +310,13 @@ class Smart1Api:
             f"/bus/{self.device_id}",
             missing_ok=missing_ok,
         )
-        return parse_bus_systems(result.rows), result.diagnostics()
+        probe = result.diagnostics()
+        invalid_rows = sum(
+            not is_parseable_bus_row(row) for row in result.rows
+        )
+        if invalid_rows:
+            probe["unparseable_rows"] = invalid_rows
+        return parse_bus_systems(result.rows), probe
 
     def _counter_to_point(self, row: dict[str, str]) -> Smart1Point:
         """Convert one counter row into a Smart1Point."""

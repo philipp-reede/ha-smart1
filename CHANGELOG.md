@@ -2,6 +2,62 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Serialize durable history-journal access by config-entry store key, drain
+  outstanding writes during unload and delete the private migration store when
+  an entry is removed. An old runtime can no longer overwrite a newer recovery
+  journal after a reload or leave exact replacement profiles behind after
+  permanent removal
+- Replay complete PV and derived-energy replacement journals before any portal
+  history request, including deliberately empty replacements. Destructive
+  empty derived-energy replacements are now journaled before Recorder is
+  cleared. Recovery after a completed clear therefore remains possible while
+  the portal is unavailable; normal non-destructive catch-up resumes afterwards
+- Preserve derived-energy totals during time-zone migrations by persisting
+  affected dates when a positive UTC boundary bucket cannot be divided safely,
+  an internal source day is empty or a whole-hour boundary lacks its adjacent
+  source-day pair. Probe at most one deferred date per statistic each day in
+  bounded round-robin order instead of repeating a 365-day scan every six
+  hours. Independent exact-journal and unambiguous roles continue in the same
+  run
+- Keep an incomplete cross-midnight resume boundary in the bounded retry queue
+  when its predecessor day returns no samples, including across subsequent
+  rolling refreshes with valid interior data
+- Advance derived-energy history to schema 7 so version-6 installations receive
+  one non-destructive supported-window audit. Portal days that remain available
+  are rebuilt and newly discovered empty boundaries enter the bounded retry
+  queue without clearing the complete statistic; unavailable or aged-out
+  source days remain unchanged because their original split cannot be
+  reconstructed from Recorder's hourly totals
+- Treat inverter, module-field and bus topology responses containing any
+  unparseable identity row as non-authoritative, preventing malformed portal
+  data from deleting existing registry entities and user customizations
+- Revalidate the active config-entry runtime after every awaited topology retry
+  before mutating discovery state or the cross-reload recovery cache
+- Canonicalize inverter IDs independently of portal casing and numeric
+  zero-padding, and migrate an equivalent legacy device-registry identifier in
+  place, retaining its entities, area and customizations instead of creating a
+  ghost device. If both spelling variants already exist, move their entities to
+  the older registry device and remove the duplicate
+
+### Documentation
+
+- Clarify that the 365-day backfill covers external Energy Dashboard energy
+  statistics in kWh, while the **Power sources** graph uses Recorder history
+  from live W/kW entities and therefore starts when Recorder began collecting
+  their statistics
+
+### Testing
+
+- Cover cross-reload journal write fencing and store removal, portal-independent
+  exact journal replay for PV and derived energy, fractional-offset fail-closed
+  role isolation, internal-empty and missing whole-hour boundary probes,
+  persistent resume-boundary retries, malformed topology rows, stale topology
+  callbacks and casing/zero-padding inverter-device upgrades
+
 ## [0.7.4] - 2026-09-28
 
 ### Fixed

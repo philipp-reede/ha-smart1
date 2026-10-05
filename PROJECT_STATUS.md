@@ -55,7 +55,12 @@
 - A failure of optional PV cumulative data no longer blocks live values.
   Expected HTTP or embedded 404 responses remain debug-only during polling
 - Physical inverters are discovered from the documented metadata endpoint and
-  represented as separate Home Assistant devices
+  represented as separate Home Assistant devices. Their identifiers are
+  canonicalized independently of portal casing and numeric zero-padding;
+  existing spelling variants are migrated in place so device assignments and
+  customizations remain attached. If an interrupted earlier migration already
+  left both a legacy and canonical device, their entities are consolidated onto
+  the older registry device and the equivalent duplicate is removed
 - The detailed photovoltaic endpoint supplies per-string AC/DC power and DC
   voltage plus inverter temperature as optional diagnostic sensors
 - All registered string IDs for a currently discovered inverter are retained
@@ -71,11 +76,14 @@
 - Inverter, module-field and bus topology requests that fail or return an
   ambiguous schema-free response during setup are retried every 15 minutes.
   A conclusive recovery is carried through one guarded reload, while explicit
-  optional 404 responses end recovery without creating a reload loop
+  optional 404 responses end recovery without creating a reload loop. Each
+  retry verifies its config-entry runtime again after the network request, so
+  an unloaded callback cannot update the replacement runtime or recovery cache
 - Obsolete inverter, PV-string, module-field and bus entities are removed only
   after the corresponding optional endpoint returns an authoritative known
-  topology; missing endpoints, unknown schemas and request failures never
-  trigger registry cleanup
+  topology in which every data-bearing identity row is parseable; missing
+  endpoints, unknown schemas, malformed IDs and request failures never trigger
+  registry cleanup
 - Inverter diagnostics report only redacted capability metadata and never
   expose inverter IDs, serial numbers, timestamps or measurements
 - Active inverter communication buses are discovered from the optional
@@ -109,7 +117,10 @@
   difference with all 288 expected five-minute samples and no skipped gaps
 - Integration name and domain are now `smart1 EMS` and `smart1_ems`
 - The latest 365 days of documented PV daily production are imported as
-  external long-term statistics in the background
+  external kWh long-term statistics in the background. This energy-history
+  import does not backfill Recorder-owned mean statistics for live power
+  entities; the Energy Dashboard's Power sources graph therefore starts when
+  Recorder begins collecting their statistics
 - Exact PV daily totals are distributed across UTC-aligned hours using the
   measured five-minute `pv_global` profile and normalized back to the exact
   cumulative daily value, avoiding a midnight residual-consumption spike
@@ -199,7 +210,9 @@
   later request failure leaves the first unchecked date for the next repair.
   Prefixes with rows advance only after Recorder confirmation. Successful
   no-data days advance coverage and are retained for bounded, rotating
-  single-day rechecks
+  single-day rechecks. A resumed day whose successful-empty predecessor cannot
+  complete its cross-midnight interval remains in that retry queue even after
+  later rolling refreshes observe valid interior samples
 - Source-time-zone fingerprints and in-flight migration generations are
   written to a dedicated durable store before Recorder receives replacement
   statistics. Each new generation retains the exact final UTC-hour replacement
@@ -213,7 +226,23 @@
   permanently on an adjacent empty day or repeating destructive annual scans.
   Older real time-zone journals without an exact profile retain their
   daily-total fallback; missing or malformed exact identity-layout journals
-  stop before Recorder is mutated
+  stop before Recorder is mutated. Complete exact journals are replayed before
+  any new portal history request, including explicit empty replacements, so a
+  cleared Recorder statistic can be recovered while the portal is unavailable
+- Unresolved time-zone and local-day partitions are persisted per statistic.
+  This includes a positive UTC bucket straddling the selected/retained boundary
+  in a fractional-offset migration, an internal successful-empty source day
+  splitting a positive stored hour, and a whole-hour opening boundary whose
+  adjacent source-day pair is incomplete. The affected role fails closed
+  without a clear or partial replacement. At most one affected date per
+  statistic is probed each day in bounded round-robin order; a complete pair
+  retires that date and permits the full repair, while independent exact-journal
+  and otherwise unambiguous roles continue in the same run. This avoids an
+  unproductive 365-day scan every six hours
+- Durable journal access is serialized by config-entry Store key across
+  reloads. Unload marks the old state inactive and drains pending writes before
+  the runtime is removed; permanent config-entry removal deletes the same
+  private Store after crossing that shared write fence
 - Destructive history rebuilds wait for Recorder's per-operation completion
   callback before completion state is written. Replacement batches are prepared
   and validated first, then queued immediately behind the clear without an
@@ -228,7 +257,10 @@
   journal-protected whole-statistic canonicalization for layouts written before
   the durable migration journal. Completion markers that an older release may
   have written for an empty result are revalidated once; a newly confirmed
-  empty result is then persisted normally
+  empty result is then persisted normally. Derived-energy schema 7 follows with
+  one non-destructive supported-window audit of version-6 history, repairing
+  still-available source days and seeding bounded retries without clearing the
+  complete statistic
 - Unstructured interface values containing `photovoltaic` remain classified as
   PV by the shared entity and discovery classifier
 - Orphaned legacy statistics have their completion and source-time-zone state
@@ -295,6 +327,10 @@
   grid and battery are unavailable on the reference installation. Their
   optional energy statistics are therefore estimates derived from five-minute
   power samples
+- Historical import currently covers external kWh energy statistics only.
+  Recorder-owned W/kW statistics for live power entities are not backfilled,
+  so the Energy Dashboard's Power sources graph cannot show portal history
+  from before those entities were created
 - Historical rows that multiple pre-migration config entries may already have
   written into the former shared external-statistic IDs cannot be attributed
   to their originating installations. Migration therefore discards those
@@ -315,6 +351,19 @@
   duplicate is still indistinguishable from an identical sample in both folds
   when the counterpart is missing, so remaining multiplicity is treated as
   fold evidence; only an explicit UTC offset permits exact fold attribution
+- A time-zone migration remains pending when an existing positive UTC hourly
+  derived-energy bucket cannot be split safely across a replaced/retained local
+  day, an internal source day is empty, or a whole-hour boundary lacks its
+  adjacent source-day pair. Recorder cannot reconstruct the missing fragments,
+  so proceeding would create or discard energy. The affected dates are retained
+  durably and probed one day per statistic at most once daily; other roles are
+  not blocked and the full annual fetch is not repeated while the ambiguity
+  remains
+- A time-zone migration already completed by version 0.7.4 cannot be
+  reconstructed exactly for source days that have since aged out of the
+  portal's supported window or are no longer returned. Schema 7 safely audits
+  and repairs the still-available window without destructively clearing that
+  older history
 
 ## Remaining work
 
@@ -329,6 +378,13 @@
 - Validate inverter-bus discovery and manufacturer protocols with additional
   EMS and inverter combinations
 - Add a configurable history range if real-world installations need it
+- Evaluate a supported historical power-statistics path for the Energy
+  Dashboard's Power sources graph without mutating Recorder-owned entity
+  statistics
+- Evaluate whether additional portal evidence can resolve a persistent
+  time-zone/day-boundary partition when the bounded daily probes cannot recover
+  its missing adjacent samples; until then the affected role deliberately
+  remains pending
 - Monitor the pending default HACS catalogue review in
   [hacs/default#10379](https://github.com/hacs/default/pull/10379) and address
   review feedback

@@ -30,6 +30,9 @@ HISTORY_SOURCE_TIME_ZONES_KEY = history_state.HISTORY_SOURCE_TIME_ZONES_KEY
 HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY = (
     history_state.HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY
 )
+HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY = (
+    history_state.HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY
+)
 Smart1HistoryState = history_state.Smart1HistoryState
 recorded_source_time_zone = history_state.recorded_source_time_zone
 scoped_statistic_id = history_state.scoped_statistic_id
@@ -68,6 +71,30 @@ class _DurableStore:
             return
         self.data = deepcopy(data)
         self.saves.append(deepcopy(data))
+
+
+class _SharedDurableStoreBacking:
+    """One durable payload exposed through separate Store handles."""
+
+    def __init__(self, data=None) -> None:
+        self.data = deepcopy(data)
+        self.saves = []
+
+
+class _SharedDurableStore:
+    """Model the fresh Store object Home Assistant creates on reload."""
+
+    def __init__(self, backing: _SharedDurableStoreBacking, name: str) -> None:
+        self._backing = backing
+        self._name = name
+
+    async def async_load(self):
+        return deepcopy(self._backing.data)
+
+    async def async_save(self, data) -> None:
+        snapshot = deepcopy(data)
+        self._backing.data = snapshot
+        self._backing.saves.append((self._name, snapshot))
 
 
 class Smart1HistoryStateTest(unittest.TestCase):
@@ -272,6 +299,16 @@ class Smart1HistoryStateTest(unittest.TestCase):
                 oldest_supported=oldest_supported,
             )
         )
+        retry_snapshot = state.empty_days_for_schema(
+            statistic_id,
+            schema_version,
+        )
+        self.assertEqual(retry_snapshot, empty_days)
+        retry_snapshot.clear()
+        self.assertEqual(
+            state.empty_days_for_schema(statistic_id, schema_version),
+            empty_days,
+        )
         first = state.next_empty_retry_date(
             statistic_id,
             schema_version,
@@ -431,7 +468,7 @@ class Smart1HistoryStateTest(unittest.TestCase):
         stale_state = Smart1HistoryState(hass, entry)
         expected_version = stale_state.current_schema_version(statistic_id)
 
-        stale_state.deactivate()
+        asyncio.run(stale_state.deactivate())
         active_state = Smart1HistoryState(hass, entry)
         active_state.mark_complete(statistic_id, 2, has_data=False)
 
@@ -450,6 +487,201 @@ class Smart1HistoryStateTest(unittest.TestCase):
             2,
         )
         self.assertEqual(len(manager.calls), 1)
+
+    def test_reload_waits_for_old_store_write_and_rejects_queued_write(
+        self,
+    ) -> None:
+        """A reload cannot be overtaken by writes from its old runtime."""
+        statistic_id = "smart1_ems:pv_production"
+        store_key = "smart1_ems.history_migrations.entry-1"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(data={}, config_entries=manager)
+        entry = types.SimpleNamespace(entry_id="entry-1", data={})
+        store = _DurableStore()
+
+        async def run() -> None:
+            old_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=store,
+                durable_store_key=store_key,
+            )
+            await old_state.async_initialize()
+
+            write_started = asyncio.Event()
+            release_write = asyncio.Event()
+            original_save = store.async_save
+
+            async def blocked_save(data) -> None:
+                snapshot = deepcopy(data)
+                write_started.set()
+                await release_write.wait()
+                await original_save(snapshot)
+
+            store.async_save = blocked_save
+            begin_task = asyncio.create_task(
+                old_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 4.0},
+                    clear_rebuild_baseline_sum=10.0,
+                )
+            )
+            await write_started.wait()
+
+            # This old-runtime write queues behind the blocked journal write.
+            # Deactivation marks the runtime inactive before either waiter can
+            # acquire the shared lock, so the queued removal must be ignored.
+            queued_forget = asyncio.create_task(
+                old_state.async_forget_statistics({statistic_id})
+            )
+            deactivate = asyncio.create_task(old_state.deactivate())
+            await asyncio.sleep(0)
+
+            new_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=store,
+                durable_store_key=store_key,
+            )
+            initialize = asyncio.create_task(new_state.async_initialize())
+            await asyncio.sleep(0)
+            self.assertFalse(deactivate.done())
+            self.assertFalse(initialize.done())
+
+            release_write.set()
+            generation = await begin_task
+            await queued_forget
+            await deactivate
+            await initialize
+
+            pending = new_state.pending_time_zone_migration(statistic_id)
+            self.assertIsNotNone(pending)
+            assert pending is not None
+            self.assertEqual(pending.generation, generation)
+            self.assertEqual(
+                store.data[HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY][
+                    statistic_id
+                ]["generation"],
+                generation,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "inactive"):
+                await old_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 8.0},
+                    clear_rebuild_baseline_sum=12.0,
+                )
+
+        asyncio.run(run())
+
+    def test_reload_serializes_distinct_store_handles_for_same_key(
+        self,
+    ) -> None:
+        """A late old-handle save cannot replace the new recovery journal."""
+        statistic_id = "smart1_ems:pv_production"
+        store_key = "smart1_ems.history_migrations.entry-1"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(data={}, config_entries=manager)
+        entry = types.SimpleNamespace(entry_id="entry-1", data={})
+        backing = _SharedDurableStoreBacking()
+        old_store = _SharedDurableStore(backing, "old")
+        new_store = _SharedDurableStore(backing, "new")
+
+        async def run() -> None:
+            old_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=old_store,
+                durable_store_key=store_key,
+            )
+            await old_state.async_initialize()
+
+            write_started = asyncio.Event()
+            release_old_write = asyncio.Event()
+            original_old_save = old_store.async_save
+
+            async def blocked_old_save(data) -> None:
+                # Capture the old runtime's exact payload before the reload.
+                # Without a key-wide lock, the new handle can persist its
+                # newer recovery journal first and this delayed snapshot then
+                # overwrites it when the old write resumes.
+                snapshot = deepcopy(data)
+                write_started.set()
+                await release_old_write.wait()
+                await original_old_save(snapshot)
+
+            old_store.async_save = blocked_old_save
+            old_write = asyncio.create_task(
+                old_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 4.0},
+                    clear_rebuild_baseline_sum=10.0,
+                )
+            )
+            await write_started.wait()
+
+            deactivate = asyncio.create_task(old_state.deactivate())
+            await asyncio.sleep(0)
+
+            new_state = Smart1HistoryState(
+                hass,
+                entry,
+                durable_store=new_store,
+                durable_store_key=store_key,
+            )
+
+            async def write_new_recovery_journal() -> str:
+                await new_state.async_initialize()
+                return await new_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 9.0},
+                    clear_rebuild_baseline_sum=20.0,
+                )
+
+            new_write = asyncio.create_task(write_new_recovery_journal())
+            await asyncio.sleep(0)
+            self.assertFalse(deactivate.done())
+            self.assertFalse(new_write.done())
+
+            release_old_write.set()
+            old_generation = await old_write
+            await deactivate
+            new_generation = await new_write
+
+            # The reload adopted and refreshed the same recovery generation,
+            # and the shared backing contains the new handle's final payload.
+            self.assertEqual(new_generation, old_generation)
+            persisted = backing.data[
+                HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY
+            ][statistic_id]
+            self.assertEqual(
+                persisted["fallback_daily_energy"],
+                {"2026-09-24": 9.0},
+            )
+            self.assertEqual(
+                persisted["clear_rebuild_baseline_sum"],
+                20.0,
+            )
+            self.assertEqual(backing.saves[-1][0], "new")
+
+            with self.assertRaisesRegex(RuntimeError, "inactive"):
+                await old_state.async_begin_time_zone_migration(
+                    statistic_id,
+                    "UTC",
+                    "Europe/Berlin",
+                    fallback_daily_energy={date(2026, 9, 24): 2.0},
+                    clear_rebuild_baseline_sum=5.0,
+                )
+
+        asyncio.run(run())
 
     def test_source_timezone_is_committed_atomically_with_scan_state(
         self,
@@ -1118,6 +1350,71 @@ class Smart1HistoryStateTest(unittest.TestCase):
             {},
         )
 
+    def test_fractional_partition_deferral_survives_reload_and_is_fenced(
+        self,
+    ) -> None:
+        statistic_id = "smart1_ems:grid_import"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager, data={})
+        entry = types.SimpleNamespace(data={})
+        store = _DurableStore()
+        state = Smart1HistoryState(
+            hass,
+            entry,
+            durable_store=store,
+            durable_store_key="history-entry",
+        )
+        partition_date = date(2026, 9, 4)
+
+        async def seed() -> str:
+            await state.async_initialize()
+            return await state.async_defer_time_zone_partition(
+                statistic_id,
+                "Asia/Kathmandu",
+                "Europe/Berlin",
+                7,
+                partition_dates={partition_date},
+                next_probe_on=date(2026, 9, 29),
+            )
+
+        generation = asyncio.run(seed())
+        stored = store.data[HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY][
+            statistic_id
+        ]
+        self.assertEqual(stored["generation"], generation)
+        self.assertEqual(stored["partition_dates"], ["2026-09-04"])
+
+        reloaded = Smart1HistoryState(
+            hass,
+            entry,
+            durable_store=store,
+            durable_store_key="history-entry",
+        )
+
+        async def reload_and_clear() -> tuple[bool, bool]:
+            await reloaded.async_initialize()
+            stale = await reloaded.async_clear_deferred_time_zone_partition(
+                statistic_id,
+                "stale-generation",
+            )
+            current = reloaded.deferred_time_zone_partition(statistic_id)
+            assert current is not None
+            cleared = (
+                await reloaded.async_clear_deferred_time_zone_partition(
+                    statistic_id,
+                    current.generation,
+                )
+            )
+            return stale, cleared
+
+        stale, cleared = asyncio.run(reload_and_clear())
+        self.assertFalse(stale)
+        self.assertTrue(cleared)
+        self.assertEqual(
+            store.data[HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY],
+            {},
+        )
+
     def test_pending_migration_refreshes_durable_fallback_in_place(
         self,
     ) -> None:
@@ -1506,6 +1803,16 @@ class Smart1HistoryStateTest(unittest.TestCase):
                         "generation": "remove-me",
                     }
                 },
+                HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY: {
+                    removed_id: {
+                        "source_time_zone": "Asia/Kathmandu",
+                        "target_time_zone": "Europe/Berlin",
+                        "schema_version": 7,
+                        "generation": "remove-deferral",
+                        "partition_dates": ["2026-09-04"],
+                        "next_probe_on": "2026-09-29",
+                    }
+                },
             }
         )
         store = _DurableStore()
@@ -1524,6 +1831,10 @@ class Smart1HistoryStateTest(unittest.TestCase):
         self.assertNotIn(
             removed_id,
             store.data[HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY],
+        )
+        self.assertNotIn(
+            removed_id,
+            store.data[HISTORY_DEFERRED_TIME_ZONE_PARTITIONS_KEY],
         )
         self.assertEqual(
             store.data[HISTORY_SOURCE_TIME_ZONES_KEY][retained_id],

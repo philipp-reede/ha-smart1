@@ -601,6 +601,121 @@ def has_positive_energy_on_dates_in_any_zone(
     return False
 
 
+def _positive_energy_partition_dates(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+    selected_dates: set[date],
+) -> set[date]:
+    """Return opening dates of indivisible positive partition buckets.
+
+    Recorder only retains an hourly total, not the underlying five-minute
+    fragments. In fractional-offset zones one UTC bucket can therefore span
+    two local source days. If one of those days is being replaced while the
+    other is retained, assigning the complete bucket to either day would
+    create or discard energy during a time-zone rebuild.
+    """
+    partition_dates: set[date] = set()
+    if not selected_dates:
+        return partition_dates
+    for record in records:
+        state = record.get("state")
+        if state is None:
+            continue
+        try:
+            if float(state) <= 0.0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        start = _statistics_start(record)
+        local_dates = _local_dates_with_interval_energy(
+            start,
+            start + timedelta(hours=1),
+            local_tz,
+        )
+        if len(local_dates) > 1 and {
+            target_date in selected_dates for target_date in local_dates
+        } == {False, True}:
+            # Boundary completion is represented by the right-hand/opening
+            # local date throughout the streaming importer. Persist the same
+            # identity even when the successful-empty side is the preceding
+            # day, so a bounded probe can request both sides consistently.
+            partition_dates.add(max(local_dates))
+    return partition_dates
+
+
+def _positive_energy_incomplete_boundary_dates(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+    checked_dates: set[date],
+    completed_boundary_dates: set[date],
+) -> set[date]:
+    """Return stored positive boundaries not rebuilt from adjacent samples."""
+    incomplete_dates: set[date] = set()
+    for record in records:
+        state = record.get("state")
+        if state is None:
+            continue
+        try:
+            if float(state) <= 0.0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        start = _statistics_start(record)
+        start_date = start.astimezone(local_tz).date()
+        opening_date = (start + timedelta(hours=1)).astimezone(
+            local_tz
+        ).date()
+        if start_date == opening_date:
+            continue
+        if (
+            start_date in checked_dates
+            and opening_date in checked_dates
+            and opening_date not in completed_boundary_dates
+        ):
+            incomplete_dates.add(opening_date)
+    return incomplete_dates
+
+
+def _positive_energy_opening_boundary_dates(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+) -> set[date]:
+    """Return opening local dates backed by a positive stored boundary hour."""
+    boundary_dates: set[date] = set()
+    for record in records:
+        state = record.get("state")
+        if state is None:
+            continue
+        try:
+            if float(state) <= 0.0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        start = _statistics_start(record)
+        start_date = start.astimezone(local_tz).date()
+        opening_date = (start + timedelta(hours=1)).astimezone(
+            local_tz
+        ).date()
+        if start_date != opening_date:
+            boundary_dates.add(opening_date)
+    return boundary_dates
+
+
+def _has_positive_energy_across_date_partition(
+    records: list[Mapping[str, Any]],
+    local_tz: ZoneInfo,
+    selected_dates: set[date],
+) -> bool:
+    """Return whether an indivisible UTC bucket crosses a date partition."""
+    return bool(
+        _positive_energy_partition_dates(
+            records,
+            local_tz,
+            selected_dates,
+        )
+    )
+
+
 def _positive_daily_energy_from_records(
     records: list[Mapping[str, Any]],
     local_tz: ZoneInfo,
@@ -1527,11 +1642,10 @@ class Smart1DerivedEnergyImporter:
                     == 0
                 )
             }
-            # Version 6 also integrates the 23:55-to-00:00 interval when a
-            # previously interrupted catch-up resumes and canonicalizes the
-            # pre-journal v4/v5 layouts. Every older schema needs one
-            # supported-window fetch, including whole-hour time zones and the
-            # fractional-offset v3.
+            # Version 7 also retains an incomplete resumed boundary in the
+            # retry queue and fails closed for an indivisible fractional-offset
+            # migration boundary. Every older schema needs one supported-window
+            # fetch, including v6 rows that may already contain either defect.
             schema_upgrade_roles = {
                 role_key
                 for role_key, statistic_id in statistic_ids.items()
@@ -1590,6 +1704,15 @@ class Smart1DerivedEnergyImporter:
             time_zone_migration_roles = (
                 time_zone_rebuild_roles | pending_time_zone_roles
             )
+            exact_pending_replay_roles = {
+                role_key
+                for role_key in pending_time_zone_roles
+                for pending in (pending_migrations_by_role[role_key],)
+                if getattr(pending, "clear_rebuild_baseline_sum", None)
+                is not None
+                and _pending_has_complete_replacement(pending)
+                and not _pending_has_invalid_replacement(pending)
+            }
             if repair:
                 for role_key in sorted(time_zone_migration_roles):
                     if len(records_by_role[role_key]) >= record_count:
@@ -1642,6 +1765,21 @@ class Smart1DerivedEnergyImporter:
                 if not refreshable_roles:
                     self._last_result = "repair_pending"
                     return
+            # A complete durable replacement is the only recovery source after
+            # Recorder was cleared and the process crashed. Restore those roles
+            # before doing any portal-dependent work for unrelated roles. A
+            # later repair run performs their normal catch-up.
+            exact_replay_first_roles = (
+                refreshable_roles & exact_pending_replay_roles
+            )
+            if exact_replay_first_roles:
+                refreshable_roles = exact_replay_first_roles
+                rebuild_roles &= exact_replay_first_roles
+                schema_upgrade_roles &= exact_replay_first_roles
+                time_zone_rebuild_roles &= exact_replay_first_roles
+                time_zone_audit_roles &= exact_replay_first_roles
+                pending_time_zone_roles &= exact_replay_first_roles
+                time_zone_migration_roles &= exact_replay_first_roles
             forced_clear_roles = (
                 forced_rebuild_roles | time_zone_migration_roles
             ) & rebuild_roles
@@ -1678,14 +1816,238 @@ class Smart1DerivedEnergyImporter:
                 for role_key, records in records_by_role.items()
                 if role_key in refreshable_roles
             }
-            main_start_date = min(window[0] for window in windows.values())
             supported_start = today - timedelta(days=HISTORY_DAYS - 1)
+            # A completed annual scan can discover an internal successful-
+            # empty source day that splits one positive Recorder UTC hour.
+            # Persist that exact partition and probe at most one affected day
+            # daily.  Repeating the annual scan every six hours cannot resolve
+            # the indivisible stored hour, but a later portal row can.
+            deferred_ambiguous_roles: set[str] = set()
+            deferred_getter = (
+                getattr(
+                    self.history_state,
+                    "deferred_time_zone_partition",
+                    None,
+                )
+                if self.history_state
+                else None
+            )
+            deferred_writer = (
+                getattr(
+                    self.history_state,
+                    "async_defer_time_zone_partition",
+                    None,
+                )
+                if self.history_state
+                else None
+            )
+            deferred_clearer = (
+                getattr(
+                    self.history_state,
+                    "async_clear_deferred_time_zone_partition",
+                    None,
+                )
+                if self.history_state
+                else None
+            )
+            for role_key in sorted(
+                (time_zone_rebuild_roles - pending_time_zone_roles)
+                & refreshable_roles
+            ):
+                statistic_id = statistic_ids[role_key]
+                deferred = (
+                    deferred_getter(statistic_id)
+                    if callable(deferred_getter)
+                    else None
+                )
+                if deferred is None:
+                    continue
+                partition_dates = set(deferred.partition_dates)
+                identity_matches = (
+                    deferred.source_time_zone
+                    == recorded_time_zones_by_role[role_key]
+                    and deferred.target_time_zone == source_time_zone
+                    and deferred.schema_version == self._schema_version
+                )
+                stored_boundary_dates = (
+                    _positive_energy_opening_boundary_dates(
+                        records_by_role[role_key],
+                        records_tz_by_role[role_key],
+                    )
+                )
+                still_ambiguous = identity_matches and bool(
+                    partition_dates & stored_boundary_dates
+                )
+                if not still_ambiguous:
+                    cleared = (
+                        await deferred_clearer(
+                            statistic_id,
+                            deferred.generation,
+                        )
+                        if callable(deferred_clearer)
+                        else True
+                    )
+                    if not cleared:
+                        deferred_ambiguous_roles.add(role_key)
+                    continue
+
+                active_partition_dates = {
+                    partition_date
+                    for partition_date in partition_dates
+                    if supported_start <= partition_date <= today
+                }
+                if not active_partition_dates:
+                    cleared = (
+                        await deferred_clearer(
+                            statistic_id,
+                            deferred.generation,
+                        )
+                        if callable(deferred_clearer)
+                        else True
+                    )
+                    if not cleared:
+                        deferred_ambiguous_roles.add(role_key)
+                    # The planned-window boundary check below decides whether
+                    # the same bucket still separates retained and replaced
+                    # data. If both source days aged out, the migration can
+                    # finally proceed without splitting it.
+                    continue
+                if active_partition_dates != partition_dates:
+                    if callable(deferred_writer):
+                        await deferred_writer(
+                            statistic_id,
+                            deferred.source_time_zone,
+                            deferred.target_time_zone,
+                            deferred.schema_version,
+                            partition_dates=active_partition_dates,
+                            next_probe_on=deferred.next_probe_on,
+                            probe_cursor=deferred.probe_cursor,
+                        )
+                    partition_dates = active_partition_dates
+
+                probe_dates = sorted(partition_dates)
+                if today < deferred.next_probe_on:
+                    deferred_ambiguous_roles.add(role_key)
+                    continue
+
+                probe_date = probe_dates[
+                    deferred.probe_cursor % len(probe_dates)
+                ]
+                probe_result = await self._fetch_hourly_energy(
+                    probe_date,
+                    probe_date,
+                    local_tz,
+                    include_preceding_boundary=True,
+                )
+                probe_fetched, probe_completed, *probe_details = probe_result
+                if len(probe_details) > 2:
+                    probe_completed_boundaries = set(
+                        probe_details[2].get(role_key, set())
+                    )
+                else:
+                    # Legacy mocked results do not prove the cross-midnight
+                    # pair itself. Keep the durable deferral fail-closed.
+                    probe_completed_boundaries = set()
+                if (
+                    probe_completed
+                    and probe_date in probe_completed_boundaries
+                ):
+                    remaining_dates = partition_dates - {probe_date}
+                    if not remaining_dates:
+                        cleared = (
+                            await deferred_clearer(
+                                statistic_id,
+                                deferred.generation,
+                            )
+                            if callable(deferred_clearer)
+                            else True
+                        )
+                        if cleared:
+                            continue
+                    elif callable(deferred_writer):
+                        await deferred_writer(
+                            statistic_id,
+                            deferred.source_time_zone,
+                            deferred.target_time_zone,
+                            deferred.schema_version,
+                            partition_dates=remaining_dates,
+                            next_probe_on=today + timedelta(days=1),
+                            probe_cursor=(
+                                deferred.probe_cursor + 1
+                            ),
+                        )
+                    deferred_ambiguous_roles.add(role_key)
+                    continue
+
+                if callable(deferred_writer):
+                    await deferred_writer(
+                        statistic_id,
+                        deferred.source_time_zone,
+                        deferred.target_time_zone,
+                        deferred.schema_version,
+                        partition_dates=partition_dates,
+                        next_probe_on=today + timedelta(days=1),
+                        probe_cursor=deferred.probe_cursor + 1,
+                    )
+                deferred_ambiguous_roles.add(role_key)
+
+            # Recorder stores only whole UTC-hour totals. In a fractional-
+            # offset source zone, the hour containing local midnight can also
+            # straddle the outer supported-window boundary. Detect that
+            # immutable ambiguity before contacting the portal.
+            preflight_ambiguous_roles = deferred_ambiguous_roles | {
+                role_key
+                for role_key in (
+                    (time_zone_rebuild_roles - pending_time_zone_roles)
+                    & refreshable_roles
+                )
+                if _has_positive_energy_across_date_partition(
+                    records_by_role[role_key],
+                    records_tz_by_role[role_key],
+                    history_date_range(windows[role_key][0], today),
+                )
+            }
+            if preflight_ambiguous_roles == refreshable_roles:
+                _LOGGER.warning(
+                    "Deferring smart1 derived energy time-zone migration for "
+                    "roles %s because a stored UTC hour crosses the planned "
+                    "local-day replacement boundary",
+                    ", ".join(sorted(preflight_ambiguous_roles)),
+                )
+                self._last_result = "time_zone_migration_pending"
+                return
+            if preflight_ambiguous_roles:
+                _LOGGER.warning(
+                    "Deferring smart1 derived energy time-zone migration for "
+                    "roles %s because a stored UTC hour crosses the planned "
+                    "local-day replacement boundary; continuing independent "
+                    "roles",
+                    ", ".join(sorted(preflight_ambiguous_roles)),
+                )
+                refreshable_roles -= preflight_ambiguous_roles
+                rebuild_roles -= preflight_ambiguous_roles
+                forced_clear_roles -= preflight_ambiguous_roles
+                schema_upgrade_roles -= preflight_ambiguous_roles
+                time_zone_rebuild_roles -= preflight_ambiguous_roles
+                time_zone_audit_roles -= preflight_ambiguous_roles
+                pending_time_zone_roles -= preflight_ambiguous_roles
+                time_zone_migration_roles -= preflight_ambiguous_roles
+                required_starts = {
+                    role_key: required_start
+                    for role_key, required_start in required_starts.items()
+                    if role_key in refreshable_roles
+                }
+                windows = {
+                    role_key: window
+                    for role_key, window in windows.items()
+                    if role_key in refreshable_roles
+                }
+            main_start_date = min(window[0] for window in windows.values())
             resumed_role_starts = {
                 role_key: required_start
                 for role_key, required_start in required_starts.items()
                 if required_start is not None
                 and required_start > supported_start
-                and windows[role_key][0] == required_start
             }
             # When a durable partial catch-up resumes exactly after its saved
             # coverage cursor, load D-1 as context. This reconstructs the last
@@ -1710,17 +2072,34 @@ class Smart1DerivedEnergyImporter:
                 )
                 is not None
             }
+            if exact_replay_first_roles:
+                # The journal is already the authoritative complete batch.
+                # Do not let a bounded empty-day retry contact the portal before
+                # crash recovery has restored it.
+                retry_dates = {}
             main_fetch_kwargs = (
                 {"include_preceding_boundary": True}
                 if resumes_at_main_start
                 else {}
             )
-            main_fetch_result = await self._fetch_hourly_energy(
-                main_start_date,
-                today,
-                local_tz,
-                **main_fetch_kwargs,
-            )
+            if refreshable_roles <= exact_pending_replay_roles:
+                # Recorder may be empty after a successful clear followed by a
+                # crash. A complete journal is the authoritative replacement
+                # and must be replayable while the portal is unavailable.
+                main_fetch_result = (
+                    {role_key: [] for role_key in self.role_points},
+                    True,
+                    None,
+                    {role_key: set() for role_key in self.role_points},
+                    {role_key: set() for role_key in self.role_points},
+                )
+            else:
+                main_fetch_result = await self._fetch_hourly_energy(
+                    main_start_date,
+                    today,
+                    local_tz,
+                    **main_fetch_kwargs,
+                )
             (
                 fetched_by_role,
                 fetch_completed,
@@ -1756,6 +2135,24 @@ class Smart1DerivedEnergyImporter:
             main_opening_hours_by_role: dict[str, set[datetime]] = {
                 role_key: set() for role_key in refreshable_roles
             }
+            partial_boundary_dates_by_role: dict[str, set[date]] = {
+                role_key: set() for role_key in refreshable_roles
+            }
+            stored_retry_days_by_role: dict[str, set[date]] = {}
+            empty_days_for_schema = (
+                getattr(self.history_state, "empty_days_for_schema", None)
+                if self.history_state
+                else None
+            )
+            for role_key in refreshable_roles:
+                stored_retry_days_by_role[role_key] = (
+                    empty_days_for_schema(
+                        statistic_ids[role_key],
+                        self._schema_version,
+                    )
+                    if callable(empty_days_for_schema)
+                    else set()
+                )
             fractional_window = _uses_fractional_utc_offset(
                 local_tz,
                 main_start_date - timedelta(days=1),
@@ -1771,30 +2168,70 @@ class Smart1DerivedEnergyImporter:
                 # containing local midnight; whole-hour zones lose the final
                 # five-minute interval in the preceding hour. Preserve an
                 # existing complete value in either direction.
+                preserved_main_boundary_hours = incomplete_boundary_hours(
+                    records_by_role[role_key],
+                    replacement_days,
+                    main_completed_boundary_dates.get(role_key, set()),
+                    role_start,
+                    # The regular refresh has no D+1 context for ``today``.
+                    # Do not preserve tomorrow's shared boundary: its current-
+                    # day fragment is still expected to advance during late-
+                    # evening polls.
+                    today - timedelta(days=1),
+                    local_tz,
+                )
                 preserve_boundary_hours_by_role[role_key].update(
-                    incomplete_boundary_hours(
-                        records_by_role[role_key],
-                        replacement_days,
-                        main_completed_boundary_dates.get(role_key, set()),
-                        role_start,
-                        # The regular refresh has no D+1 context for
-                        # ``today``. Do not preserve tomorrow's shared
-                        # boundary: its current-day fragment is still
-                        # expected to advance during late-evening polls.
-                        today - timedelta(days=1),
-                        local_tz,
-                    )
+                    preserved_main_boundary_hours
+                )
+                candidate_partial_dates = (
+                    stored_retry_days_by_role[role_key]
+                    & replacement_days
                 )
                 if role_key in resumed_role_starts:
+                    candidate_partial_dates.add(
+                        resumed_role_starts[role_key]
+                    )
+                if (
+                    role_key in schema_upgrade_roles
+                    and role_key not in time_zone_migration_roles
+                ):
+                    # A v6 role can already have coverage through today but no
+                    # retry evidence for an opening bucket preserved by the old
+                    # empty-predecessor resume. During the v7 full audit, map
+                    # every actually preserved boundary hour back to its
+                    # non-empty source day so only proven partial dates enter
+                    # the bounded queue; sparse consumers without a stored
+                    # boundary bucket are not marked indefinitely.
+                    for replacement_date in replacement_days:
+                        day_start, _day_end = _local_day_bounds_utc(
+                            replacement_date,
+                            local_tz,
+                        )
+                        boundary_hour = (
+                            day_start.replace(
+                                minute=0,
+                                second=0,
+                                microsecond=0,
+                            )
+                            if (
+                                day_start.minute
+                                or day_start.second
+                                or day_start.microsecond
+                            )
+                            else day_start - timedelta(hours=1)
+                        )
+                        if boundary_hour in preserved_main_boundary_hours:
+                            candidate_partial_dates.add(replacement_date)
+                for candidate_date in candidate_partial_dates:
                     day_start, _day_end = _local_day_bounds_utc(
-                        role_start,
+                        candidate_date,
                         local_tz,
                     )
                     if (
                         day_start.minute == 0
                         and day_start.second == 0
                         and day_start.microsecond == 0
-                        and role_start
+                        and candidate_date
                         in main_completed_boundary_dates.get(role_key, set())
                     ):
                         # The cross-midnight interval belongs to the previous
@@ -1802,6 +2239,21 @@ class Smart1DerivedEnergyImporter:
                         # bucket explicitly even though it does not overlap D.
                         main_opening_hours_by_role[role_key].add(
                             day_start - timedelta(hours=1)
+                        )
+                    elif (
+                        candidate_date in replacement_days
+                        and candidate_date
+                        not in main_completed_boundary_dates.get(
+                            role_key, set()
+                        )
+                    ):
+                        # The resumed day has interior data, but its successful-
+                        # empty predecessor did not provide the cross-midnight
+                        # interval. Keep this day in the bounded retry queue;
+                        # otherwise advancing coverage makes the preserved
+                        # partial opening bucket permanent.
+                        partial_boundary_dates_by_role[role_key].add(
+                            candidate_date
                         )
             main_fetched_by_role = {
                 role_key: list(fetched_energy)
@@ -2020,6 +2472,9 @@ class Smart1DerivedEnergyImporter:
                     else set()
                 )
                 empty_days = checked_days - main_nonempty_days
+                empty_days.update(
+                    partial_boundary_dates_by_role[role_key]
+                )
                 if role_key in completed_retry_roles:
                     if retry_nonempty_days:
                         nonempty_retry_roles.add(role_key)
@@ -2044,6 +2499,7 @@ class Smart1DerivedEnergyImporter:
                 empty_days_by_role[role_key] = empty_days
                 nonempty_days_by_role[role_key] = (
                     main_nonempty_days
+                    - partial_boundary_dates_by_role[role_key]
                     | (
                         set()
                         if role_key in partial_retry_roles
@@ -2063,6 +2519,8 @@ class Smart1DerivedEnergyImporter:
                 dict[date, float],
             ] = {}
             clear_rebuild_baseline_by_role: dict[str, float] = {}
+            ambiguous_boundary_roles: set[str] = set()
+            ambiguous_partition_dates_by_role: dict[str, set[date]] = {}
             for role_key in time_zone_rebuild_roles - pending_time_zone_roles:
                 # Fractional-offset zones fetch D-1 to complete the UTC hour
                 # shared with the first supported source day.  When that
@@ -2077,6 +2535,38 @@ class Smart1DerivedEnergyImporter:
                     checked_days_by_role[role_key]
                     | main_nonempty_source_days.get(role_key, set())
                 )
+                outer_partition_dates = _positive_energy_partition_dates(
+                    records_by_role[role_key],
+                    records_tz_by_role[role_key],
+                    authoritative_source_days,
+                )
+                empty_partition_dates = _positive_energy_partition_dates(
+                    records_by_role[role_key],
+                    records_tz_by_role[role_key],
+                    empty_days_by_role[role_key],
+                )
+                incomplete_boundary_dates = (
+                    _positive_energy_incomplete_boundary_dates(
+                        records_by_role[role_key],
+                        records_tz_by_role[role_key],
+                        checked_days_by_role[role_key],
+                        main_completed_boundary_dates.get(role_key, set()),
+                    )
+                )
+                if (
+                    outer_partition_dates
+                    or empty_partition_dates
+                    or incomplete_boundary_dates
+                ):
+                    ambiguous_boundary_roles.add(role_key)
+                    deferred_partition_dates = (
+                        empty_partition_dates | incomplete_boundary_dates
+                    )
+                    if deferred_partition_dates:
+                        ambiguous_partition_dates_by_role[role_key] = (
+                            deferred_partition_dates
+                        )
+                    continue
                 fetched_by_role[role_key].extend(
                     _remap_unchecked_source_energy(
                         records_by_role[role_key],
@@ -2090,6 +2580,65 @@ class Smart1DerivedEnergyImporter:
                         records_by_role[role_key]
                     )
                 )
+            if ambiguous_partition_dates_by_role and self.history_state:
+                defer_partition = getattr(
+                    self.history_state,
+                    "async_defer_time_zone_partition",
+                    None,
+                )
+                if callable(defer_partition):
+                    for role_key, partition_dates in sorted(
+                        ambiguous_partition_dates_by_role.items()
+                    ):
+                        try:
+                            await defer_partition(
+                                statistic_ids[role_key],
+                                recorded_time_zones_by_role[role_key],
+                                source_time_zone,
+                                self._schema_version,
+                                partition_dates=partition_dates,
+                                next_probe_on=today + timedelta(days=1),
+                            )
+                        except Exception as err:  # noqa: BLE001
+                            # Recorder has not been changed. Failing closed is
+                            # safe; a transient Store failure may cause one
+                            # later annual retry but cannot lose history.
+                            _LOGGER.warning(
+                                "Unable to persist smart1 time-zone partition "
+                                "deferral for %s (%s)",
+                                role_key,
+                                type(err).__name__,
+                            )
+            if ambiguous_boundary_roles == refreshable_roles:
+                _LOGGER.warning(
+                    "Deferring smart1 derived energy time-zone migration for "
+                    "roles %s because a stored UTC hour crosses a local-day "
+                    "replacement boundary",
+                    ", ".join(sorted(ambiguous_boundary_roles)),
+                )
+                self._last_result = "time_zone_migration_pending"
+                return
+            if ambiguous_boundary_roles:
+                _LOGGER.warning(
+                    "Deferring smart1 derived energy time-zone migration for "
+                    "roles %s because a stored UTC hour crosses a local-day "
+                    "replacement boundary; continuing independent roles",
+                    ", ".join(sorted(ambiguous_boundary_roles)),
+                )
+                refreshable_roles -= ambiguous_boundary_roles
+                rebuild_roles -= ambiguous_boundary_roles
+                forced_clear_roles -= ambiguous_boundary_roles
+                initial_backfill_roles -= ambiguous_boundary_roles
+                schema_upgrade_roles -= ambiguous_boundary_roles
+                time_zone_rebuild_roles -= ambiguous_boundary_roles
+                time_zone_audit_roles -= ambiguous_boundary_roles
+                pending_time_zone_roles -= ambiguous_boundary_roles
+                time_zone_migration_roles -= ambiguous_boundary_roles
+                retry_dates = {
+                    role_key: retry_date
+                    for role_key, retry_date in retry_dates.items()
+                    if role_key in refreshable_roles
+                }
             complete_pending_fallback_roles: set[str] = set()
             exact_replay_roles: set[str] = set()
             incomplete_clear_journal_roles: set[str] = set()
@@ -2349,10 +2898,16 @@ class Smart1DerivedEnergyImporter:
                         migration_source_time_zone = (
                             recorded_time_zones_by_role[role_key]
                         )
-                    if role_key not in roles_with_statistics:
+                    if (
+                        role_key not in roles_with_statistics
+                        and role_key not in forced_clear_roles
+                    ):
                         # No Recorder row will be queued for this role. The
                         # source-zone fingerprint can therefore be committed
-                        # directly without an in-flight migration journal.
+                        # directly without an in-flight migration journal. A
+                        # destructive empty rebuild is different: its exact
+                        # empty replacement must be durable before Recorder is
+                        # cleared so a crash can replay it without the portal.
                         if pending is not None:
                             time_zone_migration_generations[role_key] = (
                                 pending.generation
@@ -2371,7 +2926,10 @@ class Smart1DerivedEnergyImporter:
                                         "start": item["start"],
                                         "state": item["state"],
                                     }
-                                    for item in statistics_by_role[role_key]
+                                    for item in statistics_by_role.get(
+                                        role_key,
+                                        (),
+                                    )
                                 ]
                             }
                             generation = await begin_migration(
@@ -2395,7 +2953,10 @@ class Smart1DerivedEnergyImporter:
                                         "start": item["start"],
                                         "state": item["state"],
                                     }
-                                    for item in statistics_by_role[role_key]
+                                    for item in statistics_by_role.get(
+                                        role_key,
+                                        (),
+                                    )
                                 ]
                             }
                             generation = (

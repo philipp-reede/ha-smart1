@@ -41,6 +41,16 @@ def normalize_module_field_reference(value: object) -> str:
     return str(int(text)) if text.isdigit() else text.casefold()
 
 
+def is_parseable_module_field_row(row: dict[str, str]) -> bool:
+    """Return whether a topology row has a documented module-field ID."""
+    module_field_id = _clean_text(
+        row.get("ModulfieldId")
+        or row.get("Modulfield Id")
+        or row.get('"ModulfieldId"')
+    )
+    return _MODULE_FIELD_ID_PATTERN.fullmatch(module_field_id) is not None
+
+
 @dataclass(frozen=True, slots=True)
 class Smart1ModuleField:
     """Static metadata returned by `/modulfields/{deviceId}`."""

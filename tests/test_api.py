@@ -243,6 +243,49 @@ class Smart1ApiTest(unittest.TestCase):
         self.assertNotIn("private-name", str(probe))
         self.assertNotIn("private-serial", str(probe))
 
+    def test_topology_probes_report_unparseable_rows_without_values(
+        self,
+    ) -> None:
+        cases = (
+            (
+                Smart1Api(
+                    CsvSession("Inverter Id;Name\nunexpected;private\n"),
+                    "redacted",
+                    "42",
+                ).get_inverters_with_probe,
+                "Inverter Id",
+            ),
+            (
+                Smart1Api(
+                    CsvSession("ModulfieldId;Name\ninvalid;private\n"),
+                    "redacted",
+                    "42",
+                ).get_module_fields_with_probe,
+                "ModulfieldId",
+            ),
+            (
+                Smart1Api(
+                    CsvSession("BusId;BusConfigured\ninvalid;private\n"),
+                    "redacted",
+                    "42",
+                ).get_buses_with_probe,
+                "BusId",
+            ),
+        )
+
+        for fetch, id_column in cases:
+            with self.subTest(id_column=id_column):
+                values, probe = asyncio.run(fetch(missing_ok=True))
+
+                self.assertEqual(values, [])
+                self.assertEqual(probe["endpoint_result"], "data_returned")
+                self.assertEqual(probe["response_columns"], [
+                    "BusConfigured",
+                    "BusId",
+                ] if id_column == "BusId" else [id_column, "Name"])
+                self.assertEqual(probe["response_rows"], 1)
+                self.assertEqual(probe["unparseable_rows"], 1)
+
     def test_module_field_probe_retains_known_empty_csv_headers(self) -> None:
         api = Smart1Api(
             CsvSession("ModulfieldId;Name;Bias;Direction\n"),

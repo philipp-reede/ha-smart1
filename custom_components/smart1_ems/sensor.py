@@ -24,7 +24,11 @@ from .bus import Smart1BusSystem
 from .classifier import Smart1Category
 from .const import DOMAIN
 from .entity_mapper import get_entity_descriptions
-from .inverter import Smart1Inverter, pv_timestamp_sort_key
+from .inverter import (
+    Smart1Inverter,
+    canonical_inverter_id,
+    pv_timestamp_sort_key,
+)
 from .module_field import Smart1ModuleField
 
 PV_DEVICE_NAME = "Smart1 Photovoltaik"
@@ -354,6 +358,203 @@ def _inverter_device_identifier(
     return (DOMAIN, f"{entry_id}:inverter:{inverter.id}")
 
 
+def _merged_device_customizations(survivor, duplicate) -> dict[str, object]:
+    """Return user metadata missing from a duplicate-device survivor."""
+    updates: dict[str, object] = {}
+    for attribute in ("area_id", "name_by_user"):
+        current = getattr(survivor, attribute, None)
+        inherited = getattr(duplicate, attribute, None)
+        if not current and inherited:
+            updates[attribute] = inherited
+
+    survivor_labels = set(getattr(survivor, "labels", ()) or ())
+    merged_labels = survivor_labels | set(
+        getattr(duplicate, "labels", ()) or ()
+    )
+    if merged_labels != survivor_labels:
+        updates["labels"] = merged_labels
+
+    current_disabled_by = getattr(survivor, "disabled_by", None)
+    inherited_disabled_by = getattr(duplicate, "disabled_by", None)
+    if (
+        current_disabled_by is None
+        and inherited_disabled_by is not None
+        and str(inherited_disabled_by).lower().rsplit(".", 1)[-1] == "user"
+    ):
+        updates["disabled_by"] = inherited_disabled_by
+    return updates
+
+
+def _canonicalize_inverter_device_identifiers(
+    device_registry,
+    entity_registry,
+    entry_id: str,
+    inverters: list[Smart1Inverter],
+) -> None:
+    """Migrate equivalent legacy inverter identifiers in place.
+
+    Earlier releases kept the portal's spelling of ``Inverter Id``. If the
+    portal later changed its casing or numeric zero-padding, Home Assistant
+    could create a second physical device before stale-device cleanup had a
+    chance to run. Updating the existing identifier before entity registration
+    keeps the original device, its area and all user customizations intact.
+    """
+    expected_identifiers = {
+        _inverter_device_identifier(entry_id, inverter)
+        for inverter in inverters
+    }
+    expected_by_casefold = {
+        identifier[1].casefold(): identifier
+        for identifier in expected_identifiers
+    }
+    expected_by_inverter_id = {
+        inverter.id: _inverter_device_identifier(entry_id, inverter)
+        for inverter in inverters
+    }
+    if not expected_by_casefold:
+        return
+
+    registry_entries = list(
+        dr.async_entries_for_config_entry(device_registry, entry_id)
+    )
+    registry_positions = {
+        registry_entry.id: position
+        for position, registry_entry in enumerate(registry_entries)
+    }
+    identifier_owners = {
+        identifier: registry_entry
+        for registry_entry in registry_entries
+        for identifier in registry_entry.identifiers
+    }
+    removed_device_ids: set[str] = set()
+    identifier_prefix = f"{entry_id}:inverter:"
+
+    def _current_entry(registry_entry):
+        """Return the current immutable registry entry after prior updates."""
+        current = device_registry.async_get(registry_entry.id)
+        return current if current is not None else registry_entry
+
+    for registry_entry in registry_entries:
+        if registry_entry.id in removed_device_ids:
+            continue
+        registry_entry = _current_entry(registry_entry)
+        updated_identifiers = set(registry_entry.identifiers)
+        metadata_updates: dict[str, object] = {}
+        changed = False
+        for identifier in tuple(updated_identifiers):
+            if (
+                identifier[0] != DOMAIN
+                or not isinstance(identifier[1], str)
+                or not identifier[1].startswith(identifier_prefix)
+            ):
+                continue
+            legacy_inverter_id = identifier[1][len(identifier_prefix) :]
+            normalized_inverter_id = canonical_inverter_id(
+                legacy_inverter_id
+            )
+            canonical = (
+                expected_by_inverter_id.get(normalized_inverter_id)
+                if normalized_inverter_id is not None
+                else None
+            ) or expected_by_casefold.get(identifier[1].casefold())
+            if canonical is None or canonical == identifier:
+                continue
+            # A canonical device can already exist after a previous partial
+            # migration. Consolidate that casing-only collision explicitly;
+            # normal stale cleanup cannot remove an active duplicate.
+            owner = identifier_owners.get(canonical)
+            if owner is not None and owner.id != registry_entry.id:
+                owner = _current_entry(owner)
+                registry_entry = _current_entry(registry_entry)
+                # A short-lived partial migration can leave both the legacy
+                # and canonical devices behind. Consolidate their entities
+                # before changing the identifier so the registry cannot keep
+                # a casing-only ghost device. Prefer the older device so its
+                # stable registry ID, area and user customizations survive.
+                # Registry order is the compatibility fallback for Home
+                # Assistant versions whose stored entry lacks ``created_at``.
+                candidates = (registry_entry, owner)
+
+                def _creation_order(candidate) -> tuple[float, int]:
+                    created_at = getattr(candidate, "created_at", None)
+                    timestamp = getattr(created_at, "timestamp", None)
+                    return (
+                        timestamp() if callable(timestamp) else float("inf"),
+                        registry_positions[candidate.id],
+                    )
+
+                survivor = min(candidates, key=_creation_order)
+                duplicate = (
+                    owner if survivor is registry_entry else registry_entry
+                )
+                merged_customizations = _merged_device_customizations(
+                    survivor,
+                    duplicate,
+                )
+                duplicate_entities = er.async_entries_for_device(
+                    entity_registry,
+                    duplicate.id,
+                    include_disabled_entities=True,
+                )
+                # Never move or remove data owned by another config entry.
+                if any(
+                    entity.config_entry_id != entry_id
+                    for entity in duplicate_entities
+                ):
+                    continue
+                for entity in duplicate_entities:
+                    entity_registry.async_update_entity(
+                        entity.entity_id,
+                        device_id=survivor.id,
+                    )
+                device_registry.async_remove_device(duplicate.id)
+                removed_device_ids.add(duplicate.id)
+                for duplicate_identifier in duplicate.identifiers:
+                    mapped_owner = identifier_owners.get(
+                        duplicate_identifier
+                    )
+                    if (
+                        mapped_owner is not None
+                        and mapped_owner.id == duplicate.id
+                    ):
+                        identifier_owners.pop(duplicate_identifier, None)
+
+                if survivor is owner:
+                    # The canonical owner survived, so this legacy entry has
+                    # already been removed and needs no identifier update.
+                    if merged_customizations:
+                        owner = (
+                            device_registry.async_update_device(
+                                survivor.id,
+                                **merged_customizations,
+                            )
+                            or survivor
+                        )
+                        identifier_owners[canonical] = owner
+                    changed = False
+                    break
+
+                metadata_updates.update(merged_customizations)
+
+            updated_identifiers.remove(identifier)
+            updated_identifiers.add(canonical)
+            identifier_owners.pop(identifier, None)
+            identifier_owners[canonical] = registry_entry
+            changed = True
+
+        if changed:
+            registry_entry = (
+                device_registry.async_update_device(
+                    registry_entry.id,
+                    new_identifiers=updated_identifiers,
+                    **metadata_updates,
+                )
+                or registry_entry
+            )
+            for updated_identifier in registry_entry.identifiers:
+                identifier_owners[updated_identifier] = registry_entry
+
+
 def _remove_stale_inverter_devices(
     device_registry,
     entity_registry,
@@ -445,6 +646,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
 
     device_registry = dr.async_get(hass)
+    entity_registry = er.async_get(hass)
+    _canonicalize_inverter_device_identifiers(
+        device_registry,
+        entity_registry,
+        entry.entry_id,
+        inverters,
+    )
     ems_device_id = None
     if inverters:
         # Register the parent before its inverter children. Current Home
@@ -502,7 +710,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     )
                 )
 
-    entity_registry = er.async_get(hass)
     pv_strings = coordinator.data.get("pv_strings", {})
     initially_reported_inverters = {
         (bus, address)

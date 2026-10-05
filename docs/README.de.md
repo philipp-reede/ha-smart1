@@ -42,7 +42,7 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 | Einrichtung | Home-Assistant-Oberfläche mit verdecktem persönlichem API-Schlüssel |
 | Geräte | EMS, PV, Wechselrichter, Netz, Batterie, Wallbox, Wärmepumpe und Zusatzheizung |
 | Energy Dashboard | PV, Netz, Batterie und ausgewählte Einzelverbraucher |
-| Historie | Automatischer Import von bis zu 365 Tagen |
+| Energiehistorie | Automatischer Import von bis zu 365 Tagen Energiehistorie für das Energy Dashboard |
 | Getestete Hardware | M-TEC Energy Hero, Energy Butler, Energy Heater, AP440 Wärmepumpe und KEBA Wallbox |
 
 ## Funktionen
@@ -52,6 +52,10 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 - Optionale physische Wechselrichter-Geräte aus dem dokumentierten
   Wechselrichter-Endpunkt mit AC-/DC-Leistung und DC-Spannung je PV-String sowie
   Wechselrichtertemperatur als Diagnosesensoren
+- Stabile Gerätekennungen für physische Wechselrichter, wenn das Portal nur die
+  Groß-/Kleinschreibung oder numerische Nullauffüllung einer Wechselrichter-ID
+  ändert. Gleichwertige ältere Registry-Geräte werden zusammengeführt;
+  Entitätszuordnungen, Bereiche und Benutzeranpassungen bleiben erhalten
 - Optionale Modulfeld-Diagnosen für installierte Leistung, Ausrichtung, Neigung
   und konfigurierte Verschattungszeiträume
 - Optionale statische Diagnosen für aktive Wechselrichter-Bussysteme und ihre
@@ -63,8 +67,13 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 - Exakte PV-Produktion aus dem dokumentierten kumulativen PV-Endpunkt
 - Energy-Dashboard-Statistiken für Netz, Batterie, Wallbox, Wärmepumpe und
   Zusatzheizung
-- Automatischer historischer Import im Hintergrund mit persistenter
-  Nachholung nach längeren Home-Assistant- oder Portal-Ausfällen
+- Automatischer Import von bis zu 365 Tagen Energy-Dashboard-Energiehistorie
+  im Hintergrund mit persistenter Nachholung nach längeren Home-Assistant-
+  oder Portal-Ausfällen
+- Persistente, begrenzte tägliche Einzel-Tages-Prüfungen für Zeitzonen- und
+  lokale Tagesgrenzen, die noch nicht sicher rekonstruiert werden können. Die
+  betroffene Energierolle bleibt unverändert, während unabhängige Rollen weiter
+  aktualisiert werden
 - Redigierte Home-Assistant-Diagnosen ohne API-Schlüssel, Anlagen-IDs,
   Messpunkt-IDs oder Messwerte
 
@@ -172,10 +181,10 @@ Der Ersatzschlüssel wird nur übernommen, wenn er weiterhin Zugriff auf dieselb
 Anlage gewährt; Geräte, Entitäten und Energy-Dashboard-Statistiken behalten ihre
 bisherigen Kennungen.
 
-Die Live-Entitäten stehen anschließend zur Verfügung. Der historische Import
-startet automatisch im Hintergrund und wird auch nach späteren Neustarts
-ausgeführt. Der erste Import kann abhängig von der Antwortzeit des Portals
-mehrere Minuten dauern.
+Die Live-Entitäten stehen anschließend zur Verfügung. Der Import der
+Energiehistorie startet automatisch im Hintergrund und wird auch nach späteren
+Neustarts ausgeführt. Der erste Import kann abhängig von der Antwortzeit des
+Portals mehrere Minuten dauern.
 
 ## Energy Dashboard
 
@@ -205,6 +214,13 @@ Die übrigen Energiewerte sind Schätzungen aus 5-Minuten-Leistungswerten. Lück
 von mehr als 15 Minuten werden nicht überbrückt. Unvollständige Portaldaten
 können deshalb zu niedrigeren Summen führen.
 
+Der historische Import umfasst die Energiestatistiken des Energy Dashboards in
+kWh. Die Recorder-Historie der Live-Leistungssensoren in W oder kW wird nicht
+rückwirkend befüllt. Deshalb beginnt das Diagramm **Stromquellen** mit dem
+Zeitpunkt, an dem Recorder Statistiken für diese Live-Entitäten zu erfassen
+begann, auch wenn Energieverläufe und Summen durch den Portalimport weiter
+zurückreichen.
+
 ## Fehler melden
 
 Reproduzierbare Probleme bitte über das strukturierte
@@ -230,6 +246,11 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Historische Energiewerte außerhalb der PV-Anlage werden aus
   5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
   verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
+- Historische Leistungswerte für das Energy-Dashboard-Diagramm
+  **Stromquellen** werden nicht rückwirkend importiert. Dieses Diagramm nutzt
+  Recorder-Statistiken der Live-Leistungsentitäten und beginnt deshalb, wenn
+  Recorder deren Statistiken zu erfassen beginnt; der Import von bis zu 365
+  Tagen gilt nur für Energiestatistiken.
 - Eine persistente Abdeckung je Statistik setzt fehlgeschlagene oder
   unterbrochene Historienabrufe fort und repariert bei älteren Installationen
   einmalig das unterstützte Zeitfenster. Ein erfolgreicher Abruf ohne Daten
@@ -238,6 +259,12 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
   abgefragt; verspätete Portaldaten können so ohne erneuten Jahresimport
   nachgeholt werden. Außerhalb dieses Fensters ist keine Wiederherstellung
   möglich.
+- Bei einer Zeitzonenmigration kann ein gespeicherter positiver Stundenwert an
+  einer lokalen Tagesgrenze unteilbar sein, ein interner Quelltag ohne Daten
+  bleiben oder das für eine ganzstündige Grenze benötigte Paar benachbarter
+  Quelltage fehlen. Die betroffene Rolle bleibt dann unverändert: Pro Statistik
+  wird höchstens ein betroffener Tag täglich erneut geprüft, während andere
+  sichere Rollen weiterlaufen und kein destruktiver Ersatz erfolgt.
 - Ungewöhnliche Messpunktnamen oder Schnittstellen-Metadaten können zusätzliche
   Zuordnungsregeln erfordern.
 - Die Integration ist ausschließlich lesend und kann weder das EMS noch
@@ -254,6 +281,9 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Wechselrichter-Buskonfiguration und Herstellerprotokolle mit weiteren EMS-
   und Wechselrichterkombinationen prüfen
 - Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
+- Einen Home-Assistant-kompatiblen Import historischer Leistungsstatistiken für
+  **Stromquellen** prüfen, ohne Recorder-eigene Entitätsstatistiken zu
+  überschreiben
 - Die Aufnahme in den HACS-Standardkatalog abschließen und Rückmeldungen aus dem
   Review bearbeiten
 

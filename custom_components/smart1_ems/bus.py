@@ -36,6 +36,16 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def is_parseable_bus_row(row: dict[str, str]) -> bool:
+    """Return whether a topology row has a documented inverter-bus ID."""
+    bus_id = _clean_text(
+        row.get("BusId")
+        or row.get("Bus Id")
+        or row.get('"BusId"')
+    )
+    return _BUS_ID_PATTERN.fullmatch(bus_id) is not None
+
+
 @dataclass(frozen=True, slots=True)
 class Smart1BusSystem:
     """Static metadata returned by `/bus/{deviceId}`."""

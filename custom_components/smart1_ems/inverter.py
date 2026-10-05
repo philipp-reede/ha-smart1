@@ -48,6 +48,43 @@ def _row_value(row: dict[str, str], *keys: str) -> str:
     return ""
 
 
+def canonical_inverter_id(value: object) -> str | None:
+    """Return one documented inverter ID with canonical numeric spelling."""
+    inverter_id = _clean_text(value)
+    match = _INVERTER_ID_PATTERN.fullmatch(inverter_id)
+    if match is None:
+        return None
+    return (
+        f"Inverter_B{int(match.group('bus'))}_"
+        f"A{int(match.group('address'))}"
+    )
+
+
+def _inverter_identity(
+    row: dict[str, str],
+) -> tuple[str, int, int] | None:
+    """Return the canonical ID, bus and address for a documented row."""
+    inverter_id = _clean_text(
+        _row_value(row, "Inverter Id", "InverterId", '"Inverter Id"')
+    )
+    canonical_id = canonical_inverter_id(inverter_id)
+    if canonical_id is None:
+        return None
+
+    match = _INVERTER_ID_PATTERN.fullmatch(canonical_id)
+    assert match is not None
+    bus = int(match.group("bus"))
+    address = int(match.group("address"))
+    # The portal occasionally changes only the casing of the documented ID.
+    # Device-registry identifiers must remain stable across such responses.
+    return (canonical_id, bus, address)
+
+
+def is_parseable_inverter_row(row: dict[str, str]) -> bool:
+    """Return whether a topology row has a documented inverter identity."""
+    return _inverter_identity(row) is not None
+
+
 def pv_timestamp_sort_key(value: object) -> tuple[int, float, str]:
     """Return a chronological, deterministic key for one PV timestamp."""
     text = _clean_text(value)
@@ -159,12 +196,10 @@ def parse_inverters(rows: list[dict[str, str]]) -> list[Smart1Inverter]:
     inverters: dict[str, Smart1Inverter] = {}
 
     for row in rows:
-        inverter_id = _clean_text(
-            _row_value(row, "Inverter Id", "InverterId", '"Inverter Id"')
-        )
-        match = _INVERTER_ID_PATTERN.match(inverter_id)
-        if match is None:
+        identity = _inverter_identity(row)
+        if identity is None:
             continue
+        inverter_id, bus, address = identity
 
         declared_strings = _optional_int(row.get("Strings")) or 0
         documented_slots = max(declared_strings, 3)
@@ -202,8 +237,8 @@ def parse_inverters(rows: list[dict[str, str]]) -> list[Smart1Inverter]:
 
         inverters[inverter_id] = Smart1Inverter(
             id=inverter_id,
-            bus=int(match.group("bus")),
-            address=int(match.group("address")),
+            bus=bus,
+            address=address,
             name=_clean_text(row.get("Name")),
             manufacturer=_clean_text(
                 _row_value(row, "Manufactor", "Manufacturer")
