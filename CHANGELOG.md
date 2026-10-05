@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-05
+
 ### Fixed
 
 - Serialize durable history-journal access by config-entry store key, drain
