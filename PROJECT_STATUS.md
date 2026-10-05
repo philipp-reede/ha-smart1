@@ -75,6 +75,9 @@
   or Energy Dashboard statistics; transient failures retain the latest sample
 - Inverter, module-field and bus topology requests that fail or return an
   ambiguous schema-free response during setup are retried every 15 minutes.
+  A response containing both valid and unparseable identity rows remains
+  pending as a whole; its parseable subset does not replace the last known
+  topology or enter the cross-reload cache.
   A conclusive recovery is carried through one guarded reload, while explicit
   optional 404 responses end recovery without creating a reload loop. Each
   retry verifies its config-entry runtime again after the network request, so
@@ -241,8 +244,14 @@
   unproductive 365-day scan every six hours
 - Durable journal access is serialized by config-entry Store key across
   reloads. Unload marks the old state inactive and drains pending writes before
-  the runtime is removed; permanent config-entry removal deletes the same
-  private Store after crossing that shared write fence
+  the runtime is removed. A caller cancellation is delayed until the underlying
+  executor-backed Store operation has actually finished, so it cannot release
+  the shared lock while an old disk write is still active. Permanent
+  config-entry removal deletes the same private Store after crossing that
+  fence, then removes only that entry's transient topology cache while
+  preserving sibling installations. The lock registry holds weak references:
+  inactive, unreferenced entry locks disappear automatically, while every live
+  state, holder or waiter keeps the shared fence alive
 - Destructive history rebuilds wait for Recorder's per-operation completion
   callback before completion state is written. Replacement batches are prepared
   and validated first, then queued immediately behind the clear without an

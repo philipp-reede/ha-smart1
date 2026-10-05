@@ -7,10 +7,13 @@ All notable changes to this project are documented in this file.
 ### Fixed
 
 - Serialize durable history-journal access by config-entry store key, drain
-  outstanding writes during unload and delete the private migration store when
-  an entry is removed. An old runtime can no longer overwrite a newer recovery
-  journal after a reload or leave exact replacement profiles behind after
-  permanent removal
+  outstanding writes during unload and keep the shared lock held until an
+  executor-backed write or removal really finishes, even if its caller is
+  cancelled. Store-key locks are weakly retained so unused per-entry fences do
+  not accumulate, while live states, holders and waiters can never receive
+  different locks. Delete the private migration store when an entry is removed.
+  An old runtime can no longer overwrite a newer recovery journal after a
+  reload or leave exact replacement profiles behind after permanent removal
 - Replay complete PV and derived-energy replacement journals before any portal
   history request, including deliberately empty replacements. Destructive
   empty derived-energy replacements are now journaled before Recorder is
@@ -34,9 +37,13 @@ All notable changes to this project are documented in this file.
   reconstructed from Recorder's hourly totals
 - Treat inverter, module-field and bus topology responses containing any
   unparseable identity row as non-authoritative, preventing malformed portal
-  data from deleting existing registry entities and user customizations
+  data from deleting existing registry entities and user customizations. Mixed
+  responses with both valid and malformed rows remain pending for recovery
+  instead of accepting and caching only their parseable subset
 - Revalidate the active config-entry runtime after every awaited topology retry
   before mutating discovery state or the cross-reload recovery cache
+- Remove only the deleted config entry's transient topology-recovery state
+  while preserving sibling installations
 - Canonicalize inverter IDs independently of portal casing and numeric
   zero-padding, and migrate an equivalent legacy device-registry identifier in
   place, retaining its entities, area and customizations instead of creating a
@@ -52,11 +59,13 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
-- Cover cross-reload journal write fencing and store removal, portal-independent
-  exact journal replay for PV and derived energy, fractional-offset fail-closed
-  role isolation, internal-empty and missing whole-hour boundary probes,
-  persistent resume-boundary retries, malformed topology rows, stale topology
-  callbacks and casing/zero-padding inverter-device upgrades
+- Cover cross-reload journal write fencing, executor writes that outlive task
+  cancellation, selective transient-state cleanup and store removal,
+  portal-independent exact journal replay for PV and derived energy,
+  fractional-offset fail-closed role isolation, internal-empty and missing
+  whole-hour boundary probes, persistent resume-boundary retries, mixed and
+  fully malformed topology rows, stale topology callbacks and
+  casing/zero-padding inverter-device upgrades
 
 ## [0.7.4] - 2026-09-28
 

@@ -500,7 +500,7 @@ class Smart1SetupTest(unittest.TestCase):
                 )
 
                 # A known CSV header does not make a data-bearing response
-                # authoritative when none of its rows can be parsed. Such a
+                # authoritative when any of its rows cannot be parsed. Such a
                 # response must never enable destructive registry cleanup.
                 invalid_probe = {
                     "endpoint_result": "data_returned",
@@ -514,6 +514,60 @@ class Smart1SetupTest(unittest.TestCase):
                         integration._INVERTER_ID_COLUMNS,
                     )
                 )
+                self.assertTrue(
+                    integration._topology_probe_needs_retry(
+                        [object()],
+                        invalid_probe,
+                        integration._INVERTER_ID_COLUMNS,
+                    )
+                )
+
+                # A mixed response keeps the complete endpoint pending. Its
+                # valid subset must not replace or cache the last known
+                # topology until a later response is fully parseable.
+                retained_inverter = object()
+                mixed_inverter = object()
+                mixed_runtime = {
+                    "inverters": [retained_inverter],
+                    "inverter_discovery_authoritative": False,
+                }
+                mixed_api = types.SimpleNamespace(
+                    get_inverters_with_probe=AsyncMock(
+                        return_value=([mixed_inverter], invalid_probe)
+                    ),
+                    get_module_fields_with_probe=AsyncMock(),
+                    get_buses_with_probe=AsyncMock(),
+                )
+                mixed_coordinator = types.SimpleNamespace(
+                    inverters=[retained_inverter]
+                )
+                mixed_pending = {"inverters"}
+                hass.data["smart1_ems"][entry.entry_id] = mixed_runtime
+
+                self.assertFalse(
+                    await integration._async_retry_failed_topology(
+                        hass,
+                        entry,
+                        mixed_api,
+                        mixed_coordinator,
+                        mixed_runtime,
+                        mixed_pending,
+                    )
+                )
+                self.assertEqual(mixed_pending, {"inverters"})
+                self.assertEqual(
+                    mixed_runtime["inverters"],
+                    [retained_inverter],
+                )
+                self.assertEqual(
+                    mixed_coordinator.inverters,
+                    [retained_inverter],
+                )
+                self.assertNotIn(
+                    integration.TOPOLOGY_RECOVERY_CACHE_KEY,
+                    hass.data,
+                )
+                hass.data["smart1_ems"][entry.entry_id] = retry_runtime
                 self.assertTrue(
                     integration._topology_probe_needs_retry(
                         [],
@@ -1152,6 +1206,47 @@ class Smart1SetupTest(unittest.TestCase):
                     ["sensor"],
                 )
 
+                target_store_key = (
+                    "smart1_ems.history_migrations.entry-1"
+                )
+                sibling_store_key = (
+                    "smart1_ems.history_migrations.entry-2"
+                )
+                target_lock = integration.history_store_lock(
+                    hass,
+                    target_store_key,
+                )
+                sibling_lock = integration.history_store_lock(
+                    hass,
+                    sibling_store_key,
+                )
+                hass.data[integration.TOPOLOGY_RECOVERY_CACHE_KEY] = {
+                    entry.entry_id: {"inverters": ([], {})},
+                    "entry-2": {"buses": ([], {})},
+                }
+
+                # Cancellation before removal acquires the shared lock must
+                # not evict that fence. The current holder and a later setup
+                # must continue to observe exactly the same lock object.
+                await target_lock.acquire()
+                cancelled_remove = asyncio.create_task(
+                    integration.async_remove_entry(hass, entry)
+                )
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertFalse(cancelled_remove.done())
+                cancelled_remove.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await cancelled_remove
+                self.assertIs(
+                    integration.history_store_lock(
+                        hass,
+                        target_store_key,
+                    ),
+                    target_lock,
+                )
+                target_lock.release()
+
                 await integration.async_remove_entry(hass, entry)
                 removal_store = FakeStore.instances[-1]
                 self.assertEqual(
@@ -1159,6 +1254,25 @@ class Smart1SetupTest(unittest.TestCase):
                     "smart1_ems.history_migrations.entry-1",
                 )
                 self.assertTrue(removal_store.removed)
+                self.assertEqual(
+                    hass.data[integration.TOPOLOGY_RECOVERY_CACHE_KEY],
+                    {"entry-2": {"buses": ([], {})}},
+                )
+                self.assertIs(
+                    integration.history_store_lock(
+                        hass,
+                        target_store_key,
+                    ),
+                    target_lock,
+                )
+                self.assertIs(
+                    integration.history_store_lock(
+                        hass,
+                        sibling_store_key,
+                    ),
+                    sibling_lock,
+                )
+                self.assertIsNot(target_lock, sibling_lock)
 
                 # Removal is defensive when Home Assistant reaches it without
                 # a successful unload: drain and detach the lingering runtime
@@ -1173,6 +1287,15 @@ class Smart1SetupTest(unittest.TestCase):
                 dangling_state.deactivate.assert_awaited_once_with()
                 self.assertNotIn("smart1_ems", hass.data)
                 self.assertTrue(FakeStore.instances[-1].removed)
+
+                await integration.async_remove_entry(
+                    hass,
+                    types.SimpleNamespace(entry_id="entry-2"),
+                )
+                self.assertNotIn(
+                    integration.TOPOLOGY_RECOVERY_CACHE_KEY,
+                    hass.data,
+                )
 
         asyncio.run(run_setup_and_callbacks())
 
