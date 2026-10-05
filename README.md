@@ -41,7 +41,7 @@ battery, wallbox, heat pump and auxiliary heating.
 | Setup | Home Assistant UI with a masked personal API key |
 | Devices | EMS, PV, inverter, grid, battery, wallbox, heat pump and auxiliary heater |
 | Energy Dashboard | PV, grid, battery and selected individual consumers |
-| Energy history | Automatic import of up to 365 days of Energy Dashboard energy statistics |
+| Energy history | Automatic import of up to 365 days of Energy Dashboard energy and hourly power statistics |
 | Tested hardware | M-TEC Energy Hero, Energy Butler, Energy Heater, AP440 heat pump and KEBA wallbox |
 
 ## Features
@@ -72,6 +72,9 @@ battery, wallbox, heat pump and auxiliary heating.
 - Automatic background import of up to 365 days of Energy Dashboard energy
   history, with persistent catch-up after longer Home Assistant or portal
   outages
+- Safe hourly external power history for photovoltaic production, signed grid
+  power and signed battery power without overwriting Recorder-owned live-entity
+  statistics
 - Persistent, bounded daily single-day probes for time-zone and local-day
   boundaries that cannot yet be reconstructed safely. The affected energy role
   remains unchanged while independent roles continue to update
@@ -215,11 +218,35 @@ bridged, so incomplete portal data can make these totals lower than actual
 consumption. Changing a selected source creates a new statistic rather than
 combining measurements from different sources.
 
-The historical import covers the Energy Dashboard's energy statistics in kWh.
-It does not backfill the Recorder history of the live power sensors in W or kW.
-Consequently, the **Power sources** graph starts when Recorder began collecting
-statistics for those live entities, even when the energy charts and totals
-reach further back through the imported portal history.
+The integration also imports up to 365 days of hourly external power statistics
+for photovoltaic production, signed grid power (consumption minus return to
+grid) and signed battery power (discharge minus charge). It never backfills or
+overwrites Recorder-owned statistics of the live power entities.
+
+Select the desired statistic manually under **Power / Power sources** in the
+Energy Dashboard settings. The integration does not change this preference
+automatically. Home Assistant supports only one `stat_rate` selection per
+source, so it cannot combine the two available views:
+
+| Power-source selection | Result |
+| --- | --- |
+| smart1 EMS external power statistic | Up to 365 days of portal history, but no live entity state; the current **Now**/Sankey flow is therefore `0` |
+| Existing smart1 EMS live power entity | Current **Now**/Sankey flow, but history starts when Recorder began collecting that entity's statistics |
+
+The selectable external statistics are named `smart1 EMS PV power
+(<time zone>)`, `smart1 EMS grid power (<time zone>)` and `smart1 EMS battery
+power (<time zone>)` when their complete source set is available. The first
+import runs in the background and can take several minutes. Interrupted annual
+scans and longer Home Assistant outages resume from their last verified day;
+temporarily incomplete historical days are retried at a bounded rate. Missing
+portal samples are not assumed to mean zero: an already stored hour is retained
+until a complete replacement can be calculated.
+
+The statistic identity includes both the selected portal sources and the Home
+Assistant time zone used to interpret portal timestamps. After changing either
+one, reload the integration and select the newly created external statistic in
+the Energy Dashboard. The old statistic is deliberately preserved instead of
+being destructively remapped or deleted.
 
 ## Troubleshooting
 
@@ -254,16 +281,26 @@ redact credentials, identifiers and measurements.
 - Non-PV historical energy is derived rather than read from native cumulative
   meter totals because the tested installation does not expose usable linear
   cumulative data.
-- Historical power values for the Energy Dashboard's **Power sources** graph
-  are not backfilled. That graph uses Recorder statistics from the live power
-  entities and therefore begins when Recorder started collecting their
-  statistics; the up-to-365-day import applies only to energy statistics.
+- Home Assistant allows only one `stat_rate` selection per source in the
+  Energy Dashboard. The external power statistic provides up to 365 days of
+  history but no live state, so the current **Now**/Sankey flow is `0`. The
+  existing live power entity provides the current flow, but its history starts
+  only when Recorder began collecting it. Selection remains manual and the
+  integration does not change the Energy Dashboard preference automatically.
+- A Home Assistant time-zone change or a different selected portal source
+  creates a new external power-statistic ID. Reload the integration and select
+  the new statistic; the old series remains available intentionally.
 - Persistent per-statistic coverage resumes failed or interrupted history
   requests and performs one supported-window repair for older installations.
   A successful no-data response remains unknown rather than becoming zero.
   Within the supported 365-day window it is retained for bounded round-robin
   rechecks, one old day at a time, so late portal data can be recovered without
   repeating a full backfill; data outside that window cannot be recovered.
+- If Recorder loses only part of an already imported external power series, the
+  integration cannot always distinguish that database loss from intentionally
+  sparse portal data. A complete loss is rebuilt automatically; isolated
+  missing Recorder rows may require manual Recorder repair or recreating the
+  integration to request the supported window under a new statistic ID.
 - During a time-zone migration, a stored positive hourly value can be
   indivisible at a local-day partition, an internal source day can return no
   data, or an adjacent source-day pair needed to rebuild a whole-hour boundary
@@ -287,9 +324,6 @@ redact credentials, identifiers and measurements.
   additional EMS and inverter combinations.
 - Make the historical import range configurable if longer or shorter imports
   prove useful across installations.
-- Evaluate a Home Assistant-compatible historical power-statistics import for
-  the **Power sources** graph without overwriting Recorder-owned entity
-  statistics.
 - Complete inclusion in the default HACS catalogue and address review feedback.
 
 Technical API findings and implementation details are documented in

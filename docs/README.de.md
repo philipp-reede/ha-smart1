@@ -42,7 +42,7 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 | Einrichtung | Home-Assistant-Oberfläche mit verdecktem persönlichem API-Schlüssel |
 | Geräte | EMS, PV, Wechselrichter, Netz, Batterie, Wallbox, Wärmepumpe und Zusatzheizung |
 | Energy Dashboard | PV, Netz, Batterie und ausgewählte Einzelverbraucher |
-| Energiehistorie | Automatischer Import von bis zu 365 Tagen Energiehistorie für das Energy Dashboard |
+| Energiehistorie | Automatischer Import von bis zu 365 Tagen Energie- und stündlicher Leistungshistorie für das Energy Dashboard |
 | Getestete Hardware | M-TEC Energy Hero, Energy Butler, Energy Heater, AP440 Wärmepumpe und KEBA Wallbox |
 
 ## Funktionen
@@ -70,6 +70,9 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 - Automatischer Import von bis zu 365 Tagen Energy-Dashboard-Energiehistorie
   im Hintergrund mit persistenter Nachholung nach längeren Home-Assistant-
   oder Portal-Ausfällen
+- Sichere externe stündliche Leistungshistorie für PV-Erzeugung, signierte
+  Netzleistung und signierte Batterieleistung, ohne Recorder-eigene
+  Statistiken der Live-Entitäten zu überschreiben
 - Persistente, begrenzte tägliche Einzel-Tages-Prüfungen für Zeitzonen- und
   lokale Tagesgrenzen, die noch nicht sicher rekonstruiert werden können. Die
   betroffene Energierolle bleibt unverändert, während unabhängige Rollen weiter
@@ -214,12 +217,39 @@ Die übrigen Energiewerte sind Schätzungen aus 5-Minuten-Leistungswerten. Lück
 von mehr als 15 Minuten werden nicht überbrückt. Unvollständige Portaldaten
 können deshalb zu niedrigeren Summen führen.
 
-Der historische Import umfasst die Energiestatistiken des Energy Dashboards in
-kWh. Die Recorder-Historie der Live-Leistungssensoren in W oder kW wird nicht
-rückwirkend befüllt. Deshalb beginnt das Diagramm **Stromquellen** mit dem
-Zeitpunkt, an dem Recorder Statistiken für diese Live-Entitäten zu erfassen
-begann, auch wenn Energieverläufe und Summen durch den Portalimport weiter
-zurückreichen.
+Zusätzlich importiert die Integration bis zu 365 Tage stündliche externe
+Leistungsstatistiken für PV-Erzeugung, signierte Netzleistung (Bezug minus
+Einspeisung) und signierte Batterieleistung (Entladung minus Ladung). Sie
+befüllt oder überschreibt dabei niemals Recorder-eigene Statistiken der
+Live-Leistungsentitäten.
+
+Die gewünschte Statistik wird in den Einstellungen des Energy Dashboards unter
+**Leistung / Stromquellen** manuell ausgewählt. Die Integration ändert diese
+Auswahl nicht automatisch. Home Assistant unterstützt je Quelle nur eine
+`stat_rate`-Auswahl und kann deshalb die beiden verfügbaren Ansichten nicht
+kombinieren:
+
+| Auswahl für die Stromquelle | Ergebnis |
+| --- | --- |
+| Externe Leistungsstatistik von smart1 EMS | Bis zu 365 Tage Portalhistorie, aber kein echter Live-Zustand; die aktuelle **Jetzt**-/Sankey-Anzeige steht deshalb auf `0` |
+| Vorhandene Live-Leistungsentität von smart1 EMS | Aktuelle **Jetzt**-/Sankey-Anzeige, aber Historie erst ab dem Zeitpunkt, an dem Recorder Statistiken für diese Entität erfasst |
+
+Die auswählbaren externen Statistiken heißen `smart1 EMS PV power
+(<Zeitzone>)`, `smart1 EMS grid power (<Zeitzone>)` und `smart1 EMS battery
+power (<Zeitzone>)`, sofern der jeweils vollständige Quellsatz verfügbar ist.
+Der erste Import läuft im Hintergrund und kann mehrere Minuten dauern.
+Unterbrochene Jahresimporte und längere Home-Assistant-Ausfallzeiten werden ab
+dem letzten bestätigten Tag fortgesetzt; vorübergehend unvollständige
+historische Tage werden begrenzt erneut geprüft. Fehlende Portalwerte werden
+nicht als null interpretiert: Eine bereits gespeicherte Stunde bleibt erhalten,
+bis ein vollständiger Ersatz berechnet werden kann.
+
+Die Statistik-ID berücksichtigt sowohl die ausgewählten Portalquellen als auch
+die Home-Assistant-Zeitzone, mit der Portalzeitstempel interpretiert werden.
+Nach einer Änderung muss die Integration neu geladen und die neu erzeugte
+externe Statistik im Energy Dashboard ausgewählt werden. Die alte Statistik
+bleibt absichtlich erhalten, statt sie destruktiv neu zuzuordnen oder zu
+löschen.
 
 ## Fehler melden
 
@@ -246,11 +276,17 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Historische Energiewerte außerhalb der PV-Anlage werden aus
   5-Minuten-Leistungswerten berechnet, weil die getestete Anlage keine
   verwendbaren linearen Summenzähler über den kumulativen Endpunkt liefert.
-- Historische Leistungswerte für das Energy-Dashboard-Diagramm
-  **Stromquellen** werden nicht rückwirkend importiert. Dieses Diagramm nutzt
-  Recorder-Statistiken der Live-Leistungsentitäten und beginnt deshalb, wenn
-  Recorder deren Statistiken zu erfassen beginnt; der Import von bis zu 365
-  Tagen gilt nur für Energiestatistiken.
+- Home Assistant erlaubt je Quelle im Energy Dashboard nur eine
+  `stat_rate`-Auswahl. Die externe Leistungsstatistik bietet bis zu 365 Tage
+  Historie, aber keinen Live-Zustand; die aktuelle **Jetzt**-/Sankey-Anzeige
+  steht deshalb auf `0`. Die vorhandene Live-Leistungsentität zeigt den
+  aktuellen Fluss, ihre Historie beginnt aber erst mit der Erfassung durch
+  Recorder. Die Auswahl bleibt manuell und die Integration ändert die
+  Energy-Dashboard-Einstellung nicht automatisch.
+- Eine geänderte Home-Assistant-Zeitzone oder eine andere ausgewählte
+  Portalquelle erzeugt eine neue externe Leistungsstatistik-ID. Danach die
+  Integration neu laden und die neue Statistik auswählen; die alte Zeitreihe
+  bleibt absichtlich erhalten.
 - Eine persistente Abdeckung je Statistik setzt fehlgeschlagene oder
   unterbrochene Historienabrufe fort und repariert bei älteren Installationen
   einmalig das unterstützte Zeitfenster. Ein erfolgreicher Abruf ohne Daten
@@ -259,6 +295,13 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
   abgefragt; verspätete Portaldaten können so ohne erneuten Jahresimport
   nachgeholt werden. Außerhalb dieses Fensters ist keine Wiederherstellung
   möglich.
+- Verliert Recorder nur einen Teil einer bereits importierten externen
+  Leistungsreihe, kann die Integration diesen Datenbankverlust nicht immer von
+  absichtlich lückenhaften Portaldaten unterscheiden. Ein vollständiger Verlust
+  wird automatisch neu aufgebaut; einzelne fehlende Recorder-Stunden können
+  eine manuelle Recorder-Reparatur oder ein erneutes Anlegen der Integration
+  erfordern, damit das unterstützte Zeitfenster unter einer neuen Statistik-ID
+  erneut angefordert wird.
 - Bei einer Zeitzonenmigration kann ein gespeicherter positiver Stundenwert an
   einer lokalen Tagesgrenze unteilbar sein, ein interner Quelltag ohne Daten
   bleiben oder das für eine ganzstündige Grenze benötigte Paar benachbarter
@@ -281,9 +324,6 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Wechselrichter-Buskonfiguration und Herstellerprotokolle mit weiteren EMS-
   und Wechselrichterkombinationen prüfen
 - Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
-- Einen Home-Assistant-kompatiblen Import historischer Leistungsstatistiken für
-  **Stromquellen** prüfen, ohne Recorder-eigene Entitätsstatistiken zu
-  überschreiben
 - Die Aufnahme in den HACS-Standardkatalog abschließen und Rückmeldungen aus dem
   Review bearbeiten
 

@@ -120,10 +120,19 @@
   difference with all 288 expected five-minute samples and no skipped gaps
 - Integration name and domain are now `smart1 EMS` and `smart1_ems`
 - The latest 365 days of documented PV daily production are imported as
-  external kWh long-term statistics in the background. This energy-history
-  import does not backfill Recorder-owned mean statistics for live power
-  entities; the Energy Dashboard's Power sources graph therefore starts when
-  Recorder begins collecting their statistics
+  external kWh long-term statistics in the background
+- Up to 365 days of hourly external power statistics are imported for
+  photovoltaic production, signed grid power (consumption minus return) and
+  signed battery power (discharge minus charge). This safe path does not
+  backfill or mutate Recorder-owned statistics of live power entities
+- Annual power scans persist a resumable cursor, catch up every unchecked day
+  after longer Home Assistant outages, retry incomplete historical days at a
+  bounded rate and use source/time-zone-scoped IDs instead of destructively
+  remapping an existing series. Missing portal samples preserve existing
+  hourly values instead of being interpreted as zero
+- The external power-history path is implemented but has not yet been tested
+  in a running Home Assistant instance or validated on the reference
+  installation
 - Exact PV daily totals are distributed across UTC-aligned hours using the
   measured five-minute `pv_global` profile and normalized back to the exact
   cumulative daily value, avoiding a midnight residual-consumption spike
@@ -336,10 +345,12 @@
   grid and battery are unavailable on the reference installation. Their
   optional energy statistics are therefore estimates derived from five-minute
   power samples
-- Historical import currently covers external kWh energy statistics only.
-  Recorder-owned W/kW statistics for live power entities are not backfilled,
-  so the Energy Dashboard's Power sources graph cannot show portal history
-  from before those entities were created
+- Home Assistant supports only one `stat_rate` selection per source. Selecting
+  the external power statistic provides up to 365 days of history but no live
+  entity state, so the current Now/Sankey flow is `0`; selecting the existing
+  live power entity provides the current flow but only the history Recorder has
+  collected for it. The selection remains manual and the integration does not
+  change Energy Dashboard preferences automatically
 - Historical rows that multiple pre-migration config entries may already have
   written into the former shared external-statistic IDs cannot be attributed
   to their originating installations. Migration therefore discards those
@@ -351,6 +362,12 @@
   no-data days remain unknown and are retried individually in rotation; data
   that has aged out of that window, or is no longer exposed by the portal,
   cannot be recovered
+- A complete loss of an integration-owned external power statistic is detected
+  and rebuilt. Partial Recorder loss is not always distinguishable from a
+  legitimately sparse portal series when other rows remain; isolated missing
+  database rows can therefore require manual Recorder repair or recreating the
+  integration to trigger another supported-window scan under a new statistic
+  ID
 - Naive portal timestamps contain no daylight-saving-time fold marker and
   their response order is not assumed to be meaningful. Distinct repeated-hour
   profiles are assigned by minimizing adjacent power changes and using nearby
@@ -387,9 +404,8 @@
 - Validate inverter-bus discovery and manufacturer protocols with additional
   EMS and inverter combinations
 - Add a configurable history range if real-world installations need it
-- Evaluate a supported historical power-statistics path for the Energy
-  Dashboard's Power sources graph without mutating Recorder-owned entity
-  statistics
+- Validate the implemented external power-history path in a running Home
+  Assistant instance and on the reference installation
 - Evaluate whether additional portal evidence can resolve a persistent
   time-zone/day-boundary partition when the bounded daily probes cannot recover
   its missing adjacent samples; until then the affected role deliberately

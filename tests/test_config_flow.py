@@ -1107,6 +1107,10 @@ class Smart1ConfigEntryMigrationTest(unittest.TestCase):
                 PV_STATISTIC_ID="smart1_ems:pv_production",
                 Smart1PvHistoryImporter=object,
             ),
+            "custom_components.smart1_ems.power_history": _module(
+                "custom_components.smart1_ems.power_history",
+                Smart1PowerHistoryImporter=object,
+            ),
         })
         api_module = modules["custom_components.smart1_ems.api"]
         api_module.describe_api_error = lambda error: type(error).__name__

@@ -21,6 +21,7 @@ HISTORY_COVERAGE_KEY = "history_coverage"
 HISTORY_EMPTY_DAYS_KEY = "history_empty_days"
 HISTORY_EMPTY_RETRY_CURSORS_KEY = "history_empty_retry_cursors"
 HISTORY_EMPTY_RETRY_RUNS_KEY = "history_empty_retry_runs"
+HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY = "history_incomplete_scan_progress"
 HISTORY_SOURCE_TIME_ZONES_KEY = "history_source_time_zones"
 HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY = (
     "history_pending_time_zone_migrations"
@@ -125,6 +126,9 @@ UNJOURNALED_DERIVED_HISTORY_SCHEMA_VERSIONS = frozenset({4, 5})
 # Keep it named for upgrade-state compatibility; version 7 supersedes it in
 # every time zone.
 DERIVED_FRACTIONAL_OFFSET_SCHEMA_VERSION = 3
+# Version 1 stores integration-owned hourly power means separately from the
+# Recorder-owned statistics of live sensor entities.
+POWER_HISTORY_SCHEMA_VERSION = 1
 
 
 class PendingTimeZoneMigration(NamedTuple):
@@ -174,6 +178,17 @@ class DeferredTimeZonePartition(NamedTuple):
     partition_dates: tuple[date, ...]
     next_probe_on: date
     probe_cursor: int = 0
+
+
+class IncompleteScanProgress(NamedTuple):
+    """Persist resumable progress without marking a schema complete."""
+
+    checked_through: date
+    has_data: bool
+    source_time_zone: str
+    oldest_supported: date
+    incomplete_days: set[date]
+    complete_days: set[date]
 
 
 def statistics_namespace_for_device(device_id: str) -> str:
@@ -386,6 +401,96 @@ class Smart1HistoryState:
                 }
                 if parsed_versions:
                     self._empty_retry_runs[statistic_id] = parsed_versions
+        raw_incomplete_progress = entry.data.get(
+            HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY,
+            {},
+        )
+        self._incomplete_scan_progress: dict[
+            str,
+            dict[int, IncompleteScanProgress],
+        ] = {}
+        if isinstance(raw_incomplete_progress, dict):
+            for statistic_id, schema_versions in (
+                raw_incomplete_progress.items()
+            ):
+                if not isinstance(statistic_id, str) or not isinstance(
+                    schema_versions,
+                    dict,
+                ):
+                    continue
+                parsed_versions: dict[int, IncompleteScanProgress] = {}
+                for schema_version, raw_progress in schema_versions.items():
+                    if not (
+                        str(schema_version).isdigit()
+                        and isinstance(raw_progress, dict)
+                    ):
+                        continue
+                    raw_checked_through = raw_progress.get("checked_through")
+                    raw_oldest_supported = raw_progress.get(
+                        "oldest_supported"
+                    )
+                    checked_through = (
+                        self._parse_date(raw_checked_through)
+                        if isinstance(raw_checked_through, str)
+                        else None
+                    )
+                    oldest_supported = (
+                        self._parse_date(raw_oldest_supported)
+                        if isinstance(raw_oldest_supported, str)
+                        else None
+                    )
+                    has_data = raw_progress.get("has_data")
+                    source_time_zone = raw_progress.get("source_time_zone")
+                    raw_incomplete_days = raw_progress.get(
+                        "incomplete_days",
+                        [],
+                    )
+                    raw_complete_days = raw_progress.get(
+                        "complete_days",
+                        [],
+                    )
+                    if not (
+                        checked_through is not None
+                        and oldest_supported is not None
+                        and checked_through >= oldest_supported
+                        and isinstance(has_data, bool)
+                        and isinstance(source_time_zone, str)
+                        and source_time_zone
+                        and isinstance(raw_incomplete_days, list)
+                        and isinstance(raw_complete_days, list)
+                    ):
+                        continue
+                    incomplete_days = {
+                        parsed_day
+                        for raw_day in raw_incomplete_days
+                        if isinstance(raw_day, str)
+                        and (parsed_day := self._parse_date(raw_day))
+                        is not None
+                        and parsed_day >= oldest_supported
+                    }
+                    complete_days = {
+                        parsed_day
+                        for raw_day in raw_complete_days
+                        if isinstance(raw_day, str)
+                        and (parsed_day := self._parse_date(raw_day))
+                        is not None
+                        and parsed_day >= oldest_supported
+                    }
+                    incomplete_days.difference_update(complete_days)
+                    parsed_versions[int(schema_version)] = (
+                        IncompleteScanProgress(
+                            checked_through=checked_through,
+                            has_data=has_data,
+                            source_time_zone=source_time_zone,
+                            oldest_supported=oldest_supported,
+                            incomplete_days=incomplete_days,
+                            complete_days=complete_days,
+                        )
+                    )
+                if parsed_versions:
+                    self._incomplete_scan_progress[statistic_id] = (
+                        parsed_versions
+                    )
         raw_source_time_zones = entry.data.get(
             HISTORY_SOURCE_TIME_ZONES_KEY,
             {},
@@ -884,6 +989,39 @@ class Smart1HistoryState:
                     )
                     if schema_versions
                 },
+                HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY: {
+                    stored_statistic_id: {
+                        str(stored_schema_version): {
+                            "checked_through": (
+                                progress.checked_through.isoformat()
+                            ),
+                            "has_data": progress.has_data,
+                            "source_time_zone": progress.source_time_zone,
+                            "oldest_supported": (
+                                progress.oldest_supported.isoformat()
+                            ),
+                            "incomplete_days": [
+                                incomplete_day.isoformat()
+                                for incomplete_day in sorted(
+                                    progress.incomplete_days
+                                )
+                            ],
+                            "complete_days": [
+                                complete_day.isoformat()
+                                for complete_day in sorted(
+                                    progress.complete_days
+                                )
+                            ],
+                        }
+                        for stored_schema_version, progress in sorted(
+                            schema_versions.items()
+                        )
+                    }
+                    for stored_statistic_id, schema_versions in (
+                        self._incomplete_scan_progress.items()
+                    )
+                    if schema_versions
+                },
                 HISTORY_SOURCE_TIME_ZONES_KEY: dict(
                     self._source_time_zones
                 ),
@@ -994,6 +1132,142 @@ class Smart1HistoryState:
     def source_time_zone(self, statistic_id: str) -> str | None:
         """Return the time zone used to map one statistic's source rows."""
         return self._source_time_zones.get(statistic_id)
+
+    def incomplete_scan_progress(
+        self,
+        statistic_id: str,
+        schema_version: int,
+    ) -> IncompleteScanProgress | None:
+        """Return resumable progress for an unfinished schema scan."""
+        progress = self._incomplete_scan_progress.get(statistic_id, {}).get(
+            schema_version
+        )
+        if progress is None:
+            return None
+        return IncompleteScanProgress(
+            checked_through=progress.checked_through,
+            has_data=progress.has_data,
+            source_time_zone=progress.source_time_zone,
+            oldest_supported=progress.oldest_supported,
+            incomplete_days=set(progress.incomplete_days),
+            complete_days=set(progress.complete_days),
+        )
+
+    def record_incomplete_scan_if_unchanged(
+        self,
+        statistic_id: str,
+        schema_version: int,
+        *,
+        expected_version: int,
+        checked_through: date,
+        has_data: bool,
+        oldest_supported: date,
+        source_time_zone: str,
+        incomplete_days: set[date] | None = None,
+        complete_days: set[date] | None = None,
+    ) -> bool:
+        """Persist partial progress only for the still-active generation."""
+        if (
+            not self._active
+            or self._versions.get(statistic_id, 0) != expected_version
+        ):
+            return False
+        if not (
+            isinstance(statistic_id, str)
+            and statistic_id
+            and isinstance(schema_version, int)
+            and not isinstance(schema_version, bool)
+            and schema_version > 0
+            and isinstance(checked_through, date)
+            and not isinstance(checked_through, datetime)
+            and isinstance(has_data, bool)
+            and isinstance(oldest_supported, date)
+            and not isinstance(oldest_supported, datetime)
+            and checked_through >= oldest_supported
+            and isinstance(source_time_zone, str)
+            and source_time_zone
+        ):
+            raise ValueError("Invalid incomplete history scan progress")
+        normalized_incomplete_days = set(incomplete_days or ())
+        normalized_complete_days = set(complete_days or ())
+        if any(
+            not isinstance(result_day, date)
+            or isinstance(result_day, datetime)
+            for result_day in (
+                normalized_incomplete_days | normalized_complete_days
+            )
+        ):
+            raise ValueError("Incomplete scan results must contain dates")
+        normalized_incomplete_days = {
+            result_day
+            for result_day in normalized_incomplete_days
+            if result_day >= oldest_supported
+        }
+        normalized_complete_days = {
+            result_day
+            for result_day in normalized_complete_days
+            if result_day >= oldest_supported
+        }
+        normalized_incomplete_days.difference_update(
+            normalized_complete_days
+        )
+
+        current = self.incomplete_scan_progress(
+            statistic_id,
+            schema_version,
+        )
+        if (
+            current is not None
+            and current.source_time_zone == source_time_zone
+        ):
+            effective_oldest_supported = min(
+                current.oldest_supported,
+                oldest_supported,
+            )
+            accumulated_complete_days = {
+                result_day
+                for result_day in (
+                    current.complete_days | normalized_complete_days
+                )
+                if result_day >= effective_oldest_supported
+            }
+            accumulated_incomplete_days = {
+                result_day
+                for result_day in (
+                    current.incomplete_days | normalized_incomplete_days
+                )
+                if result_day >= effective_oldest_supported
+            }
+            accumulated_incomplete_days.difference_update(
+                accumulated_complete_days
+            )
+            replacement = IncompleteScanProgress(
+                checked_through=max(
+                    current.checked_through,
+                    checked_through,
+                ),
+                has_data=current.has_data or has_data,
+                source_time_zone=source_time_zone,
+                oldest_supported=effective_oldest_supported,
+                incomplete_days=accumulated_incomplete_days,
+                complete_days=accumulated_complete_days,
+            )
+        else:
+            replacement = IncompleteScanProgress(
+                checked_through=checked_through,
+                has_data=has_data,
+                source_time_zone=source_time_zone,
+                oldest_supported=oldest_supported,
+                incomplete_days=normalized_incomplete_days,
+                complete_days=normalized_complete_days,
+            )
+        if current == replacement:
+            return True
+        self._incomplete_scan_progress.setdefault(statistic_id, {})[
+            schema_version
+        ] = replacement
+        self._persist()
+        return True
 
     def pending_time_zone_migration(
         self,
@@ -1350,6 +1624,11 @@ class Smart1HistoryState:
                 or changed
             )
             changed = (
+                self._incomplete_scan_progress.pop(statistic_id, None)
+                is not None
+                or changed
+            )
+            changed = (
                 self._source_time_zones.pop(statistic_id, None) is not None
                 or changed
             )
@@ -1618,6 +1897,40 @@ class Smart1HistoryState:
         ):
             return False
 
+        incomplete_progress = self._incomplete_scan_progress.get(
+            statistic_id,
+            {},
+        ).get(schema_version)
+        if incomplete_progress is not None and (
+            source_time_zone is None
+            or incomplete_progress.source_time_zone == source_time_zone
+        ):
+            has_data = has_data or incomplete_progress.has_data
+            if (
+                checked_through is None
+                or incomplete_progress.checked_through > checked_through
+            ):
+                checked_through = incomplete_progress.checked_through
+            oldest_supported = min(
+                oldest_supported,
+                incomplete_progress.oldest_supported,
+            )
+            nonempty_days = {
+                result_day
+                for result_day in (
+                    set(nonempty_days) | incomplete_progress.complete_days
+                )
+                if result_day >= oldest_supported
+            }
+            empty_days = {
+                result_day
+                for result_day in (
+                    set(empty_days) | incomplete_progress.incomplete_days
+                )
+                if result_day >= oldest_supported
+            }
+            empty_days.difference_update(nonempty_days)
+
         changed = False
         if self._versions.get(statistic_id, 0) != schema_version:
             self._versions[statistic_id] = schema_version
@@ -1689,6 +2002,17 @@ class Smart1HistoryState:
                 is not None
             ):
                 changed = True
+        incomplete_versions = self._incomplete_scan_progress.get(
+            statistic_id
+        )
+        if (
+            incomplete_versions is not None
+            and schema_version in incomplete_versions
+        ):
+            del incomplete_versions[schema_version]
+            if not incomplete_versions:
+                del self._incomplete_scan_progress[statistic_id]
+            changed = True
         if changed:
             self._persist()
         return True
@@ -1722,6 +2046,7 @@ class Smart1HistoryState:
                 self._empty_days,
                 self._empty_retry_cursors,
                 self._empty_retry_runs,
+                self._incomplete_scan_progress,
                 self._source_time_zones,
                 self._pending_time_zone_migrations,
                 self._deferred_time_zone_partitions,

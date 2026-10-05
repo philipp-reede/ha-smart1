@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Import up to 365 days of hourly external power statistics for photovoltaic
+  production, signed grid power (consumption minus return) and signed battery
+  power (discharge minus charge) without backfilling or overwriting
+  Recorder-owned statistics of live power entities
+- Keep the Energy Dashboard's `stat_rate` choice manual because Home Assistant
+  supports only one selection per source: the external statistic supplies
+  older history without a live state, while the existing live entity supplies
+  the current Now/Sankey flow with Recorder history only
+- Resume interrupted annual power scans and longer offline periods from
+  persisted coverage, retry incomplete historical days at a bounded rate and
+  preserve existing hours when a portal response is incomplete instead of
+  treating missing samples as zero
+- Scope historical power-statistic IDs to the selected portal sources and
+  source time zone so configuration changes never clear an existing series
+
 ## [0.7.5] - 2026-10-05
 
 ### Fixed

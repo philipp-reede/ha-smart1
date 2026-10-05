@@ -28,6 +28,9 @@ HISTORY_EMPTY_RETRY_CURSORS_KEY = (
     history_state.HISTORY_EMPTY_RETRY_CURSORS_KEY
 )
 HISTORY_EMPTY_RETRY_RUNS_KEY = history_state.HISTORY_EMPTY_RETRY_RUNS_KEY
+HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY = (
+    history_state.HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY
+)
 HISTORY_SOURCE_TIME_ZONES_KEY = history_state.HISTORY_SOURCE_TIME_ZONES_KEY
 HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY = (
     history_state.HISTORY_PENDING_TIME_ZONE_MIGRATIONS_KEY
@@ -358,6 +361,244 @@ class Smart1HistoryStateTest(unittest.TestCase):
         state = Smart1HistoryState(hass, entry)
 
         self.assertIsNone(state.checked_through(statistic_id, 5))
+
+    def test_incomplete_scan_progress_is_persisted_and_accumulated(
+        self,
+    ) -> None:
+        statistic_id = "smart1_ems:pv_power_deadbeef"
+        schema_version = 1
+        oldest_supported = date(2025, 9, 29)
+        first_incomplete = date(2026, 1, 1)
+        completed_later = date(2026, 1, 2)
+        second_incomplete = date(2026, 2, 1)
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(data={})
+        state = Smart1HistoryState(hass, entry)
+
+        self.assertTrue(
+            state.record_incomplete_scan_if_unchanged(
+                statistic_id,
+                schema_version,
+                expected_version=0,
+                checked_through=date(2026, 1, 1),
+                has_data=False,
+                oldest_supported=oldest_supported,
+                source_time_zone="Europe/Berlin",
+                incomplete_days={
+                    oldest_supported - timedelta(days=1),
+                    first_incomplete,
+                },
+                complete_days={completed_later},
+            )
+        )
+        self.assertFalse(state.is_complete(statistic_id, schema_version))
+        self.assertEqual(
+            state.incomplete_scan_progress(statistic_id, schema_version),
+            history_state.IncompleteScanProgress(
+                checked_through=date(2026, 1, 1),
+                has_data=False,
+                source_time_zone="Europe/Berlin",
+                oldest_supported=oldest_supported,
+                incomplete_days={first_incomplete},
+                complete_days={completed_later},
+            ),
+        )
+
+        self.assertTrue(
+            state.record_incomplete_scan_if_unchanged(
+                statistic_id,
+                schema_version,
+                expected_version=0,
+                checked_through=date(2026, 2, 1),
+                has_data=True,
+                oldest_supported=oldest_supported + timedelta(days=1),
+                source_time_zone="Europe/Berlin",
+                incomplete_days={completed_later, second_incomplete},
+                complete_days={first_incomplete},
+            )
+        )
+        self.assertTrue(
+            state.record_incomplete_scan_if_unchanged(
+                statistic_id,
+                schema_version,
+                expected_version=0,
+                checked_through=date(2026, 1, 15),
+                has_data=False,
+                oldest_supported=oldest_supported,
+                source_time_zone="Europe/Berlin",
+            )
+        )
+        self.assertEqual(len(manager.calls), 2)
+        self.assertEqual(
+            entry.data[HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY],
+            {
+                statistic_id: {
+                    "1": {
+                        "checked_through": "2026-02-01",
+                        "has_data": True,
+                        "source_time_zone": "Europe/Berlin",
+                        "oldest_supported": "2025-09-29",
+                        "incomplete_days": ["2026-02-01"],
+                        "complete_days": [
+                            "2026-01-01",
+                            "2026-01-02",
+                        ],
+                    }
+                }
+            },
+        )
+
+        reloaded = Smart1HistoryState(hass, entry)
+        self.assertEqual(
+            reloaded.incomplete_scan_progress(statistic_id, schema_version),
+            history_state.IncompleteScanProgress(
+                checked_through=date(2026, 2, 1),
+                has_data=True,
+                source_time_zone="Europe/Berlin",
+                oldest_supported=oldest_supported,
+                incomplete_days={second_incomplete},
+                complete_days={first_incomplete, completed_later},
+            ),
+        )
+
+    def test_incomplete_scan_progress_rejects_stale_generation(self) -> None:
+        statistic_id = "smart1_ems:grid_power_deadbeef"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(data={})
+        state = Smart1HistoryState(hass, entry)
+        state.mark_complete(statistic_id, 1, has_data=True)
+        calls_before = len(manager.calls)
+
+        self.assertFalse(
+            state.record_incomplete_scan_if_unchanged(
+                statistic_id,
+                2,
+                expected_version=0,
+                checked_through=date(2026, 1, 1),
+                has_data=True,
+                oldest_supported=date(2025, 9, 29),
+                source_time_zone="Europe/Berlin",
+            )
+        )
+        self.assertIsNone(state.incomplete_scan_progress(statistic_id, 2))
+        self.assertEqual(len(manager.calls), calls_before)
+
+    def test_malformed_incomplete_scan_progress_is_ignored(self) -> None:
+        statistic_id = "smart1_ems:pv_power_deadbeef"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(
+            data={
+                HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY: {
+                    statistic_id: {
+                        "1": {
+                            "checked_through": 123,
+                            "has_data": True,
+                            "source_time_zone": "Europe/Berlin",
+                            "oldest_supported": "2025-09-29",
+                        },
+                        "2": {
+                            "checked_through": "2025-09-28",
+                            "has_data": False,
+                            "source_time_zone": "Europe/Berlin",
+                            "oldest_supported": "2025-09-29",
+                        },
+                    }
+                }
+            }
+        )
+
+        state = Smart1HistoryState(hass, entry)
+
+        self.assertIsNone(state.incomplete_scan_progress(statistic_id, 1))
+        self.assertIsNone(state.incomplete_scan_progress(statistic_id, 2))
+
+    def test_committing_scan_clears_matching_incomplete_progress(
+        self,
+    ) -> None:
+        statistic_id = "smart1_ems:battery_power_deadbeef"
+        schema_version = 1
+        oldest_supported = date(2025, 9, 29)
+        checked_through = date(2026, 9, 28)
+        first_incomplete = date(2026, 3, 1)
+        completed_later = date(2026, 3, 2)
+        first_complete = date(2026, 3, 3)
+        final_incomplete = date(2026, 3, 4)
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(data={})
+        state = Smart1HistoryState(hass, entry)
+        state.record_incomplete_scan_if_unchanged(
+            statistic_id,
+            schema_version,
+            expected_version=0,
+            checked_through=date(2026, 3, 1),
+            has_data=True,
+            oldest_supported=oldest_supported,
+            source_time_zone="Europe/Berlin",
+            incomplete_days={first_incomplete, completed_later},
+            complete_days={first_complete},
+        )
+
+        self.assertTrue(
+            state.commit_scan_if_unchanged(
+                statistic_id,
+                schema_version,
+                has_data=False,
+                expected_version=0,
+                checked_through=checked_through,
+                empty_days={first_complete, final_incomplete},
+                nonempty_days={completed_later, checked_through},
+                oldest_supported=oldest_supported,
+                source_time_zone="Europe/Berlin",
+            )
+        )
+
+        self.assertEqual(len(manager.calls), 2)
+        self.assertTrue(state.is_complete(statistic_id, schema_version))
+        self.assertIs(
+            state.data_presence(statistic_id, schema_version),
+            True,
+        )
+        self.assertEqual(
+            entry.data[HISTORY_EMPTY_DAYS_KEY][statistic_id]["1"],
+            [first_incomplete.isoformat(), final_incomplete.isoformat()],
+        )
+        self.assertIsNone(
+            state.incomplete_scan_progress(statistic_id, schema_version)
+        )
+        self.assertEqual(
+            entry.data[HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY],
+            {},
+        )
+
+    def test_forgetting_statistics_clears_incomplete_scan_progress(
+        self,
+    ) -> None:
+        statistic_id = "smart1_ems:pv_power_deadbeef"
+        manager = _ConfigEntries()
+        hass = types.SimpleNamespace(config_entries=manager)
+        entry = types.SimpleNamespace(data={})
+        state = Smart1HistoryState(hass, entry)
+        state.record_incomplete_scan_if_unchanged(
+            statistic_id,
+            1,
+            expected_version=0,
+            checked_through=date(2026, 1, 1),
+            has_data=False,
+            oldest_supported=date(2025, 9, 29),
+            source_time_zone="Europe/Berlin",
+        )
+
+        state.forget_statistics({statistic_id})
+
+        self.assertIsNone(state.incomplete_scan_progress(statistic_id, 1))
+        self.assertEqual(
+            entry.data[HISTORY_INCOMPLETE_SCAN_PROGRESS_KEY],
+            {},
+        )
 
     def test_empty_retry_queue_is_bounded_rotating_and_once_daily(self) -> None:
         manager = _ConfigEntries()

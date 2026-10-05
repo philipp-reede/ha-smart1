@@ -87,11 +87,71 @@ def validate_energy_statistics_imports(
                 )
 
 
+def validate_power_statistics_imports(
+    batches: Iterable[
+        tuple[Mapping[str, Any], Iterable[Mapping[str, Any]]]
+    ],
+) -> None:
+    """Validate external hourly power means before Recorder enqueueing.
+
+    Historical power belongs to integration-owned external statistics.  The
+    validation intentionally mirrors Home Assistant's synchronous checks and
+    additionally guarantees UTC-hour alignment so malformed portal rows can
+    never create off-grid long-term statistics.
+    """
+    for metadata, statistics in batches:
+        statistic_id = metadata.get("statistic_id")
+        if (
+            not isinstance(statistic_id, str)
+            or _VALID_STATISTIC_ID.fullmatch(statistic_id) is None
+        ):
+            raise ValueError("Invalid statistic_id")
+
+        source, _object_id = statistic_id.split(":", 1)
+        if metadata.get("source") != source:
+            raise ValueError("Invalid statistics source")
+        if metadata.get("mean_type") is None:
+            raise ValueError("Missing statistics mean_type")
+        if metadata.get("unit_class") != "power":
+            raise ValueError("Invalid power statistics unit_class")
+        if metadata.get("unit_of_measurement") not in {"W", "kW"}:
+            raise ValueError("Invalid power statistics unit")
+
+        for statistic in statistics:
+            start = statistic.get("start")
+            if (
+                not isinstance(start, datetime)
+                or start.tzinfo is None
+                or start.utcoffset() is None
+            ):
+                raise ValueError("Statistics start must be timezone-aware")
+            utc_start = start.astimezone(timezone.utc)
+            if (
+                start.minute
+                or start.second
+                or start.microsecond
+                or utc_start.minute
+                or utc_start.second
+                or utc_start.microsecond
+            ):
+                raise ValueError(
+                    "Statistics start must be on a UTC hour boundary"
+                )
+
+            mean = statistic.get("mean")
+            if (
+                not isinstance(mean, (int, float))
+                or isinstance(mean, bool)
+                or not math.isfinite(float(mean))
+            ):
+                raise ValueError("Statistics mean must be finite")
+
+
 def statistics_are_persisted(
     expected: Iterable[Mapping[str, Any]],
     observed: Iterable[Mapping[str, Any]],
 ) -> bool:
-    """Return whether Recorder contains every expected state and sum.
+    """Return whether Recorder contains every expected statistic value.
 
     An external-statistics import is one database transaction.  Comparing the
     complete queued batch after Recorder has processed its queue therefore
@@ -123,7 +183,7 @@ def statistics_are_persisted(
         observed_record = observed_by_start.get(timestamp)
         if observed_record is None:
             return False
-        for field in ("state", "sum"):
+        for field in ("state", "sum", "mean", "min", "max"):
             if field not in expected_record:
                 continue
             expected_value = expected_record.get(field)

@@ -37,6 +37,7 @@ from .history_state import (
     history_store_lock,
     statistics_namespace_for_device,
 )
+from .power_history import Smart1PowerHistoryImporter
 from .recorder_helpers import async_clear_statistics
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = ["sensor"]
 HISTORY_UPDATE_INTERVAL = timedelta(hours=6)
 CURRENT_DAY_UPDATE_INTERVAL = timedelta(minutes=15)
+POWER_HISTORY_CURRENT_DAY_UPDATE_INTERVAL = timedelta(hours=1)
 TOPOLOGY_RETRY_INTERVAL = timedelta(minutes=15)
 TOPOLOGY_RECOVERY_CACHE_KEY = f"{DOMAIN}_topology_recovery"
 LEGACY_ORPHAN_CLEANUP_KEY = "legacy_orphan_cleanup_ids"
@@ -549,6 +551,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             module_field_discovery_authoritative
         ),
         "bus_discovery_authoritative": bus_discovery_authoritative,
+        "unloading": False,
     }
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime_data
 
@@ -653,7 +656,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     history_importers = []
+    energy_history_importers = []
+    power_history_importers = []
     managed_legacy_statistic_ids: set[str] = set()
+    pv_power_point = None
     if discovery_result.has_pv:
         pv_power_point = next(
             (
@@ -674,6 +680,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_initial_rebuild=force_legacy_history_rebuild,
         )
         history_importers.append(pv_importer)
+        energy_history_importers.append(pv_importer)
         if not statistics_namespace:
             managed_legacy_statistic_ids.add(pv_importer.statistic_id)
     elif not statistics_namespace:
@@ -715,21 +722,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             continue
         role_points[role_key] = point
     if role_points:
-        history_importers.append(
-            Smart1DerivedEnergyImporter(
-                hass,
-                api,
-                role_points,
-                statistics_namespace=statistics_namespace,
-                history_state=history_state,
-                force_initial_rebuild=force_legacy_history_rebuild,
-            )
+        derived_importer = Smart1DerivedEnergyImporter(
+            hass,
+            api,
+            role_points,
+            statistics_namespace=statistics_namespace,
+            history_state=history_state,
+            force_initial_rebuild=force_legacy_history_rebuild,
         )
+        history_importers.append(derived_importer)
+        energy_history_importers.append(derived_importer)
         if not statistics_namespace:
             managed_legacy_statistic_ids.update(
                 statistic_id_for_role(role_key, point.id)
                 for role_key, point in role_points.items()
             )
+
+    power_history_importer = Smart1PowerHistoryImporter(
+        hass,
+        api,
+        pv_power_point=pv_power_point,
+        role_points=role_points,
+        statistics_namespace=statistics_namespace,
+        history_state=history_state,
+        active_check=lambda: (
+            hass.data.get(DOMAIN, {}).get(entry.entry_id) is runtime_data
+            and runtime_data.get("unloading") is not True
+        ),
+    )
+    if power_history_importer.channels:
+        history_importers.append(power_history_importer)
+        power_history_importers.append(power_history_importer)
+        runtime_data["power_history_importers"] = power_history_importers
+        entry.async_on_unload(power_history_importer.deactivate)
 
     legacy_cleanup_required = (
         force_legacy_history_rebuild and not statistics_namespace
@@ -743,7 +768,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await history_importer.async_import()
 
     async def _async_refresh_current_day(_now=None) -> None:
-        for history_importer in history_importers:
+        for history_importer in energy_history_importers:
+            await history_importer.async_import(1, repair=False)
+
+    async def _async_refresh_current_power_history(_now=None) -> None:
+        for history_importer in power_history_importers:
             await history_importer.async_import(1, repair=False)
 
     async def _async_initial_history_import() -> None:
@@ -810,6 +839,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass,
                 _async_refresh_current_day,
                 CURRENT_DAY_UPDATE_INTERVAL,
+            )
+        )
+    if power_history_importers:
+        entry.async_on_unload(
+            async_track_time_interval(
+                hass,
+                _async_refresh_current_power_history,
+                POWER_HISTORY_CURRENT_DAY_UPDATE_INTERVAL,
             )
         )
 
@@ -1017,10 +1054,14 @@ async def async_migrate_entry(
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a smart1 EMS config entry."""
+    runtime_data = hass.data[DOMAIN][entry.entry_id]
+    runtime_data["unloading"] = True
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        runtime_data["unloading"] = False
         return False
 
-    runtime_data = hass.data[DOMAIN][entry.entry_id]
+    for importer in runtime_data.get("power_history_importers", ()):
+        importer.deactivate()
     await runtime_data["history_state"].deactivate()
     hass.data[DOMAIN].pop(entry.entry_id)
     if not hass.data[DOMAIN]:
@@ -1041,6 +1082,10 @@ async def async_remove_entry(
         else None
     )
     if isinstance(runtime_data, dict):
+        for importer in runtime_data.get("power_history_importers", ()):
+            deactivate_importer = getattr(importer, "deactivate", None)
+            if callable(deactivate_importer):
+                deactivate_importer()
         history_state = runtime_data.get("history_state")
         deactivate = getattr(history_state, "deactivate", None)
         if callable(deactivate):

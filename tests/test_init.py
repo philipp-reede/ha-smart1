@@ -140,6 +140,24 @@ class Smart1SetupTest(unittest.TestCase):
             def __init__(self, *args, **kwargs) -> None:
                 self.async_import = AsyncMock()
 
+        class FakePowerHistoryImporter:
+            instance = None
+
+            def __init__(
+                self,
+                *args,
+                pv_power_point=None,
+                role_points=None,
+                **kwargs,
+            ) -> None:
+                type(self).instance = self
+                self.active_check = kwargs.get("active_check")
+                self.channels = (
+                    ("pv",) if pv_power_point is not None else ()
+                )
+                self.async_import = AsyncMock()
+                self.deactivate = Mock()
+
         class FakeStore:
             instances = []
 
@@ -323,6 +341,10 @@ class Smart1SetupTest(unittest.TestCase):
                 PV_STATISTIC_ID="smart1_ems:pv_production",
                 Smart1PvHistoryImporter=FakeHistoryImporter,
             ),
+            "custom_components.smart1_ems.power_history": _module(
+                "custom_components.smart1_ems.power_history",
+                Smart1PowerHistoryImporter=FakePowerHistoryImporter,
+            ),
         }
 
         entry = types.SimpleNamespace(
@@ -402,17 +424,30 @@ class Smart1SetupTest(unittest.TestCase):
                 assert importer is not None
                 importer.async_import.assert_awaited_once_with()
                 importer.async_import.reset_mock()
+                power_importer = FakePowerHistoryImporter.instance
+                assert power_importer is not None
+                power_importer.async_import.assert_awaited_once_with()
+                power_importer.async_import.reset_mock()
 
                 self.assertEqual(
                     [interval for _, interval in scheduled],
-                    [timedelta(hours=6), timedelta(minutes=15)],
+                    [
+                        timedelta(hours=6),
+                        timedelta(minutes=15),
+                        timedelta(hours=1),
+                    ],
                 )
 
                 await scheduled[0][0]()
                 await scheduled[1][0]()
+                await scheduled[2][0]()
 
                 self.assertEqual(
                     importer.async_import.await_args_list,
+                    [call(), call(1, repair=False)],
+                )
+                self.assertEqual(
+                    power_importer.async_import.await_args_list,
                     [call(), call(1, repair=False)],
                 )
 

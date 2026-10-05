@@ -98,6 +98,24 @@ class PowerIntegrationTest(unittest.TestCase):
         self.assertEqual(result.skipped_gaps, 1)
         self.assertEqual(result.hourly_energy_kwh, ())
 
+    def test_ignores_non_finite_power_values(self) -> None:
+        result = power_integration.integrate_power_rows(
+            [
+                row("2026-08-03 00:00:00", "1000"),
+                row("2026-08-03 00:05:00", "NaN"),
+                row("2026-08-03 00:10:00", "inf"),
+                row("2026-08-03 00:15:00", "-inf"),
+                row("2026-08-03 00:20:00", "1000"),
+            ],
+            "pv",
+            ZoneInfo("Europe/Berlin"),
+        )
+
+        self.assertEqual(result.sample_count, 2)
+        self.assertEqual(result.integrated_intervals, 0)
+        self.assertEqual(result.skipped_gaps, 1)
+        self.assertEqual(result.hourly_energy_kwh, ())
+
     def test_normalizes_spring_dst_timestamps_before_integration(self) -> None:
         result = power_integration.integrate_power_rows(
             [
