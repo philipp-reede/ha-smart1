@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-06
+
 ### Fixed
 
 - Distinguish saturated Recorder reads that contain an older boundary row from
