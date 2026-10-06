@@ -98,9 +98,9 @@ Befehle oder andere Steuerungsmöglichkeiten bereit.
 </p>
 
 <details>
-  <summary><strong>Batteriekonfiguration für das Energy Dashboard</strong></summary>
+  <summary><strong>Batteriekonfiguration mit Live-Leistung für das Energy Dashboard</strong></summary>
   <p align="center">
-    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/energy-battery.jpg" width="500" alt="Konfiguration von Batterieladung, Entladung, Leistung und Ladezustand">
+    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/energy-battery.jpg" width="500" alt="Konfiguration von Batterieladung, Entladung, Live-Leistung und Ladezustand">
   </p>
 </details>
 
@@ -237,9 +237,28 @@ kombinieren:
 Die auswählbaren externen Statistiken heißen `smart1 EMS PV power
 (<Zeitzone>)`, `smart1 EMS grid power (<Zeitzone>)` und `smart1 EMS battery
 power (<Zeitzone>)`, sofern der jeweils vollständige Quellsatz verfügbar ist.
-Der erste Import läuft im Hintergrund und kann mehrere Minuten dauern.
-Unterbrochene Jahresimporte und längere Home-Assistant-Ausfallzeiten werden ab
-dem letzten bestätigten Tag fortgesetzt; vorübergehend unvollständige
+
+Für die historische Ansicht werden ausschließlich die Leistungsfelder
+geändert. Energiezähler, Kosten, Vergütungen, Prognosen und der Ladezustand der
+Batterie bleiben unverändert:
+
+| Quelle im Energy Dashboard | Diese Energieauswahl beibehalten | Auswahl für die historische Leistung |
+| --- | --- | --- |
+| PV-Module | `smart1 EMS PV production` | Unter **Leistung der PV-Erzeugung** `smart1 EMS PV power (<Zeitzone>)` auswählen |
+| Netzanschluss | `smart1 EMS grid import` und `smart1 EMS grid export` | **Standard** auswählen und unter **Leistungsmessung** `smart1 EMS grid power (<Zeitzone>)` einstellen |
+| Batteriesystem | `smart1 EMS battery charge`, `smart1 EMS battery discharge` und den bisherigen Ladezustandssensor | **Standard** auswählen und unter **Leistungsmessung** `smart1 EMS battery power (<Zeitzone>)` einstellen |
+
+Für die externen Netz- und Batteriestatistiken muss **Standard** ausgewählt
+werden. **Invertiert** und **Zwei Sensoren** dürfen nicht mit einer externen
+Statistik kombiniert werden: Home Assistant erzeugt in diesen Modi einen
+Hilfssensor aus Live-Entitätszuständen. Eine externe Statistik besitzt keinen
+solchen Zustand. Der Hilfssensor bliebe deshalb bei null und die importierte
+Batteriehistorie würde unter **Stromquellen** fehlen.
+
+Der erste Import läuft im Hintergrund und kann mehrere Minuten dauern. Nach dem
+Speichern der Energy-Dashboard-Einstellungen sollte das Dashboard neu geladen
+werden. Unterbrochene Jahresimporte und längere Home-Assistant-Ausfallzeiten
+werden ab dem letzten bestätigten Tag fortgesetzt; vorübergehend unvollständige
 historische Tage werden begrenzt erneut geprüft. Fehlende Portalwerte werden
 nicht als null interpretiert: Eine bereits gespeicherte Stunde bleibt erhalten,
 bis ein vollständiger Ersatz berechnet werden kann.

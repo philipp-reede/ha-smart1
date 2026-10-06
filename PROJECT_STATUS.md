@@ -130,9 +130,12 @@
   bounded rate and use source/time-zone-scoped IDs instead of destructively
   remapping an existing series. Missing portal samples preserve existing
   hourly values instead of being interpreted as zero
-- The external power-history path is implemented but has not yet been tested
-  in a running Home Assistant instance or validated on the reference
-  installation
+- The external power-history path was validated on the reference installation
+  with Home Assistant Core 2026.9.4: PV, signed grid and signed battery history
+  appeared across the supported historical window after selecting the three
+  external statistics in the Energy Dashboard. Grid and battery must use the
+  **Standard** single-statistic mode; helper-producing modes require live
+  entity states and cannot expose external-statistic history
 - Exact PV daily totals are distributed across UTC-aligned hours using the
   measured five-minute `pv_global` profile and normalized back to the exact
   cumulative daily value, avoiding a midnight residual-consumption spike
@@ -404,8 +407,6 @@
 - Validate inverter-bus discovery and manufacturer protocols with additional
   EMS and inverter combinations
 - Add a configurable history range if real-world installations need it
-- Validate the implemented external power-history path in a running Home
-  Assistant instance and on the reference installation
 - Evaluate whether additional portal evidence can resolve a persistent
   time-zone/day-boundary partition when the bounded daily probes cannot recover
   its missing adjacent samples; until then the affected role deliberately

@@ -99,9 +99,9 @@ switches or commands.
 </p>
 
 <details>
-  <summary><strong>Battery Energy Dashboard configuration</strong></summary>
+  <summary><strong>Battery Energy Dashboard configuration with live power</strong></summary>
   <p align="center">
-    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/energy-battery.jpg" width="500" alt="Battery charge, discharge, power and state-of-charge configuration">
+    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/energy-battery.jpg" width="500" alt="Battery charge, discharge, live power and state-of-charge configuration">
   </p>
 </details>
 
@@ -235,8 +235,26 @@ source, so it cannot combine the two available views:
 
 The selectable external statistics are named `smart1 EMS PV power
 (<time zone>)`, `smart1 EMS grid power (<time zone>)` and `smart1 EMS battery
-power (<time zone>)` when their complete source set is available. The first
-import runs in the background and can take several minutes. Interrupted annual
+power (<time zone>)` when their complete source set is available.
+
+For the historical view, change only the power measurement fields. Keep the
+cumulative energy statistics, costs, forecasts and battery state of charge
+unchanged:
+
+| Energy Dashboard source | Keep these energy selections | Historical power selection |
+| --- | --- | --- |
+| PV modules | `smart1 EMS PV production` | Set **Power of solar production** to `smart1 EMS PV power (<time zone>)` |
+| Grid connection | `smart1 EMS grid import` and `smart1 EMS grid export` | Select **Standard**, then set **Power measurement** to `smart1 EMS grid power (<time zone>)` |
+| Battery system | `smart1 EMS battery charge`, `smart1 EMS battery discharge` and the existing state-of-charge sensor | Select **Standard**, then set **Power measurement** to `smart1 EMS battery power (<time zone>)` |
+
+For the external grid and battery statistics, use **Standard**. Do not select
+**Inverted** or **Two sensors** with an external statistic: Home Assistant uses
+those modes to create a helper from live entity states, while an external
+statistic has no entity state. The helper would therefore remain at zero and
+the imported battery history would not appear in **Power sources**.
+
+The first import runs in the background and can take several minutes. After
+saving the Energy Dashboard settings, reload the dashboard. Interrupted annual
 scans and longer Home Assistant outages resume from their last verified day;
 temporarily incomplete historical days are retried at a bounded rate. Missing
 portal samples are not assumed to mean zero: an already stored hour is retained
