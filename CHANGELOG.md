@@ -44,6 +44,11 @@ All notable changes to this project are documented in this file.
   supported window, including mixed-channel scans, so a successful empty
   rebuild converges instead of repeating a 365-day portal scan. A suspicious
   short Recorder read is confirmed against the full window before reset
+- Treat a capacity-sized Recorder read containing only out-of-window rows as
+  inconclusive instead of proof that supported history is absent, preventing
+  future-dated rows from triggering a new annual portal scan every hour
+- Ignore malformed, non-finite and out-of-range Recorder timestamps while
+  inspecting historical power statistics instead of aborting the import
 
 ## [0.7.5] - 2026-10-05
 
