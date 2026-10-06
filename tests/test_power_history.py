@@ -284,7 +284,7 @@ class FakeHistoryState:
         *,
         has_data: bool,
         expected_version: int,
-        checked_through: date,
+        checked_through: date | None,
         source_time_zone: str,
         empty_days: set[date] | None = None,
         nonempty_days: set[date] | None = None,
@@ -300,7 +300,11 @@ class FakeHistoryState:
         effective_complete = set(nonempty_days or ())
         if prior is not None:
             has_data = has_data or prior.has_data
-            checked_through = max(checked_through, prior.checked_through)
+            if (
+                checked_through is None
+                or prior.checked_through > checked_through
+            ):
+                checked_through = prior.checked_through
             effective_empty.update(prior.incomplete_days)
             effective_complete.update(prior.complete_days)
         effective_empty.difference_update(effective_complete)
@@ -311,7 +315,9 @@ class FakeHistoryState:
         self.versions[statistic_id] = schema_version
         self.presence[key] = has_data
         prior_coverage = self.coverage.get(key)
-        if prior_coverage is None or checked_through > prior_coverage:
+        if checked_through is not None and (
+            prior_coverage is None or checked_through > prior_coverage
+        ):
             self.coverage[key] = checked_through
         self.zones[statistic_id] = source_time_zone
         self.empty_days[key] = effective_empty
@@ -1022,6 +1028,531 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
             date(2026, 10, 5),
         )
 
+    async def test_hourly_refresh_does_not_skip_unchecked_coverage_gap(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=lambda *args: successful_fetch(importer)(*args),
+        )
+        last_verified = date(2026, 10, 5)
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=last_verified,
+        )
+        now = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+        statistic_id = importer.channels[0].statistic_id
+
+        # The hourly timer refreshes only today. It must not claim that the
+        # unqueried dates between durable coverage and today were checked.
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [(date(2026, 10, 12), date(2026, 10, 12))],
+        )
+        self.assertEqual(
+            state.checked_through(
+                statistic_id,
+                power_history.POWER_HISTORY_SCHEMA_VERSION,
+            ),
+            last_verified,
+        )
+
+        # The scheduled repair must then join that prefix and query every
+        # missing day, rather than limiting itself to its three-day refresh.
+        await importer.async_import(3, repair=True, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2026, 10, 12), date(2026, 10, 12)),
+                (date(2026, 10, 6), date(2026, 10, 12)),
+            ],
+        )
+        self.assertEqual(
+            state.checked_through(
+                statistic_id,
+                power_history.POWER_HISTORY_SCHEMA_VERSION,
+            ),
+            date(2026, 10, 12),
+        )
+
+    async def test_successful_gap_refresh_then_rollback_rebuilds_window(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=lambda *args: successful_fetch(importer)(*args),
+        )
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=date(2026, 10, 5),
+        )
+        statistic_id = importer.channels[0].statistic_id
+        key = (statistic_id, power_history.POWER_HISTORY_SCHEMA_VERSION)
+
+        await importer.async_import(
+            1,
+            repair=False,
+            now=datetime(2026, 10, 12, 12, tzinfo=timezone.utc),
+        )
+
+        progress = state.incomplete_scan_progress(*key)
+        self.assertIsNotNone(progress)
+        assert progress is not None
+        self.assertEqual(progress.checked_through, date(2026, 10, 5))
+        self.assertEqual(progress.oldest_supported, date(2025, 10, 13))
+
+        # Before the ordinary catch-up can run, the clock moves backward.
+        # The persisted old window boundary must invalidate the prefix and
+        # expose the newly supported 2025-10-06..12 dates to a full scan.
+        await importer.async_import(
+            3,
+            repair=True,
+            now=datetime(2026, 10, 5, 12, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2026, 10, 12), date(2026, 10, 12)),
+                (date(2025, 10, 6), date(2026, 10, 5)),
+            ],
+        )
+        self.assertIsNone(state.incomplete_scan_progress(*key))
+        self.assertEqual(state.checked_through(*key), date(2026, 10, 5))
+
+    async def test_partial_refresh_with_expired_prefix_forces_full_repair(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+
+        def fetch(
+            start_date: date,
+            end_date: date,
+            local_tz: ZoneInfo,
+            completed_before: datetime,
+            call_number: int,
+        ) -> power_history.PowerHistoryFetchResult:
+            if call_number > 1:
+                return successful_fetch(importer)(
+                    start_date,
+                    end_date,
+                    local_tz,
+                    completed_before,
+                    call_number,
+                )
+            start = completed_before.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            ) - timedelta(hours=1)
+            return power_history.PowerHistoryFetchResult(
+                hourly_means={"pv": ((start, 100.0),)},
+                completed=False,
+                checked_through=end_date,
+                requested_days=1,
+                emitted_hours=1,
+                replaceable_hours=(start,),
+                incomplete_days={"pv": frozenset()},
+                complete_days={"pv": frozenset({end_date})},
+            )
+
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=fetch,
+        )
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=date(2025, 10, 5),
+        )
+        statistic_id = importer.channels[0].statistic_id
+        key = (statistic_id, power_history.POWER_HISTORY_SCHEMA_VERSION)
+        now = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+
+        # The prefix has aged out of the 365-day support window. A partial
+        # isolated refresh must not persist that invalid date as scan progress.
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertFalse(state.is_complete(*key))
+        self.assertIsNone(state.incomplete_scan_progress(*key))
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "fetch_incomplete",
+        )
+
+        await importer.async_import(3, repair=True, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2026, 10, 12), date(2026, 10, 12)),
+                (date(2025, 10, 13), date(2026, 10, 12)),
+            ],
+        )
+        self.assertTrue(state.is_complete(*key))
+        self.assertEqual(state.checked_through(*key), now.date())
+
+    async def test_partial_hourly_refresh_does_not_record_progress_past_gap(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+
+        def fetch(
+            start_date: date,
+            end_date: date,
+            local_tz: ZoneInfo,
+            completed_before: datetime,
+            call_number: int,
+        ) -> power_history.PowerHistoryFetchResult:
+            if call_number > 1:
+                return successful_fetch(importer)(
+                    start_date,
+                    end_date,
+                    local_tz,
+                    completed_before,
+                    call_number,
+                )
+            start = completed_before.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            ) - timedelta(hours=1)
+            return power_history.PowerHistoryFetchResult(
+                hourly_means={"pv": ((start, 100.0),)},
+                completed=False,
+                checked_through=end_date,
+                requested_days=1,
+                emitted_hours=1,
+                replaceable_hours=(start,),
+                incomplete_days={"pv": frozenset()},
+                complete_days={"pv": frozenset({end_date})},
+            )
+
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=fetch,
+        )
+        last_verified = date(2026, 10, 5)
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=last_verified,
+        )
+        now = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+        statistic_id = importer.channels[0].statistic_id
+        key = (statistic_id, power_history.POWER_HISTORY_SCHEMA_VERSION)
+
+        await importer.async_import(1, repair=False, now=now)
+
+        progress = state.incomplete_scan_progress(*key)
+        self.assertIsNotNone(progress)
+        assert progress is not None
+        self.assertEqual(progress.checked_through, last_verified)
+
+        await importer.async_import(3, repair=True, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2026, 10, 12), date(2026, 10, 12)),
+                (date(2026, 10, 6), date(2026, 10, 12)),
+            ],
+        )
+        self.assertIsNone(state.incomplete_scan_progress(*key))
+        self.assertEqual(state.checked_through(*key), date(2026, 10, 12))
+
+    async def test_partial_connected_refresh_does_not_regress_prefix(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+
+        def fetch(
+            _start_date: date,
+            end_date: date,
+            _local_tz: ZoneInfo,
+            completed_before: datetime,
+            _call_number: int,
+        ) -> power_history.PowerHistoryFetchResult:
+            start = completed_before.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            ) - timedelta(hours=1)
+            return power_history.PowerHistoryFetchResult(
+                hourly_means={"pv": ((start, 100.0),)},
+                completed=False,
+                checked_through=end_date - timedelta(days=3),
+                requested_days=1,
+                emitted_hours=1,
+                replaceable_hours=(start,),
+                incomplete_days={"pv": frozenset()},
+                complete_days={"pv": frozenset()},
+            )
+
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=fetch,
+        )
+        last_verified = date(2026, 10, 10)
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=last_verified,
+        )
+        statistic_id = importer.channels[0].statistic_id
+        key = (statistic_id, power_history.POWER_HISTORY_SCHEMA_VERSION)
+
+        await importer.async_import(
+            3,
+            repair=True,
+            now=datetime(2026, 10, 12, 12, tzinfo=timezone.utc),
+        )
+
+        progress = state.incomplete_scan_progress(*key)
+        self.assertIsNotNone(progress)
+        assert progress is not None
+        self.assertEqual(progress.checked_through, last_verified)
+
+    async def test_partial_refresh_with_mixed_prefixes_forces_full_repair(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+
+        def fetch(
+            start_date: date,
+            end_date: date,
+            local_tz: ZoneInfo,
+            completed_before: datetime,
+            call_number: int,
+        ) -> power_history.PowerHistoryFetchResult:
+            if call_number > 1:
+                return successful_fetch(importer)(
+                    start_date,
+                    end_date,
+                    local_tz,
+                    completed_before,
+                    call_number,
+                )
+            start = completed_before.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            ) - timedelta(hours=1)
+            return power_history.PowerHistoryFetchResult(
+                hourly_means={
+                    channel.key: ((start, 100.0),)
+                    for channel in importer.channels
+                },
+                completed=False,
+                checked_through=end_date,
+                requested_days=1,
+                emitted_hours=len(importer.channels),
+                replaceable_hours=(start,),
+                incomplete_days={
+                    channel.key: frozenset()
+                    for channel in importer.channels
+                },
+                complete_days={
+                    channel.key: frozenset({end_date})
+                    for channel in importer.channels
+                },
+            )
+
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={
+                "grid_import": point("import"),
+                "grid_export": point("export"),
+                "battery_discharge": point("discharge"),
+                "battery_charge": point("charge"),
+            },
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=fetch,
+        )
+        last_verified = date(2026, 10, 5)
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=last_verified,
+        )
+        missing_prefix_channel = importer.channels[1]
+        missing_prefix_key = (
+            missing_prefix_channel.statistic_id,
+            power_history.POWER_HISTORY_SCHEMA_VERSION,
+        )
+        del state.coverage[missing_prefix_key]
+        now = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertTrue(
+            all(
+                state.incomplete_scan_progress(
+                    channel.statistic_id,
+                    power_history.POWER_HISTORY_SCHEMA_VERSION,
+                )
+                is None
+                for channel in importer.channels
+            )
+        )
+        self.assertTrue(
+            all(
+                not state.is_complete(
+                    channel.statistic_id,
+                    power_history.POWER_HISTORY_SCHEMA_VERSION,
+                )
+                for channel in importer.channels
+            )
+        )
+
+        await importer.async_import(3, repair=True, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2026, 10, 12), date(2026, 10, 12)),
+                (date(2025, 10, 13), date(2026, 10, 12)),
+            ],
+        )
+        self.assertEqual(importer.diagnostic_status["last_mode"], "initial")
+        for channel in importer.channels:
+            key = (
+                channel.statistic_id,
+                power_history.POWER_HISTORY_SCHEMA_VERSION,
+            )
+            self.assertEqual(state.checked_through(*key), now.date())
+
+    async def test_complete_refresh_with_mixed_prefixes_forces_full_repair(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={
+                "grid_import": point("import"),
+                "grid_export": point("export"),
+                "battery_discharge": point("discharge"),
+                "battery_charge": point("charge"),
+            },
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=lambda *args: successful_fetch(importer)(*args),
+        )
+        last_verified = date(2026, 10, 5)
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=last_verified,
+        )
+        missing_prefix_channel = importer.channels[1]
+        missing_prefix_key = (
+            missing_prefix_channel.statistic_id,
+            power_history.POWER_HISTORY_SCHEMA_VERSION,
+        )
+        del state.coverage[missing_prefix_key]
+        now = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertTrue(
+            all(
+                not state.is_complete(
+                    channel.statistic_id,
+                    power_history.POWER_HISTORY_SCHEMA_VERSION,
+                )
+                for channel in importer.channels
+            )
+        )
+
+        await importer.async_import(3, repair=True, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2026, 10, 12), date(2026, 10, 12)),
+                (date(2025, 10, 13), date(2026, 10, 12)),
+            ],
+        )
+        self.assertEqual(importer.diagnostic_status["last_mode"], "initial")
+        for channel in importer.channels:
+            key = (
+                channel.statistic_id,
+                power_history.POWER_HISTORY_SCHEMA_VERSION,
+            )
+            self.assertEqual(state.checked_through(*key), now.date())
+
     async def test_withholds_schema_marker_until_persistence_is_confirmed(
         self,
     ) -> None:
@@ -1111,6 +1642,166 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(importer.diagnostic_status["last_mode"], "repair")
         self.assertTrue(store.writes)
+
+    async def test_empty_restore_repair_clears_stale_data_presence(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=lambda *args: successful_fetch(
+                importer,
+                emit=False,
+            )(*args),
+        )
+        mark_complete(state, importer, has_data=True)
+        statistic_id = importer.channels[0].statistic_id
+        schema_key = (
+            statistic_id,
+            power_history.POWER_HISTORY_SCHEMA_VERSION,
+        )
+        # A legitimate row just before the rolling support window must not
+        # keep a stale non-empty marker alive after an empty portal rebuild.
+        store.seed(
+            statistic_id,
+            datetime(2025, 10, 5, 22, tzinfo=timezone.utc),
+            420.0,
+        )
+        now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+
+        await importer.async_import(1, repair=False, now=now)
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2025, 10, 6), date(2026, 10, 5)),
+                (date(2026, 10, 5), date(2026, 10, 5)),
+            ],
+        )
+        self.assertFalse(state.presence[schema_key])
+        self.assertTrue(state.is_complete(*schema_key))
+
+    async def test_incomplete_channel_does_not_preserve_stale_presence(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={
+                "grid_import": point("grid_import"),
+                "grid_export": point("grid_export"),
+            },
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=lambda *args: successful_fetch(
+                importer,
+                emit=False,
+            )(*args),
+        )
+        mark_complete(state, importer, has_data=False)
+        pv_channel = next(
+            channel for channel in importer.channels if channel.key == "pv"
+        )
+        grid_channel = next(
+            channel for channel in importer.channels if channel.key == "grid"
+        )
+        schema_version = power_history.POWER_HISTORY_SCHEMA_VERSION
+        state.presence[(pv_channel.statistic_id, schema_version)] = True
+        # A second, incomplete channel makes this a full scan before the
+        # stale PV marker is inspected.
+        state.versions.pop(grid_channel.statistic_id)
+        store.seed(
+            pv_channel.statistic_id,
+            datetime(2025, 10, 5, 22, tzinfo=timezone.utc),
+            420.0,
+        )
+        store.seed(
+            grid_channel.statistic_id,
+            datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
+            120.0,
+        )
+        now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+
+        await importer.async_import(1, repair=False, now=now)
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2025, 10, 6), date(2026, 10, 5)),
+                (date(2026, 10, 5), date(2026, 10, 5)),
+            ],
+        )
+        pv_key = (pv_channel.statistic_id, schema_version)
+        grid_key = (grid_channel.statistic_id, schema_version)
+        self.assertFalse(state.presence[pv_key])
+        self.assertTrue(state.presence[grid_key])
+        self.assertTrue(state.is_complete(*pv_key))
+        self.assertTrue(state.is_complete(*grid_key))
+
+    async def test_restore_check_reads_full_window_before_resetting(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        importer: ScriptedFetchImporter
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=store.persisted,
+            statistics_reader=store.read,
+            fetch_factory=lambda *args: successful_fetch(
+                importer,
+                emit=False,
+            )(*args),
+        )
+        mark_complete(state, importer, has_data=True)
+        statistic_id = importer.channels[0].statistic_id
+        store.seed(
+            statistic_id,
+            datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
+            420.0,
+        )
+        # More than the short refresh read's capacity of future rows can hide
+        # the valid supported row until the full-window confirmation read.
+        for offset in range(76):
+            store.seed(
+                statistic_id,
+                datetime(2026, 10, 6, tzinfo=timezone.utc)
+                + timedelta(hours=offset),
+                500.0,
+            )
+        now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertEqual(
+            importer.windows,
+            [(date(2026, 10, 5), date(2026, 10, 5))],
+        )
+        key = (statistic_id, power_history.POWER_HISTORY_SCHEMA_VERSION)
+        self.assertTrue(state.presence[key])
+        self.assertTrue(state.is_complete(*key))
 
     async def test_refresh_preserves_previously_stored_missing_hour(
         self,
@@ -1283,6 +1974,82 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_pending_hourly_refresh_preserves_coverage_gap(
+        self,
+    ) -> None:
+        state = FakeHistoryState()
+        store = FakeStatisticsStore()
+        checks = 0
+
+        async def confirm_on_retry(
+            _statistic_id: str,
+            _statistics: list[dict],
+        ) -> bool:
+            nonlocal checks
+            checks += 1
+            return checks >= 2
+
+        importer: ScriptedFetchImporter
+        importer = ScriptedFetchImporter(
+            FakeHass(),
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+            history_state=state,
+            statistics_writer=store.write,
+            persistence_checker=confirm_on_retry,
+            statistics_reader=store.read,
+            fetch_factory=lambda *args: successful_fetch(importer)(*args),
+        )
+        last_verified = date(2026, 10, 5)
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=last_verified,
+        )
+        now = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+        statistic_id = importer.channels[0].statistic_id
+        key = (statistic_id, power_history.POWER_HISTORY_SCHEMA_VERSION)
+
+        await importer.async_import(1, repair=False, now=now)
+
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "persistence_pending",
+        )
+        self.assertEqual(state.checked_through(*key), last_verified)
+
+        # A repair first confirms the retained Recorder batch. Finalizing that
+        # isolated current-day result must still leave the gap visible.
+        await importer.async_import(
+            3,
+            repair=True,
+            now=now + timedelta(hours=6),
+        )
+
+        self.assertEqual(len(importer.windows), 1)
+        self.assertEqual(state.checked_through(*key), last_verified)
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "completed",
+        )
+
+        await importer.async_import(
+            3,
+            repair=True,
+            now=now + timedelta(hours=6),
+        )
+
+        self.assertEqual(
+            importer.windows,
+            [
+                (date(2026, 10, 12), date(2026, 10, 12)),
+                (date(2026, 10, 6), date(2026, 10, 12)),
+            ],
+        )
+        self.assertEqual(state.checked_through(*key), now.date())
+
     async def test_pending_persistence_retries_after_clock_rollback(
         self,
     ) -> None:
@@ -1310,10 +2077,16 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
             statistics_reader=store.read,
             fetch_factory=lambda *args: successful_fetch(importer)(*args),
         )
+        mark_complete(
+            state,
+            importer,
+            has_data=False,
+            checked_through=date(2026, 10, 5),
+        )
 
         await importer.async_import(
             1,
-            repair=True,
+            repair=False,
             now=datetime(2026, 10, 12, 12, tzinfo=timezone.utc),
         )
         self.assertEqual(len(importer.windows), 1)
@@ -1339,17 +2112,17 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             importer.diagnostic_status["persistence_confirmation_pending"]
         )
-        self.assertEqual(
+        self.assertIsNone(
             state.checked_through(
                 importer.channels[0].statistic_id,
                 power_history.POWER_HISTORY_SCHEMA_VERSION,
-            ),
-            date(2026, 10, 12),
+            )
         )
 
-        # Finalizing the retained batch deliberately preserves its original
-        # future coverage.  The following scheduled repair must recognize and
-        # replace that state with the newly supported rolling window.
+        # The retained write is durable, but its scan state is invalidated
+        # because the rollback moved the supported window. The next repair
+        # therefore rebuilds that complete window rather than trusting the
+        # pending batch's old date range.
         await importer.async_import(
             3,
             repair=True,
@@ -1368,7 +2141,7 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
             ),
             date(2026, 10, 5),
         )
-        self.assertEqual(importer.diagnostic_status["last_mode"], "repair")
+        self.assertEqual(importer.diagnostic_status["last_mode"], "initial")
 
     async def test_pending_persistence_never_refetches_portal_in_runtime(
         self,

@@ -36,6 +36,14 @@ All notable changes to this project are documented in this file.
   exposes earlier days than a saved resume prefix or leaves completed coverage
   in the future, and retry retained Recorder batches immediately when their
   retry timestamp is ahead of the current clock
+- Advance historical power coverage only across a contiguous queried range.
+  Isolated hourly refreshes after a suspend or forward clock jump now retain a
+  safe catch-up cursor, including across delayed Recorder confirmation and a
+  subsequent clock rollback, instead of permanently skipping intervening days
+- Invalidate a stale non-empty power-history marker before rebuilding an empty
+  supported window, including mixed-channel scans, so a successful empty
+  rebuild converges instead of repeating a 365-day portal scan. A suspicious
+  short Recorder read is confirmed against the full window before reset
 
 ## [0.7.5] - 2026-10-05
 
