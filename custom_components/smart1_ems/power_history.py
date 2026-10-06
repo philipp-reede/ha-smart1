@@ -691,13 +691,13 @@ class Smart1PowerHistoryImporter:
     def _record_start(record: Mapping[str, Any]) -> datetime | None:
         """Return one Recorder timestamp normalized to UTC."""
         raw_start = record.get("start")
-        if isinstance(raw_start, datetime):
-            if raw_start.tzinfo is None or raw_start.utcoffset() is None:
-                return None
-            return raw_start.astimezone(timezone.utc)
         try:
+            if isinstance(raw_start, datetime):
+                if raw_start.tzinfo is None or raw_start.utcoffset() is None:
+                    return None
+                return raw_start.astimezone(timezone.utc)
             return datetime.fromtimestamp(float(raw_start), timezone.utc)
-        except (TypeError, ValueError, OSError):
+        except (TypeError, ValueError, OverflowError, OSError):
             return None
 
     async def _statistics_persisted(
@@ -1492,7 +1492,9 @@ class Smart1PowerHistoryImporter:
             ) * MAX_HOURLY_RECORDS_PER_DAY
         )
         try:
-            existing_by_key = await self._read_existing_by_key(record_count)
+            raw_existing_by_key = await self._read_existing_by_key(
+                record_count
+            )
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning(
                 "Unable to inspect smart1 power statistics (%s)",
@@ -1524,18 +1526,22 @@ class Smart1PowerHistoryImporter:
 
         def has_stale_presence(
             records_by_key: Mapping[str, list[Mapping[str, Any]]],
+            *,
+            inconclusive_keys: set[str] | None = None,
         ) -> bool:
+            inconclusive = inconclusive_keys or set()
             return bool(self.history_state) and any(
                 self.history_state.data_presence(
                     channel.statistic_id,
                     POWER_HISTORY_SCHEMA_VERSION,
                 )
                 is True
+                and channel.key not in inconclusive
                 and not records_by_key[channel.key]
                 for channel in self.channels
             )
 
-        existing_by_key = supported_records(existing_by_key)
+        existing_by_key = supported_records(raw_existing_by_key)
         if (
             record_count < full_record_count
             and has_stale_presence(existing_by_key)
@@ -1544,9 +1550,10 @@ class Smart1PowerHistoryImporter:
             # hiding older but still supported Recorder data. Confirm against
             # the full supported capacity before invalidating durable state.
             try:
-                existing_by_key = supported_records(
-                    await self._read_existing_by_key(full_record_count)
+                raw_existing_by_key = await self._read_existing_by_key(
+                    full_record_count
                 )
+                existing_by_key = supported_records(raw_existing_by_key)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning(
                     "Unable to inspect smart1 power statistics (%s)",
@@ -1554,9 +1561,19 @@ class Smart1PowerHistoryImporter:
                 )
                 self._last_result = "recorder_unavailable"
                 return
-        if has_stale_presence(existing_by_key):
+        saturated_keys = {
+            channel_key
+            for channel_key, records in raw_existing_by_key.items()
+            if len(records) >= full_record_count
+        }
+        if has_stale_presence(
+            existing_by_key,
+            inconclusive_keys=saturated_keys,
+        ):
             # A DB restore or manual statistics removal invalidates a
-            # successful non-empty marker. Recreate the supported window.
+            # successful non-empty marker. Recreate the supported window. A
+            # capacity-sized read containing only future rows is inconclusive:
+            # older supported rows can still exist beyond the query limit.
             full_scan = True
             start_date = oldest_supported
             retry_dates_by_key = {}
