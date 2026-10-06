@@ -700,6 +700,27 @@ class Smart1PowerHistoryImporter:
         except (TypeError, ValueError, OverflowError, OSError):
             return None
 
+    @classmethod
+    def _saturated_read_may_hide_supported_rows(
+        cls,
+        records: list[Mapping[str, Any]],
+        *,
+        record_limit: int,
+        supported_start: datetime,
+    ) -> bool:
+        """Return whether a newest-first limited read is inconclusive."""
+        if len(records) < record_limit:
+            return False
+        # Home Assistant selects the newest Recorder rows before applying the
+        # limit. Reaching one older row proves that every omitted row is older
+        # still, so none of them can belong to the supported window. Invalid
+        # timestamps cannot establish that lower boundary.
+        return not any(
+            record_start < supported_start
+            for record in records
+            if (record_start := cls._record_start(record)) is not None
+        )
+
     async def _statistics_persisted(
         self,
         statistic_id: str,
@@ -1561,19 +1582,36 @@ class Smart1PowerHistoryImporter:
                 )
                 self._last_result = "recorder_unavailable"
                 return
-        saturated_keys = {
+        inconclusive_keys = {
             channel_key
             for channel_key, records in raw_existing_by_key.items()
-            if len(records) >= full_record_count
+            if self._saturated_read_may_hide_supported_rows(
+                records,
+                record_limit=full_record_count,
+                supported_start=supported_start,
+            )
+        }
+        preserved_presence_keys = {
+            channel.key
+            for channel in self.channels
+            if channel.key in inconclusive_keys
+            and self.history_state is not None
+            and self.history_state.data_presence(
+                channel.statistic_id,
+                POWER_HISTORY_SCHEMA_VERSION,
+            )
+            is True
         }
         if has_stale_presence(
             existing_by_key,
-            inconclusive_keys=saturated_keys,
+            inconclusive_keys=inconclusive_keys,
         ):
             # A DB restore or manual statistics removal invalidates a
             # successful non-empty marker. Recreate the supported window. A
-            # capacity-sized read containing only future rows is inconclusive:
-            # older supported rows can still exist beyond the query limit.
+            # capacity-sized newest-first read with no older valid boundary
+            # is inconclusive: newer or corrupt rows can hide supported rows
+            # beyond the query limit. Preserve that channel's prior positive
+            # marker when another channel makes the shared rebuild necessary.
             full_scan = True
             start_date = oldest_supported
             retry_dates_by_key = {}
@@ -1671,7 +1709,10 @@ class Smart1PowerHistoryImporter:
             batches=batches,
             expected_versions=expected_versions,
             existing_has_data={
-                channel.key: bool(existing_by_key[channel.key])
+                channel.key: (
+                    bool(existing_by_key[channel.key])
+                    or channel.key in preserved_presence_keys
+                )
                 for channel in self.channels
             },
             result=result,

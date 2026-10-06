@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Distinguish saturated Recorder reads that contain an older boundary row from
+  reads containing only future or malformed timestamps. An old newest-first
+  result now triggers the required supported-window repair once, while truly
+  inconclusive channels retain their prior positive data marker
+
 ## [0.8.0] - 2026-10-06
 
 ### Added
