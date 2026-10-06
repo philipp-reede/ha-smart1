@@ -32,6 +32,10 @@ All notable changes to this project are documented in this file.
 - Discard restored or clock-shifted power-history progress that points beyond
   the current day and restart the supported window instead of repeatedly
   issuing an empty request range
+- Rebuild the complete supported power-history window when a clock rollback
+  exposes earlier days than a saved resume prefix or leaves completed coverage
+  in the future, and retry retained Recorder batches immediately when their
+  retry timestamp is ahead of the current clock
 
 ## [0.7.5] - 2026-10-05
 
