@@ -812,13 +812,17 @@ class Smart1PowerHistoryImporter:
             return oldest_supported, False
         if any(
             item is not None
-            and getattr(item, "checked_through") >= today
+            and (
+                getattr(item, "checked_through") >= today
+                or getattr(item, "oldest_supported") > oldest_supported
+            )
             for item in progress
         ):
             # A clock rollback or newer restored backup can leave the next
-            # resume date beyond the request window. Rebuild the supported
-            # window and discard every channel's shared prefix so it cannot
-            # be merged back into the replacement progress.
+            # resume date beyond the request window or move its beginning
+            # before the saved scan prefix. Rebuild the supported window and
+            # discard every channel's shared prefix so it cannot be merged
+            # back into the replacement progress.
             return oldest_supported, True
         if any(item is None for item in progress):
             return oldest_supported, False
@@ -835,8 +839,8 @@ class Smart1PowerHistoryImporter:
             False,
         )
 
-    def _restart_incomplete_scan(self) -> bool:
-        """Forget invalid scan markers without removing Recorder rows."""
+    def _restart_scan_state(self) -> bool:
+        """Forget invalid scan state without removing Recorder rows."""
         if not self.history_state:
             return True
         forgetter = getattr(
@@ -1152,10 +1156,12 @@ class Smart1PowerHistoryImporter:
             self._last_result = "persistence_pending"
             return True
 
-        pending_age = max(
-            timedelta(),
-            now_utc - pending.last_attempt_at,
-        )
+        pending_age = now_utc - pending.last_attempt_at
+        if pending_age < timedelta():
+            # A wall-clock rollback makes the retained retry timestamp
+            # meaningless. Retry the already fetched batch immediately so a
+            # future timestamp cannot block Recorder recovery for days.
+            pending_age = PERSISTENCE_RETRY_INTERVAL
         if pending_age < PERSISTENCE_RETRY_INTERVAL:
             self._last_result = "persistence_pending"
             return True
@@ -1294,7 +1300,25 @@ class Smart1PowerHistoryImporter:
             oldest_supported,
             today - timedelta(days=refresh_days - 1),
         )
-        if full_scan:
+        coverage = [
+            self._checked_through(channel) for channel in self.channels
+        ]
+        if any(
+            checked is not None and checked > today
+            for checked in coverage
+        ):
+            # Completed state from a future clock must not make the newly
+            # supported beginning of the rolling window look covered. Reset
+            # every channel together before rebuilding that window.
+            full_scan = True
+            start_date = oldest_supported
+            self._last_mode = "repair"
+            if not self._restart_scan_state():
+                self._last_result = (
+                    "inactive" if not self._is_active() else "state_changed"
+                )
+                return
+        elif full_scan:
             start_date, reset_incomplete_progress = self._resume_start(
                 oldest_supported,
                 source_time_zone,
@@ -1303,16 +1327,13 @@ class Smart1PowerHistoryImporter:
             self._last_mode = "initial"
             if (
                 reset_incomplete_progress
-                and not self._restart_incomplete_scan()
+                and not self._restart_scan_state()
             ):
                 self._last_result = (
                     "inactive" if not self._is_active() else "state_changed"
                 )
                 return
         else:
-            coverage = [
-                self._checked_through(channel) for channel in self.channels
-            ]
             if repair and any(checked is None for checked in coverage):
                 # A schema marker without coverage cannot prove which outage
                 # days were already queried. Rebuild the supported window.
