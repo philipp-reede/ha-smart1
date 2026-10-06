@@ -127,6 +127,8 @@ class _PendingPersistence:
     retry_date: date | None
     retry_dates_by_key: Mapping[str, date]
     retry_completed: bool
+    scan_start: date
+    previous_prefix: Mapping[str, date | None]
     today: date
     oldest_supported: date
     source_time_zone: str
@@ -724,7 +726,7 @@ class Smart1PowerHistoryImporter:
         *,
         has_data: bool,
         expected_version: int,
-        checked_through: date,
+        checked_through: date | None,
         oldest_supported: date,
         source_time_zone: str,
         incomplete_days: set[date],
@@ -797,6 +799,25 @@ class Smart1PowerHistoryImporter:
         if not callable(getter):
             return None
         return getter(channel.statistic_id, POWER_HISTORY_SCHEMA_VERSION)
+
+    def _contiguous_prefix(
+        self,
+        channel: PowerHistoryChannel,
+        source_time_zone: str,
+    ) -> date | None:
+        """Return this channel's durable completed or resumable prefix."""
+        candidates = [self._checked_through(channel)]
+        progress = self._incomplete_progress(channel)
+        if (
+            progress is not None
+            and getattr(progress, "source_time_zone", None)
+            == source_time_zone
+        ):
+            candidates.append(getattr(progress, "checked_through", None))
+        return max(
+            (candidate for candidate in candidates if candidate is not None),
+            default=None,
+        )
 
     def _resume_start(
         self,
@@ -1036,11 +1057,44 @@ class Smart1PowerHistoryImporter:
         if checked_through is None:
             self._last_result = "fetch_incomplete"
             return
+        contiguous_checked_through = {
+            channel.key: self._contiguous_checked_through(
+                pending,
+                channel,
+                checked_through,
+            )
+            for channel in self.channels
+        }
+        if any(
+            value is None or value < pending.oldest_supported
+            for value in contiguous_checked_through.values()
+        ):
+            # There is no safe prefix inside the current supported window.
+            # Persisting an older date as resumable progress is invalid, and
+            # claiming the isolated refresh date would skip the gap. Forget
+            # the stale marker so the next run rebuilds the complete window.
+            if not self._restart_scan_state():
+                self._last_result = (
+                    "inactive" if not self._is_active() else "state_changed"
+                )
+                return
+            self._last_result = "fetch_incomplete"
+            return
         if not result.completed or checked_through != pending.today:
+            # A current-day refresh can be separated from durable coverage by
+            # an unchecked date range after a suspend or wall-clock jump. Do
+            # not turn that isolated response into resumable progress beyond
+            # the gap. With no prior prefix there is nothing safe to persist;
+            # the next repair will rebuild the supported window.
+            progress_checked_through = min(
+                value
+                for value in contiguous_checked_through.values()
+                if value is not None
+            )
             progress_recorded = await self._record_incomplete_progress(
                 pending.batches,
                 expected_versions=pending.expected_versions,
-                checked_through=checked_through,
+                checked_through=progress_checked_through,
                 oldest_supported=pending.oldest_supported,
                 source_time_zone=pending.source_time_zone,
                 existing_has_data_by_key=pending.existing_has_data,
@@ -1049,6 +1103,34 @@ class Smart1PowerHistoryImporter:
             )
             self._last_result = (
                 "fetch_incomplete" if progress_recorded else "state_changed"
+            )
+            return
+
+        if any(
+            value != pending.today
+            for value in contiguous_checked_through.values()
+        ):
+            # The portal response itself is complete, but it did not join the
+            # previously verified prefix. Keep that safe common prefix as
+            # resumable state. Besides making the next normal run catch up,
+            # its saved window start lets a subsequent clock rollback detect
+            # that newly supported older dates require a full rebuild.
+            progress_recorded = await self._record_incomplete_progress(
+                pending.batches,
+                expected_versions=pending.expected_versions,
+                checked_through=min(
+                    value
+                    for value in contiguous_checked_through.values()
+                    if value is not None
+                ),
+                oldest_supported=pending.oldest_supported,
+                source_time_zone=pending.source_time_zone,
+                existing_has_data_by_key=pending.existing_has_data,
+                incomplete_days_by_key=result.incomplete_days,
+                complete_days_by_key=result.complete_days,
+            )
+            self._last_result = (
+                "completed" if progress_recorded else "state_changed"
             )
             return
 
@@ -1106,7 +1188,7 @@ class Smart1PowerHistoryImporter:
                 expected_version=pending.expected_versions[
                     channel.statistic_id
                 ],
-                checked_through=pending.today,
+                checked_through=contiguous_checked_through[channel.key],
                 oldest_supported=pending.oldest_supported,
                 source_time_zone=pending.source_time_zone,
                 incomplete_days=incomplete_days,
@@ -1132,10 +1214,33 @@ class Smart1PowerHistoryImporter:
 
         self._last_result = "completed"
 
+    @staticmethod
+    def _contiguous_checked_through(
+        pending: _PendingPersistence,
+        channel: PowerHistoryChannel,
+        fetched_through: date,
+    ) -> date | None:
+        """Advance coverage only when the fetched range joins its prefix."""
+        previous = pending.previous_prefix.get(channel.key)
+        next_unchecked = (
+            pending.oldest_supported
+            if previous is None
+            else max(
+                pending.oldest_supported,
+                previous + timedelta(days=1),
+            )
+        )
+        if pending.scan_start <= next_unchecked:
+            if previous is not None:
+                return max(previous, fetched_through)
+            return fetched_through
+        return previous
+
     async def _resume_pending_persistence(
         self,
         *,
         now_utc: datetime,
+        today: date,
         repair: bool,
     ) -> bool:
         """Retry a retained Recorder batch without contacting the portal."""
@@ -1192,6 +1297,14 @@ class Smart1PowerHistoryImporter:
             return True
         if all(persisted_by_key.values()):
             await self._finalize_persisted_batch(pending)
+            if (
+                today < pending.today
+                and self._last_result in {"completed", "fetch_incomplete"}
+                and not self._restart_scan_state()
+            ):
+                self._last_result = (
+                    "inactive" if not self._is_active() else "state_changed"
+                )
             if self._pending_persistence is pending:
                 self._pending_persistence = None
             return True
@@ -1284,13 +1397,14 @@ class Smart1PowerHistoryImporter:
             self._last_result = "invalid_time_zone"
             return
 
+        today = now_utc.astimezone(local_tz).date()
         if await self._resume_pending_persistence(
             now_utc=now_utc,
+            today=today,
             repair=repair,
         ):
             return
 
-        today = now_utc.astimezone(local_tz).date()
         oldest_supported = today - timedelta(days=POWER_HISTORY_DAYS - 1)
         full_scan = self._needs_full_scan() or any(
             self._incomplete_progress(channel) is not None
@@ -1367,8 +1481,11 @@ class Smart1PowerHistoryImporter:
             else {}
         )
         retry_date = min(retry_dates_by_key.values(), default=None)
-        record_count = (
+        full_record_count = (
             POWER_HISTORY_DAYS * MAX_HOURLY_RECORDS_PER_DAY
+        )
+        record_count = (
+            full_record_count
             if full_scan or retry_date is not None
             else (
                 (today - start_date).days + 3
@@ -1388,26 +1505,56 @@ class Smart1PowerHistoryImporter:
             time.min,
             local_tz,
         ).astimezone(timezone.utc) - timedelta(hours=1)
-        existing_by_key = {
-            channel_key: [
-                record
-                for record in records
-                if (
-                    (record_start := self._record_start(record)) is not None
-                    and supported_start <= record_start < now_utc
+
+        def supported_records(
+            records_by_key: Mapping[str, list[Mapping[str, Any]]],
+        ) -> dict[str, list[Mapping[str, Any]]]:
+            return {
+                channel_key: [
+                    record
+                    for record in records
+                    if (
+                        (record_start := self._record_start(record))
+                        is not None
+                        and supported_start <= record_start < now_utc
+                    )
+                ]
+                for channel_key, records in records_by_key.items()
+            }
+
+        def has_stale_presence(
+            records_by_key: Mapping[str, list[Mapping[str, Any]]],
+        ) -> bool:
+            return bool(self.history_state) and any(
+                self.history_state.data_presence(
+                    channel.statistic_id,
+                    POWER_HISTORY_SCHEMA_VERSION,
                 )
-            ]
-            for channel_key, records in existing_by_key.items()
-        }
-        if not full_scan and self.history_state and any(
-            self.history_state.data_presence(
-                channel.statistic_id,
-                POWER_HISTORY_SCHEMA_VERSION,
+                is True
+                and not records_by_key[channel.key]
+                for channel in self.channels
             )
-            is True
-            and not existing_by_key[channel.key]
-            for channel in self.channels
+
+        existing_by_key = supported_records(existing_by_key)
+        if (
+            record_count < full_record_count
+            and has_stale_presence(existing_by_key)
         ):
+            # The short refresh read can contain only future/restored rows,
+            # hiding older but still supported Recorder data. Confirm against
+            # the full supported capacity before invalidating durable state.
+            try:
+                existing_by_key = supported_records(
+                    await self._read_existing_by_key(full_record_count)
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Unable to inspect smart1 power statistics (%s)",
+                    type(err).__name__,
+                )
+                self._last_result = "recorder_unavailable"
+                return
+        if has_stale_presence(existing_by_key):
             # A DB restore or manual statistics removal invalidates a
             # successful non-empty marker. Recreate the supported window.
             full_scan = True
@@ -1415,6 +1562,11 @@ class Smart1PowerHistoryImporter:
             retry_dates_by_key = {}
             retry_date = None
             self._last_mode = "repair"
+            if not self._restart_scan_state():
+                self._last_result = (
+                    "inactive" if not self._is_active() else "state_changed"
+                )
+                return
 
         expected_versions = {
             channel.statistic_id: (
@@ -1510,6 +1662,14 @@ class Smart1PowerHistoryImporter:
             retry_date=retry_date,
             retry_dates_by_key=retry_dates_by_key,
             retry_completed=retry_completed,
+            scan_start=start_date,
+            previous_prefix={
+                channel.key: self._contiguous_prefix(
+                    channel,
+                    source_time_zone,
+                )
+                for channel in self.channels
+            },
             today=today,
             oldest_supported=oldest_supported,
             source_time_zone=source_time_zone,
