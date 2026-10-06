@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Document the exact Energy Dashboard power selections for historical PV,
+  grid and battery data. External grid and battery statistics must use the
+  **Standard** mode because helper-producing modes require live entity states
+
 ## [0.8.1] - 2026-10-06
 
 ### Fixed
