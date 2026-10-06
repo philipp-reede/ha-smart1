@@ -620,6 +620,13 @@ class Smart1PowerHistoryImporter:
             if open_source_date in scanned_dates:
                 channel_complete_days.discard(open_source_date)
                 channel_incomplete_days.add(open_source_date)
+            # A failed next source-day request leaves the closing hour of the
+            # last successfully scanned day outside ``replaceable_hours``.
+            # Keep that prefix-end day retryable even though every earlier
+            # expected hour was present.
+            if not completed and checked_through is not None:
+                channel_complete_days.discard(checked_through)
+                channel_incomplete_days.add(checked_through)
             complete_days[channel.key] = frozenset(channel_complete_days)
             incomplete_days[channel.key] = frozenset(
                 channel_incomplete_days
@@ -795,22 +802,59 @@ class Smart1PowerHistoryImporter:
         self,
         oldest_supported: date,
         source_time_zone: str,
-    ) -> date:
+        today: date,
+    ) -> tuple[date, bool]:
         """Resume only when every channel has the same safe scan prefix."""
         progress = [
             self._incomplete_progress(channel) for channel in self.channels
         ]
-        if not progress or any(item is None for item in progress):
-            return oldest_supported
+        if not progress:
+            return oldest_supported, False
+        if any(
+            item is not None
+            and getattr(item, "checked_through") >= today
+            for item in progress
+        ):
+            # A clock rollback or newer restored backup can leave the next
+            # resume date beyond the request window. Rebuild the supported
+            # window and discard every channel's shared prefix so it cannot
+            # be merged back into the replacement progress.
+            return oldest_supported, True
+        if any(item is None for item in progress):
+            return oldest_supported, False
         if any(
             getattr(item, "source_time_zone", None) != source_time_zone
             for item in progress
         ):
-            return oldest_supported
+            return oldest_supported, False
         checked_through = min(
             getattr(item, "checked_through") for item in progress
         )
-        return max(oldest_supported, checked_through + timedelta(days=1))
+        return (
+            max(oldest_supported, checked_through + timedelta(days=1)),
+            False,
+        )
+
+    def _restart_incomplete_scan(self) -> bool:
+        """Forget invalid scan markers without removing Recorder rows."""
+        if not self.history_state:
+            return True
+        forgetter = getattr(
+            self.history_state,
+            "forget_statistics",
+            None,
+        )
+        if not callable(forgetter):
+            return False
+        forgetter({channel.statistic_id for channel in self.channels})
+        return (
+            self._is_active()
+            and self._needs_full_scan()
+            and all(
+                self._incomplete_progress(channel) is None
+                for channel in self.channels
+            )
+        )
 
     def _next_retry_dates(
         self,
@@ -1251,11 +1295,20 @@ class Smart1PowerHistoryImporter:
             today - timedelta(days=refresh_days - 1),
         )
         if full_scan:
-            start_date = self._resume_start(
+            start_date, reset_incomplete_progress = self._resume_start(
                 oldest_supported,
                 source_time_zone,
+                today,
             )
             self._last_mode = "initial"
+            if (
+                reset_incomplete_progress
+                and not self._restart_incomplete_scan()
+            ):
+                self._last_result = (
+                    "inactive" if not self._is_active() else "state_changed"
+                )
+                return
         else:
             coverage = [
                 self._checked_through(channel) for channel in self.channels

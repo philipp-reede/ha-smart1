@@ -21,6 +21,18 @@ All notable changes to this project are documented in this file.
 - Scope historical power-statistic IDs to the selected portal sources and
   source time zone so configuration changes never clear an existing series
 
+### Fixed
+
+- Reject nonexistent local timestamps during a daylight-saving spring-forward
+  gap and fail closed for hours containing conflicting duplicate measurements,
+  keeping hourly power statistics independent of portal row order
+- Keep the final successfully fetched source day retryable when the following
+  boundary request fails, so interrupted scans cannot permanently omit its
+  closing hour
+- Discard restored or clock-shifted power-history progress that points beyond
+  the current day and restart the supported window instead of repeatedly
+  issuing an empty request range
+
 ## [0.7.5] - 2026-10-05
 
 ### Fixed

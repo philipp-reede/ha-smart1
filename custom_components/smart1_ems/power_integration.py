@@ -62,47 +62,56 @@ def _utc_candidates(
     timestamp: datetime,
     local_tz: ZoneInfo,
 ) -> tuple[datetime, ...]:
-    """Return possible UTC instants for one parsed timestamp."""
+    """Return valid possible UTC instants for one parsed timestamp."""
     if timestamp.tzinfo is not None:
         return (timestamp.astimezone(timezone.utc),)
 
-    fold_zero = timestamp.replace(tzinfo=local_tz, fold=0).astimezone(
-        timezone.utc
+    candidates = {
+        timestamp.replace(tzinfo=local_tz, fold=fold).astimezone(timezone.utc)
+        for fold in (0, 1)
+    }
+    return tuple(
+        candidate
+        for candidate in sorted(candidates)
+        if candidate.astimezone(local_tz).replace(tzinfo=None) == timestamp
     )
-    fold_one = timestamp.replace(tzinfo=local_tz, fold=1).astimezone(
-        timezone.utc
-    )
-    if fold_zero < fold_one:
-        # A backward clock change makes the local timestamp ambiguous.
-        return (fold_zero, fold_one)
-    return (fold_zero,)
 
 
 def _normalize_ambiguous_samples(
     samples: list[tuple[datetime, float]],
     local_tz: ZoneInfo,
-) -> list[tuple[datetime, float]]:
+) -> tuple[list[tuple[datetime, float]], set[datetime]]:
     """Resolve ambiguous wall times from their row-order-independent multiset.
 
     Exact duplicate rows alone are not evidence that both sides of a
     daylight-saving-time fold are present. Distinct values at one wall time do
     prove that the hour repeated. A dense full-hour sequence of duplicates is
     also accepted so two genuinely identical fold profiles remain usable.
+    Conflicting unambiguous samples are excluded from fold support. More than
+    two distinct values cannot fit the two possible UTC instants, so both UTC
+    hours are returned as invalid.
     """
     ambiguous_values: defaultdict[datetime, list[float]] = defaultdict(list)
     non_ambiguous_samples: list[tuple[datetime, float]] = []
     support_by_date: defaultdict[
         date, list[tuple[datetime, float]]
     ] = defaultdict(list)
+    unambiguous_values_by_timestamp: defaultdict[
+        datetime, set[float]
+    ] = defaultdict(set)
 
     for timestamp, value in samples:
         candidates = _utc_candidates(timestamp, local_tz)
+        # A naive wall time in a forward clock-change gap has no UTC instant.
+        if not candidates:
+            continue
         if timestamp.tzinfo is None and len(candidates) > 1:
             ambiguous_values[timestamp].append(value)
             continue
 
         non_ambiguous_samples.append((timestamp, value))
         utc_timestamp = candidates[0]
+        unambiguous_values_by_timestamp[utc_timestamp].add(value)
         local_date = utc_timestamp.astimezone(local_tz).date()
         support_by_date[local_date].append((utc_timestamp, value))
 
@@ -113,8 +122,19 @@ def _normalize_ambiguous_samples(
         groups_by_date[timestamp.date()][timestamp] = values
 
     normalized = list(non_ambiguous_samples)
+    # Invalid support must not influence the ambiguous profile assignment.
+    invalid_utc_hours = {
+        timestamp.replace(minute=0, second=0, microsecond=0)
+        for timestamp, values in unambiguous_values_by_timestamp.items()
+        if len(values) > 1
+    }
     for local_date, date_groups in groups_by_date.items():
-        support_samples = support_by_date[local_date]
+        support_samples = [
+            (timestamp, value)
+            for timestamp, value in support_by_date[local_date]
+            if timestamp.replace(minute=0, second=0, microsecond=0)
+            not in invalid_utc_hours
+        ]
         duplicate_factor = _systematic_duplicate_factor(support_samples)
         if duplicate_factor > 1:
             date_groups = {
@@ -124,6 +144,35 @@ def _normalize_ambiguous_samples(
                 )
                 for timestamp, values in date_groups.items()
             }
+
+        for timestamp, values in date_groups.items():
+            if len(set(values)) <= 2:
+                continue
+            # One repeated wall time has at most one value per UTC fold.
+            invalid_utc_hours.update(
+                candidate.replace(minute=0, second=0, microsecond=0)
+                for candidate in _utc_candidates(timestamp, local_tz)
+            )
+
+        if invalid_utc_hours:
+            date_groups = {
+                timestamp: values
+                for timestamp, values in date_groups.items()
+                if all(
+                    candidate.replace(minute=0, second=0, microsecond=0)
+                    not in invalid_utc_hours
+                    for candidate in _utc_candidates(timestamp, local_tz)
+                )
+            }
+            support_samples = [
+                (timestamp, value)
+                for timestamp, value in support_samples
+                if timestamp.replace(minute=0, second=0, microsecond=0)
+                not in invalid_utc_hours
+            ]
+        if not date_groups:
+            continue
+
         support_timestamps = [
             timestamp for timestamp, _value in support_samples
         ]
@@ -158,7 +207,7 @@ def _normalize_ambiguous_samples(
                 (candidates[single_fold_index], normalized_value)
             )
 
-    return normalized
+    return normalized, invalid_utc_hours
 
 
 def _systematic_duplicate_factor(
@@ -519,7 +568,7 @@ def normalize_power_rows(
     linear_id: str,
     local_tz: ZoneInfo,
 ) -> tuple[tuple[datetime, float], ...]:
-    """Return one point's deduplicated power samples on a UTC timeline."""
+    """Return one point's validated power samples on a UTC timeline."""
     parsed_samples: list[tuple[datetime, float]] = []
 
     for row in rows:
@@ -533,20 +582,35 @@ def normalize_power_rows(
 
         parsed_samples.append((timestamp, value))
 
-    parsed_samples = _normalize_ambiguous_samples(parsed_samples, local_tz)
+    parsed_samples, invalid_utc_hours = _normalize_ambiguous_samples(
+        parsed_samples,
+        local_tz,
+    )
     resolved_timestamps = _resolve_utc_timestamps(
         [timestamp for timestamp, _value in parsed_samples],
         local_tz,
     )
-    samples: dict[datetime, float] = {}
+    values_by_timestamp: defaultdict[datetime, set[float]] = defaultdict(set)
     for timestamp, (_parsed_timestamp, value) in zip(
         resolved_timestamps,
         parsed_samples,
         strict=True,
     ):
-        samples[timestamp] = value
+        values_by_timestamp[timestamp].add(value)
 
-    return tuple(sorted(samples.items()))
+    conflicting_hours = invalid_utc_hours | {
+        timestamp.replace(minute=0, second=0, microsecond=0)
+        for timestamp, values in values_by_timestamp.items()
+        if len(values) > 1
+    }
+    return tuple(
+        sorted(
+            (timestamp, min(values))
+            for timestamp, values in values_by_timestamp.items()
+            if timestamp.replace(minute=0, second=0, microsecond=0)
+            not in conflicting_hours
+        )
+    )
 
 
 def integrate_power_samples(
