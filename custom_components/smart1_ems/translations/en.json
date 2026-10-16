@@ -19,6 +19,19 @@
           "device_id": "Installation"
         }
       },
+      "energy_roles": {
+        "title": "Configure derived energy",
+        "description": "Review the suggested power point for each energy role you want to enable. The suggested points match the detected installation. Leave a role set to — to disable it. You can change these selections later under Configure. Energy is derived from five-minute power data and imported as external statistics.",
+        "data": {
+          "grid_import": "Grid import",
+          "grid_export": "Grid export",
+          "battery_charge": "Battery charge",
+          "battery_discharge": "Battery discharge",
+          "wallbox_consumption": "Wallbox consumption",
+          "heat_pump_consumption": "Heat pump consumption",
+          "auxiliary_heater_consumption": "Auxiliary heater consumption"
+        }
+      },
       "reauth_confirm": {
         "title": "Reconnect smart1 EMS",
         "description": "Enter a valid API key that still has access to this smart1 installation.",
@@ -32,7 +45,9 @@
     },
     "error": {
       "cannot_connect": "Failed to connect to smart1 EMS. Check the API key and try again.",
+      "duplicate_energy_point": "Each measurement point can be assigned to only one energy role.",
       "invalid_auth": "The API key was rejected by the smart1 portal.",
+      "invalid_energy_point": "Select an available measurement point.",
       "no_plants": "No smart1 installations were found for this API key.",
       "wrong_account": "This API key does not provide access to the existing smart1 installation."
     },

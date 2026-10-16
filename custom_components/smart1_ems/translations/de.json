@@ -19,6 +19,19 @@
           "device_id": "Anlage"
         }
       },
+      "energy_roles": {
+        "title": "Abgeleitete Energie konfigurieren",
+        "description": "Prüfe für jede gewünschte Energierolle den vorgeschlagenen Leistungsmesspunkt. Die Vorschläge entsprechen der erkannten Anlage. Mit — bleibt eine Rolle deaktiviert. Du kannst diese Auswahl später unter Konfigurieren ändern. Die Energie wird aus den 5-Minuten-Leistungswerten berechnet und als externe Statistik importiert.",
+        "data": {
+          "grid_import": "Netzbezug",
+          "grid_export": "Netzeinspeisung",
+          "battery_charge": "Batterieladung",
+          "battery_discharge": "Batterieentladung",
+          "wallbox_consumption": "Wallbox-Verbrauch",
+          "heat_pump_consumption": "Wärmepumpen-Verbrauch",
+          "auxiliary_heater_consumption": "Zusatzheizungs-Verbrauch"
+        }
+      },
       "reauth_confirm": {
         "title": "smart1 EMS erneut verbinden",
         "description": "Gib einen gültigen API-Schlüssel ein, der weiterhin Zugriff auf diese smart1 Anlage hat.",
@@ -32,7 +45,9 @@
     },
     "error": {
       "cannot_connect": "Verbindung zu smart1 EMS fehlgeschlagen. Prüfe den API-Schlüssel und versuche es erneut.",
+      "duplicate_energy_point": "Jeder Messpunkt kann nur einer Energierolle zugeordnet werden.",
       "invalid_auth": "Der API-Schlüssel wurde vom smart1 Portal abgelehnt.",
+      "invalid_energy_point": "Wähle einen verfügbaren Messpunkt aus.",
       "no_plants": "Für diesen API-Schlüssel wurden keine smart1 Anlagen gefunden.",
       "wrong_account": "Dieser API-Schlüssel erlaubt keinen Zugriff auf die vorhandene smart1 Anlage."
     },

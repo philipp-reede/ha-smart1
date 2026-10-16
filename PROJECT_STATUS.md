@@ -7,6 +7,8 @@
 - `/plants` is queried automatically
 - A single plant is selected automatically; when an API key exposes multiple
   plants, the config flow asks the user to select one
+- Initial setup discovers eligible power points and asks the user to confirm
+  derived Energy Dashboard roles with detected recommendations preselected
 - Config entries use the stable smart1 `DeviceId` as their unique ID. Existing
   entries are migrated in place, while modern and legacy duplicates are
   rejected without changing device or entity identifiers
@@ -162,8 +164,9 @@
   hourly buckets are explicitly zeroed before cumulative sums are rebuilt, so
   daily fallbacks and changes in detail-profile availability cannot duplicate
   the portal's exact daily total
-- An Options Flow lets the user explicitly map grid, battery, wallbox, heat
-  pump and auxiliary-heater power points to derived energy roles
+- The initial config flow lets the user explicitly map grid, battery, wallbox,
+  heat-pump and auxiliary-heater power points to derived energy roles. The same
+  selections remain editable later through the Options Flow
 - Empty role selections are persisted as explicit choices, so reopening the
   Options Flow or saving an unrelated change cannot silently restore automatic
   recommendations

@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Ask for derived Energy Dashboard roles during initial setup, with detected
+  recommendations preselected and all selections remaining editable later from
+  the integration's Configure dialog
+
 ### Documentation
 
 - Document the exact Energy Dashboard power selections for historical PV,

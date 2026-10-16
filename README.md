@@ -48,6 +48,8 @@ battery, wallbox, heat pump and auxiliary heating.
 
 - UI-based setup using a personal smart1 portal API key
 - Automatic plant and measurement-point discovery
+- Initial Energy Dashboard role selection with detected recommendations;
+  selections remain editable later from the integration's Configure dialog
 - Home Assistant devices for the EMS, PV, grid, battery, wallbox, heat pump and
   auxiliary heater
 - Optional physical inverter devices discovered from the documented inverter
@@ -178,6 +180,8 @@ restart Home Assistant.
 3. Enter your personal API key from the smart1 portal. The field is masked and
    the key is stored in the Home Assistant config entry.
 4. If the key has access to multiple installations, select the desired plant.
+5. Review the suggested power points for the detected Energy Dashboard roles.
+   Leave a role set to **—** if it should remain disabled.
 
 Each plant can be configured only once. If the portal later rejects the stored
 key, Home Assistant opens a repair flow. The replacement key is saved only if
@@ -191,10 +195,11 @@ minutes.
 
 ## Energy Dashboard
 
-Open **Settings → Devices & services → smart1 EMS → Configure** and select the
-power point for every desired energy role. The integration suggests detected
-points, but the selection is explicit because a smart1 installation can expose
-multiple measurement paths for the same physical device.
+During initial setup, the integration suggests and preselects detected power
+points for the available energy roles. The selection remains explicit because
+a smart1 installation can expose multiple measurement paths for the same
+physical device. To review or change the selections later, open **Settings →
+Devices & services → smart1 EMS → Configure**.
 
 After saving the roles, add these statistics in **Settings → Dashboards →
 Energy**:
