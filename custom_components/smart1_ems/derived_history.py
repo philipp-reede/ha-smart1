@@ -22,7 +22,6 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
-    statistics_during_period,
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
@@ -54,9 +53,11 @@ from .power_integration import (
 )
 from .recorder_helpers import (
     async_clear_statistics,
+    async_read_hourly_statistics,
     async_wait_for_recorder_commit,
     async_wait_for_statistics_readback,
     statistics_are_persisted,
+    statistics_readback_period,
     validate_energy_statistics_imports,
 )
 
@@ -1131,11 +1132,15 @@ class Smart1DerivedEnergyImporter:
 
         async def _confirm_role(role_key: str) -> tuple[str, bool]:
             statistics = statistics_by_role[role_key]
+            readback_period = statistics_readback_period(statistics)
+            if readback_period is None:
+                return role_key, False
+            readback_start, readback_end = readback_period
             persisted = await async_wait_for_statistics_readback(
                 statistics,
                 lambda: self._existing_statistics(
                     statistic_ids[role_key],
-                    STATISTICS_LOOKBACK + len(statistics) + 1,
+                    (readback_start, readback_end),
                 ),
                 matcher=statistics_are_persisted,
             )
@@ -1304,9 +1309,18 @@ class Smart1DerivedEnergyImporter:
     async def _existing_statistics(
         self,
         statistic_id: str,
-        record_count: int = STATISTICS_LOOKBACK,
+        record_count: int | tuple[datetime, datetime] = STATISTICS_LOOKBACK,
     ) -> list[Mapping[str, Any]]:
-        """Return recent records for one derived statistic."""
+        """Return recent records or an explicit Recorder time period."""
+        if isinstance(record_count, tuple):
+            start_time, end_time = record_count
+            return await async_read_hourly_statistics(
+                self.hass,
+                statistic_id,
+                start_time,
+                end_time,
+                {"state", "sum"},
+            )
         result = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics,
             self.hass,
@@ -1322,17 +1336,13 @@ class Smart1DerivedEnergyImporter:
         statistic_id: str,
     ) -> list[Mapping[str, Any]]:
         """Return the complete statistic before a time-zone clear/remap."""
-        result = await get_instance(self.hass).async_add_executor_job(
-            statistics_during_period,
+        return await async_read_hourly_statistics(
             self.hass,
+            statistic_id,
             STATISTICS_EPOCH,
-            None,
-            {statistic_id},
-            "hour",
             None,
             {"state", "sum"},
         )
-        return result.get(statistic_id, [])
 
     async def _fetch_hourly_energy(
         self,

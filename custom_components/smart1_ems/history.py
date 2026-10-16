@@ -20,7 +20,6 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
-    statistics_during_period,
 )
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
@@ -42,9 +41,11 @@ from .point import Smart1Point
 from .power_integration import PowerIntegrationResult, integrate_power_rows
 from .recorder_helpers import (
     async_clear_statistics,
+    async_read_hourly_statistics,
     async_wait_for_recorder_commit,
     async_wait_for_statistics_readback,
     statistics_are_persisted,
+    statistics_readback_period,
     validate_energy_statistics_imports,
 )
 
@@ -1160,10 +1161,14 @@ class Smart1PvHistoryImporter:
         if persistence_generation != self._persistence_generation:
             return False
 
+        readback_period = statistics_readback_period(statistics)
+        if readback_period is None:
+            return False
+        readback_start, readback_end = readback_period
         persisted = await async_wait_for_statistics_readback(
             statistics,
             lambda: self._existing_statistics(
-                PV_STATISTICS_LOOKBACK + len(statistics) + 1
+                (readback_start, readback_end),
             ),
             matcher=statistics_are_persisted,
         )
@@ -1289,9 +1294,18 @@ class Smart1PvHistoryImporter:
 
     async def _existing_statistics(
         self,
-        record_count: int = PV_STATISTICS_LOOKBACK,
+        record_count: int | tuple[datetime, datetime] = PV_STATISTICS_LOOKBACK,
     ) -> list[Mapping[str, Any]]:
-        """Return enough recent records to establish a refresh baseline."""
+        """Return recent records or an explicit Recorder time period."""
+        if isinstance(record_count, tuple):
+            start_time, end_time = record_count
+            return await async_read_hourly_statistics(
+                self.hass,
+                self.statistic_id,
+                start_time,
+                end_time,
+                {"state", "sum"},
+            )
         result = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics,
             self.hass,
@@ -1304,17 +1318,13 @@ class Smart1PvHistoryImporter:
 
     async def _all_existing_statistics(self) -> list[Mapping[str, Any]]:
         """Return the complete long-term statistic before a whole-ID clear."""
-        result = await get_instance(self.hass).async_add_executor_job(
-            statistics_during_period,
+        return await async_read_hourly_statistics(
             self.hass,
+            self.statistic_id,
             PV_STATISTICS_EPOCH,
-            None,
-            {self.statistic_id},
-            "hour",
             None,
             {"state", "sum"},
         )
-        return result.get(self.statistic_id, [])
 
     async def _fetch_daily_energy(
         self,

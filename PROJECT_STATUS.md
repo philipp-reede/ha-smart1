@@ -272,11 +272,13 @@
   and validated first, then queued immediately behind the clear without an
   intervening await, so a timeout or task cancellation cannot leave a delayed
   clear without its replacement. Non-empty imports are marked complete only
-  after every queued state and sum can be read back from Recorder. A tracked
-  background finalizer handles delayed clears or persistence and updates only
-  the active, unchanged schema generation, so overlapping or unloaded runs
-  cannot overwrite newer state. Failure to inspect optional Recorder metadata
-  does not block live sensors
+  after every queued state and sum can be read back from Recorder. Persistence
+  confirmation uses the exact half-open time range of each queued batch, so
+  unrelated newer or future-dated rows cannot hide it behind Recorder's result
+  limit. A tracked background finalizer handles delayed clears or persistence
+  and updates only the active, unchanged schema generation, so overlapping or
+  unloaded runs cannot overwrite newer state. Failure to inspect optional
+  Recorder metadata does not block live sensors
 - PV history schemas 7/8 and derived-energy schema 6 perform one
   journal-protected whole-statistic canonicalization for layouts written before
   the durable migration journal. Completion markers that an older release may

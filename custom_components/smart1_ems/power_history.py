@@ -43,9 +43,11 @@ from .power_integration import (
     normalize_power_rows,
 )
 from .recorder_helpers import (
+    async_read_hourly_statistics,
     async_wait_for_recorder_commit,
     async_wait_for_statistics_readback,
     statistics_are_persisted,
+    statistics_readback_period,
     validate_power_statistics_imports,
 )
 
@@ -730,13 +732,18 @@ class Smart1PowerHistoryImporter:
             return True
         if self._persistence_checker is not None:
             return await self._persistence_checker(statistic_id, statistics)
+        readback_period = statistics_readback_period(statistics)
+        if readback_period is None:
+            return False
+        readback_start, readback_end = readback_period
         return await async_wait_for_statistics_readback(
             statistics,
-            lambda: self._existing_statistics(
+            lambda: async_read_hourly_statistics(
+                self.hass,
                 statistic_id,
-                POWER_HISTORY_DAYS * MAX_HOURLY_RECORDS_PER_DAY
-                + len(statistics)
-                + 1,
+                readback_start,
+                readback_end,
+                {"mean"},
             ),
             matcher=statistics_are_persisted,
         )
