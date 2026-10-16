@@ -71,6 +71,8 @@ if not hasattr(statistics, "async_add_external_statistics"):
     statistics.async_add_external_statistics = lambda *args, **kwargs: None
 if not hasattr(statistics, "get_last_statistics"):
     statistics.get_last_statistics = lambda *args, **kwargs: {}
+if not hasattr(statistics, "statistics_during_period"):
+    statistics.statistics_during_period = lambda *args, **kwargs: {}
 
 const = sys.modules.setdefault(
     "homeassistant.const",
@@ -685,6 +687,13 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
         )
         self.get_instance.start()
         self.addCleanup(self.get_instance.stop)
+        self.recorder_get_instance = patch.object(
+            recorder,
+            "get_instance",
+            return_value=self.recorder,
+        )
+        self.recorder_get_instance.start()
+        self.addCleanup(self.recorder_get_instance.stop)
 
     async def test_fetches_each_source_day_once_and_signs_composites(self) -> None:
         api = FakeApi(
@@ -1645,6 +1654,46 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
             importer.diagnostic_status["last_result"],
             "persistence_pending",
         )
+
+    async def test_persistence_readback_uses_exact_batch_period(self) -> None:
+        hass = FakeHass()
+        importer = power_history.Smart1PowerHistoryImporter(
+            hass,
+            FakeApi({}),
+            pv_power_point=point("pv"),
+            role_points={},
+        )
+        statistic_id = importer.channels[0].statistic_id
+        first_start = datetime(2026, 9, 1, 4, tzinfo=timezone.utc)
+        last_start = datetime(2026, 10, 5, 11, tzinfo=timezone.utc)
+        expected = [
+            StatisticData(start=last_start, mean=200.0),
+            StatisticData(start=first_start, mean=100.0),
+        ]
+        period_reader = AsyncMock(return_value=expected)
+
+        with (
+            patch.object(
+                power_history,
+                "async_read_hourly_statistics",
+                period_reader,
+            ),
+            patch.object(power_history, "get_last_statistics") as newest_reader,
+        ):
+            persisted = await importer._statistics_persisted(
+                statistic_id,
+                expected,
+            )
+
+        self.assertTrue(persisted)
+        period_reader.assert_awaited_once_with(
+            hass,
+            statistic_id,
+            first_start,
+            last_start + timedelta(hours=1),
+            {"mean"},
+        )
+        newest_reader.assert_not_called()
 
     async def test_zone_change_uses_new_id_and_never_clears_old_rows(
         self,

@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 from importlib.util import module_from_spec, spec_from_file_location
 import logging
 from pathlib import Path
+import sys
+import types
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -59,6 +61,94 @@ class Smart1RecorderHelpersTest(unittest.TestCase):
         observed[0]["mean"] = -1.0
         self.assertFalse(
             recorder_helpers.statistics_are_persisted(expected, observed)
+        )
+
+    def test_statistics_readback_period_is_minimal_and_utc(self) -> None:
+        early = datetime(2026, 8, 4, 8, tzinfo=timezone.utc)
+        late = datetime(
+            2026,
+            8,
+            4,
+            12,
+            tzinfo=timezone(timedelta(hours=2)),
+        )
+
+        self.assertEqual(
+            recorder_helpers.statistics_readback_period([
+                {"start": late},
+                {"start": early},
+            ]),
+            (early, datetime(2026, 8, 4, 11, tzinfo=timezone.utc)),
+        )
+        self.assertIsNone(
+            recorder_helpers.statistics_readback_period([])
+        )
+        self.assertIsNone(
+            recorder_helpers.statistics_readback_period([
+                {"start": datetime(2026, 8, 4, 8)},
+            ])
+        )
+
+    def test_hourly_statistics_reader_uses_explicit_period(self) -> None:
+        statistic_id = "smart1_ems:grid_import_ab12"
+        start = datetime(2026, 8, 4, 8, tzinfo=timezone.utc)
+        end = start + timedelta(hours=3)
+        expected_rows = [{"start": start.timestamp(), "sum": 1.0}]
+        calls = []
+
+        def statistics_during_period(*args):
+            calls.append((*args[:-1], set(args[-1])))
+            # Home Assistant may mutate this input set internally. The shared
+            # helper must pass a copy instead of the caller's set.
+            args[-1].discard("sum")
+            return {statistic_id: expected_rows}
+
+        class _Recorder:
+            async def async_add_executor_job(self, target, *args):
+                return target(*args)
+
+        homeassistant = types.ModuleType("homeassistant")
+        homeassistant.__path__ = []
+        components = types.ModuleType("homeassistant.components")
+        components.__path__ = []
+        recorder = types.ModuleType("homeassistant.components.recorder")
+        recorder.__path__ = []
+        recorder.get_instance = lambda hass: _Recorder()
+        statistics = types.ModuleType(
+            "homeassistant.components.recorder.statistics"
+        )
+        statistics.statistics_during_period = statistics_during_period
+        statistic_types = {"state", "sum"}
+
+        with patch.dict(sys.modules, {
+            "homeassistant": homeassistant,
+            "homeassistant.components": components,
+            "homeassistant.components.recorder": recorder,
+            "homeassistant.components.recorder.statistics": statistics,
+        }):
+            result = asyncio.run(
+                recorder_helpers.async_read_hourly_statistics(
+                    object(),
+                    statistic_id,
+                    start,
+                    end,
+                    statistic_types,
+                )
+            )
+
+        self.assertEqual(result, expected_rows)
+        self.assertEqual(statistic_types, {"state", "sum"})
+        self.assertEqual(
+            calls,
+            [(
+                ANY,
+                start,
+                end,
+                {statistic_id},
+                "hour",
+                None,
+                {"state", "sum"},
+            )],
         )
 
     def test_power_statistics_validation_accepts_signed_means(self) -> None:

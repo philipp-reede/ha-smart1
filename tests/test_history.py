@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import importlib
 from pathlib import Path
 import sys
@@ -28,8 +28,14 @@ components = sys.modules.setdefault(
 )
 components.__path__ = []
 
+class _EmptyRecorder:
+    async def async_add_executor_job(self, *_args, **_kwargs):
+        """Return an empty default read for tests that mock the matcher."""
+        return {}
+
+
 recorder = types.ModuleType("homeassistant.components.recorder")
-recorder.get_instance = lambda hass: None
+recorder.get_instance = lambda hass: _EmptyRecorder()
 recorder.__path__ = []
 sys.modules["homeassistant.components.recorder"] = recorder
 
@@ -98,6 +104,16 @@ derived_history = importlib.import_module(
 recorder_helpers = importlib.import_module(
     "custom_components.smart1_ems.recorder_helpers"
 )
+
+
+async def _single_statistics_readback(
+    expected,
+    readback,
+    *,
+    matcher,
+) -> bool:
+    """Run one deterministic Recorder readback without retry sleeps."""
+    return matcher(expected, await readback())
 
 
 class _HistoryState:
@@ -612,30 +628,140 @@ class Smart1HistoryTest(unittest.TestCase):
                 "sum": 1.0,
             }
         ]
-        recorder_instance = types.SimpleNamespace(
-            async_add_executor_job=AsyncMock(
-                return_value={importer.statistic_id: expected}
-            )
-        )
-
         with patch.object(
             history,
-            "get_instance",
-            return_value=recorder_instance,
-        ):
+            "async_read_hourly_statistics",
+            new=AsyncMock(return_value=expected),
+        ) as read_statistics:
             result = asyncio.run(importer._all_existing_statistics())
 
         self.assertEqual(result, expected)
-        recorder_instance.async_add_executor_job.assert_awaited_once_with(
-            history.statistics_during_period,
+        read_statistics.assert_awaited_once_with(
             hass,
+            importer.statistic_id,
             history.PV_STATISTICS_EPOCH,
-            None,
-            {importer.statistic_id},
-            "hour",
             None,
             {"state", "sum"},
         )
+
+    def test_complete_derived_history_read_uses_unbounded_hourly_query(
+        self,
+    ) -> None:
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        point = types.SimpleNamespace(id="grid", name="Bezug")
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {"grid_import": point},
+        )
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            point.id,
+        )
+        expected = [
+            {
+                "start": datetime(2025, 1, 1, tzinfo=timezone.utc),
+                "state": 1.0,
+                "sum": 1.0,
+            }
+        ]
+
+        with patch.object(
+            derived_history,
+            "async_read_hourly_statistics",
+            new=AsyncMock(return_value=expected),
+        ) as read_statistics:
+            result = asyncio.run(
+                importer._all_existing_statistics(statistic_id)
+            )
+
+        self.assertEqual(result, expected)
+        read_statistics.assert_awaited_once_with(
+            hass,
+            statistic_id,
+            derived_history.STATISTICS_EPOCH,
+            None,
+            {"state", "sum"},
+        )
+
+    def test_pv_persistence_reads_exact_unsorted_batch_period(self) -> None:
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+            types.SimpleNamespace(id="pv"),
+            history_state=state,
+        )
+        first_start = datetime(2026, 8, 4, 8, tzinfo=timezone.utc)
+        last_start = first_start + timedelta(hours=2)
+        statistics_batch = [
+            history.StatisticData(
+                start=last_start,
+                state=2.0,
+                sum=3.0,
+            ),
+            history.StatisticData(
+                start=first_start,
+                state=1.0,
+                sum=1.0,
+            ),
+        ]
+        persisted_rows = [
+            {
+                "start": first_start.timestamp(),
+                "state": 1.0,
+                "sum": 1.0,
+            },
+            {
+                "start": last_start.timestamp(),
+                "state": 2.0,
+                "sum": 3.0,
+            },
+        ]
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock()
+        )
+        importer._persistence_generation = 1
+
+        with (
+            patch.object(
+                history,
+                "async_read_hourly_statistics",
+                new=AsyncMock(return_value=persisted_rows),
+            ) as read_statistics,
+            patch.object(
+                history,
+                "async_wait_for_statistics_readback",
+                side_effect=_single_statistics_readback,
+            ),
+            patch.object(history, "get_last_statistics") as newest_reader,
+        ):
+            confirmed = asyncio.run(
+                importer._async_confirm_statistics_persistence(
+                    recorder_instance,
+                    statistics_batch,
+                    0,
+                    1,
+                )
+            )
+
+        self.assertTrue(confirmed)
+        self.assertTrue(
+            state.is_complete(importer.statistic_id, importer.schema_version)
+        )
+        read_statistics.assert_awaited_once_with(
+            hass,
+            importer.statistic_id,
+            first_start,
+            last_start + timedelta(hours=1),
+            {"state", "sum"},
+        )
+        newest_reader.assert_not_called()
 
     def test_statistics_are_cumulative_and_hour_aligned(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
@@ -4266,16 +4392,12 @@ class Smart1HistoryTest(unittest.TestCase):
         readback_started = asyncio.Event()
         release_readback = asyncio.Event()
 
-        async def existing_statistics(_record_count):
+        async def read_hourly_statistics(*_args):
             readback_started.set()
             await release_readback.wait()
             return [
                 {"start": start.timestamp(), "state": 1.0, "sum": 1.0}
             ]
-
-        importer._existing_statistics = AsyncMock(
-            side_effect=existing_statistics
-        )
         recorder_instance = types.SimpleNamespace(
             async_block_till_done=AsyncMock()
         )
@@ -4298,7 +4420,12 @@ class Smart1HistoryTest(unittest.TestCase):
             release_readback.set()
             await task
 
-        asyncio.run(run_scenario())
+        with patch.object(
+            history,
+            "async_read_hourly_statistics",
+            side_effect=read_hourly_statistics,
+        ):
+            asyncio.run(run_scenario())
         self.assertFalse(
             state.is_complete(importer.statistic_id, importer.schema_version)
         )
@@ -7318,6 +7445,98 @@ class Smart1HistoryTest(unittest.TestCase):
                 )
             )
 
+    def test_derived_persistence_reads_exact_unsorted_batch_period(
+        self,
+    ) -> None:
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        point = types.SimpleNamespace(id="grid", name="Bezug")
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {"grid_import": point},
+            history_state=state,
+        )
+        statistic_id = derived_history.statistic_id_for_role(
+            "grid_import",
+            point.id,
+        )
+        first_start = datetime(2026, 8, 4, 8, tzinfo=timezone.utc)
+        last_start = first_start + timedelta(hours=2)
+        statistics_batch = [
+            derived_history.StatisticData(
+                start=last_start,
+                state=2.0,
+                sum=3.0,
+            ),
+            derived_history.StatisticData(
+                start=first_start,
+                state=1.0,
+                sum=1.0,
+            ),
+        ]
+        persisted_rows = [
+            {
+                "start": first_start.timestamp(),
+                "state": 1.0,
+                "sum": 1.0,
+            },
+            {
+                "start": last_start.timestamp(),
+                "state": 2.0,
+                "sum": 3.0,
+            },
+        ]
+        recorder_instance = types.SimpleNamespace(
+            async_block_till_done=AsyncMock()
+        )
+        importer._persistence_generation = 1
+
+        with (
+            patch.object(
+                derived_history,
+                "async_read_hourly_statistics",
+                new=AsyncMock(return_value=persisted_rows),
+            ) as read_statistics,
+            patch.object(
+                derived_history,
+                "async_wait_for_statistics_readback",
+                side_effect=_single_statistics_readback,
+            ),
+            patch.object(
+                derived_history,
+                "get_last_statistics",
+            ) as newest_reader,
+        ):
+            persisted_roles = asyncio.run(
+                importer._async_confirm_statistics_persistence(
+                    recorder_instance,
+                    {"grid_import"},
+                    {"grid_import": statistic_id},
+                    {"grid_import": statistics_batch},
+                    {"grid_import": 0},
+                    1,
+                )
+            )
+
+        self.assertEqual(persisted_roles, {"grid_import"})
+        self.assertTrue(
+            state.is_complete(
+                statistic_id,
+                derived_history.DERIVED_HISTORY_SCHEMA_VERSION,
+            )
+        )
+        read_statistics.assert_awaited_once_with(
+            hass,
+            statistic_id,
+            first_start,
+            last_start + timedelta(hours=1),
+            {"state", "sum"},
+        )
+        newest_reader.assert_not_called()
+
     def test_superseded_derived_persistence_generation_cannot_mark(
         self,
     ) -> None:
@@ -7346,16 +7565,12 @@ class Smart1HistoryTest(unittest.TestCase):
         readback_started = asyncio.Event()
         release_readback = asyncio.Event()
 
-        async def existing_statistics(_statistic_id, _record_count):
+        async def read_hourly_statistics(*_args):
             readback_started.set()
             await release_readback.wait()
             return [
                 {"start": start.timestamp(), "state": 1.0, "sum": 1.0}
             ]
-
-        importer._existing_statistics = AsyncMock(
-            side_effect=existing_statistics
-        )
         recorder_instance = types.SimpleNamespace(
             async_block_till_done=AsyncMock()
         )
@@ -7380,7 +7595,12 @@ class Smart1HistoryTest(unittest.TestCase):
             release_readback.set()
             await task
 
-        asyncio.run(run_scenario())
+        with patch.object(
+            derived_history,
+            "async_read_hourly_statistics",
+            side_effect=read_hourly_statistics,
+        ):
+            asyncio.run(run_scenario())
         self.assertFalse(
             state.is_complete(
                 statistic_id,

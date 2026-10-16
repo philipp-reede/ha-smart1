@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import math
 import re
@@ -203,6 +203,53 @@ def statistics_are_persisted(
             except (TypeError, ValueError):
                 return False
     return found_expected
+
+
+def statistics_readback_period(
+    statistics: Iterable[Mapping[str, Any]],
+) -> tuple[datetime, datetime] | None:
+    """Return the smallest UTC-hour period containing one queued batch."""
+    starts: list[datetime] = []
+    for statistic in statistics:
+        start = statistic.get("start")
+        if (
+            not isinstance(start, datetime)
+            or start.tzinfo is None
+            or start.utcoffset() is None
+        ):
+            return None
+        starts.append(start.astimezone(timezone.utc))
+    if not starts:
+        return None
+    return min(starts), max(starts) + timedelta(hours=1)
+
+
+async def async_read_hourly_statistics(
+    hass: Any,
+    statistic_id: str,
+    start_time: datetime,
+    end_time: datetime | None,
+    statistic_types: set[str],
+) -> list[Mapping[str, Any]]:
+    """Read one external statistic over an explicit Recorder time period."""
+    # Keep this module importable by the lightweight pure-helper tests. The
+    # Home Assistant dependencies are needed only when a Recorder read runs.
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.statistics import (
+        statistics_during_period,
+    )
+
+    result = await get_instance(hass).async_add_executor_job(
+        statistics_during_period,
+        hass,
+        start_time,
+        end_time,
+        {statistic_id},
+        "hour",
+        None,
+        set(statistic_types),
+    )
+    return result.get(statistic_id, [])
 
 
 async def async_wait_for_recorder_commit(recorder: Any) -> bool:

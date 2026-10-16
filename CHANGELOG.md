@@ -10,6 +10,13 @@ All notable changes to this project are documented in this file.
   recommendations preselected and all selections remaining editable later from
   the integration's Configure dialog
 
+### Fixed
+
+- Confirm newly queued PV, derived-energy and external power statistics by
+  reading exactly the batch's Recorder time range. Newer or future-dated rows
+  can no longer displace the batch from a newest-records query and defer its
+  completion marker indefinitely
+
 ### Documentation
 
 - Document the exact Energy Dashboard power selections for historical PV,
