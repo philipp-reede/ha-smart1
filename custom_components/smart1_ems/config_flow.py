@@ -31,9 +31,104 @@ from .history_state import (
     STATISTICS_NAMESPACE_KEY,
     statistics_namespace_for_device,
 )
+from .point import Smart1Point
 
 ENERGY_ROLES_OPTION = "energy_roles"
 ENERGY_ROLES_CONFIGURED_OPTION = "energy_roles_configured"
+
+
+def _selected_energy_roles(
+    user_input: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return the non-empty energy-role selections from one form."""
+    return {
+        role.key: selected
+        for role in ENERGY_ROLES
+        if isinstance((selected := user_input.get(role.key)), str)
+        and selected
+    }
+
+
+def _energy_role_candidates(
+    points: list[Smart1Point],
+) -> dict[str, list[Smart1Point]]:
+    """Return selectable points for every supported energy role."""
+    return {
+        role.key: energy_candidates(points, role)
+        for role in ENERGY_ROLES
+    }
+
+
+def _energy_roles_error(
+    points: list[Smart1Point],
+    selected_roles: Mapping[str, str],
+    current_roles: Mapping[str, str],
+) -> str | None:
+    """Validate shared initial-setup and options-flow role selections."""
+    selected_ids = list(selected_roles.values())
+    if len(selected_ids) != len(set(selected_ids)):
+        return "duplicate_energy_point"
+
+    candidates_by_role = _energy_role_candidates(points)
+    if any(
+        selected_id != current_roles.get(role_key)
+        and selected_id not in {
+            point.id for point in candidates_by_role[role_key]
+        }
+        for role_key, selected_id in selected_roles.items()
+    ):
+        return "invalid_energy_point"
+    return None
+
+
+def _energy_roles_schema(
+    points: list[Smart1Point],
+    current_roles: Mapping[str, str],
+    configured_roles: set[str],
+) -> vol.Schema:
+    """Build the shared energy-role selection form."""
+    recommendations = recommend_energy_roles(points)
+    candidates_by_role = _energy_role_candidates(points)
+    schema = {}
+    for role in ENERGY_ROLES:
+        candidates = candidates_by_role[role.key]
+        candidate_ids = {point.id for point in candidates}
+        options = [SelectOptionDict(value="", label="—")]
+        options.extend(
+            SelectOptionDict(
+                value=point.id,
+                label=f"{point.name} ({point.hardware})",
+            )
+            for point in candidates
+        )
+        selected = current_roles.get(role.key, "")
+        if not selected and role.key not in configured_roles:
+            selected = recommendations.get(role.key, "")
+        if selected and selected not in candidate_ids:
+            saved_point = next(
+                (point for point in points if point.id == selected),
+                None,
+            )
+            saved_label = (
+                f"{saved_point.name} ({saved_point.hardware})"
+                if saved_point is not None
+                else selected
+            )
+            options.append(
+                SelectOptionDict(
+                    value=selected,
+                    label=f"⚠ {saved_label}",
+                )
+            )
+        schema[
+            vol.Required(role.key, default=selected)
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=options,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+    return vol.Schema(schema)
 
 
 class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -45,6 +140,8 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self):
         self._api_key = None
         self._plants = []
+        self._selected_plant = None
+        self._energy_points = None
 
     @staticmethod
     def _device_id(plant: dict[str, Any]) -> str:
@@ -78,12 +175,76 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return [], "no_plants"
         return valid_plants, None
 
-    async def _async_create_plant_entry(
+    async def _async_get_energy_points(
+        self,
+        device_id: str,
+    ) -> tuple[list[Smart1Point], str | None]:
+        """Fetch points needed to configure Energy Dashboard roles."""
+        session = async_get_clientsession(self.hass)
+        api = Smart1Api(session, self._api_key, device_id)
+        try:
+            return await api.get_linear_devices(), None
+        except Smart1ApiError as err:
+            return (
+                [],
+                "invalid_auth" if is_auth_error(err) else "cannot_connect",
+            )
+        except (ClientError, TimeoutError):
+            return [], "cannot_connect"
+
+    def _legacy_duplicate_result(self, device_id: str):
+        """Abort when an entry predating unique IDs owns this plant."""
+        if any(
+            isinstance(entry.data.get("device_id"), str)
+            and entry.data["device_id"].strip() == device_id
+            for entry in self._async_current_entries()
+        ):
+            return self.async_abort(reason="already_configured")
+        return None
+
+    def _show_user_form(self, errors: Mapping[str, str]):
+        """Show the API-key form with the supplied errors."""
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema({
+                vol.Required("api_key"): TextSelector(
+                    TextSelectorConfig(
+                        type=TextSelectorType.PASSWORD,
+                        autocomplete="current-password",
+                    )
+                ),
+            }),
+            errors=dict(errors),
+        )
+
+    def _show_plant_form(self, errors: Mapping[str, str]):
+        """Show the plant selector with the supplied errors."""
+        options = {
+            self._device_id(plant): self._plant_title(plant)
+            for plant in self._plants
+        }
+        return self.async_show_form(
+            step_id="plant",
+            data_schema=vol.Schema({
+                vol.Required("device_id"): vol.In(options),
+            }),
+            errors=dict(errors),
+        )
+
+    async def _async_prepare_plant_entry(
         self,
         plant: dict[str, Any],
+        *,
+        error_step: str,
     ):
-        """Create one entry while protecting new and legacy installs."""
+        """Validate one plant and prepare its Energy Dashboard form."""
         device_id = self._device_id(plant)
+
+        # A user can navigate back from the role form and choose another
+        # installation. Never retain a previously prepared installation when
+        # discovery for the newly selected one fails.
+        self._selected_plant = None
+        self._energy_points = None
 
         await self.async_set_unique_id(device_id)
         self._abort_if_unique_id_configured()
@@ -91,12 +252,32 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Entries created before config-entry unique IDs were introduced still
         # need to block a second entry for the same installation. Compare the
         # normalized value instead of relying on an exact data-dict match.
-        if any(
-            isinstance(entry.data.get("device_id"), str)
-            and entry.data["device_id"].strip() == device_id
-            for entry in self._async_current_entries()
-        ):
-            return self.async_abort(reason="already_configured")
+        if duplicate_result := self._legacy_duplicate_result(device_id):
+            return duplicate_result
+
+        points, error = await self._async_get_energy_points(device_id)
+        if error is not None:
+            if error_step == "plant" and error != "invalid_auth":
+                return self._show_plant_form({"base": error})
+            return self._show_user_form({"base": error})
+
+        self._selected_plant = plant
+        self._energy_points = points
+        return await self.async_step_energy_roles()
+
+    def _create_plant_entry(
+        self,
+        selected_roles: Mapping[str, str],
+    ):
+        """Create the selected plant with initial mutable role options."""
+        plant = self._selected_plant
+        assert plant is not None
+        device_id = self._device_id(plant)
+
+        # The form may remain open while another flow creates this entry.
+        self._abort_if_unique_id_configured()
+        if duplicate_result := self._legacy_duplicate_result(device_id):
+            return duplicate_result
 
         return self.async_create_entry(
             title=self._plant_title(plant),
@@ -106,6 +287,12 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 STATISTICS_NAMESPACE_KEY: (
                     statistics_namespace_for_device(device_id)
                 ),
+            },
+            options={
+                ENERGY_ROLES_OPTION: dict(selected_roles),
+                ENERGY_ROLES_CONFIGURED_OPTION: [
+                    role.key for role in ENERGY_ROLES
+                ],
             },
         )
 
@@ -126,22 +313,14 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if error is not None:
                 errors["base"] = error
             elif len(self._plants) == 1:
-                return await self._async_create_plant_entry(self._plants[0])
+                return await self._async_prepare_plant_entry(
+                    self._plants[0],
+                    error_step="user",
+                )
             else:
                 return await self.async_step_plant()
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema({
-                vol.Required("api_key"): TextSelector(
-                    TextSelectorConfig(
-                        type=TextSelectorType.PASSWORD,
-                        autocomplete="current-password",
-                    )
-                ),
-            }),
-            errors=errors,
-        )
+        return self._show_user_form(errors)
 
     async def async_step_plant(self, user_input=None):
         if user_input is not None:
@@ -150,19 +329,38 @@ class Smart1ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 plant for plant in self._plants
                 if self._device_id(plant) == device_id
             )
-            return await self._async_create_plant_entry(plant)
+            return await self._async_prepare_plant_entry(
+                plant,
+                error_step="plant",
+            )
 
-        options = {
-            self._device_id(plant): self._plant_title(plant)
-            for plant in self._plants
-        }
+        return self._show_plant_form({})
+
+    async def async_step_energy_roles(self, user_input=None):
+        """Select initial Energy Dashboard source points."""
+        if self._selected_plant is None or self._energy_points is None:
+            return await self.async_step_user()
+
+        errors = {}
+        if user_input is not None:
+            selected_roles = _selected_energy_roles(user_input)
+            if error := _energy_roles_error(
+                self._energy_points,
+                selected_roles,
+                {},
+            ):
+                errors["base"] = error
+            else:
+                return self._create_plant_entry(selected_roles)
 
         return self.async_show_form(
-            step_id="plant",
-            data_schema=vol.Schema({
-                vol.Required("device_id"): vol.In(options),
-            }),
-            errors={},
+            step_id="energy_roles",
+            data_schema=_energy_roles_schema(
+                self._energy_points,
+                {},
+                set(),
+            ),
+            errors=errors,
         )
 
     async def async_step_reauth(self, entry_data):
@@ -256,31 +454,16 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
             else {}
         )
         configured_roles = self._configured_energy_role_keys()
-        recommendations = recommend_energy_roles(points)
-        candidates_by_role = {
-            role.key: energy_candidates(points, role)
-            for role in ENERGY_ROLES
-        }
         errors = {}
 
         if user_input is not None:
-            selected_roles = {
-                role.key: user_input[role.key]
-                for role in ENERGY_ROLES
-                if user_input.get(role.key)
-            }
-            selected_ids = list(selected_roles.values())
-            invalid_selection = any(
-                selected_id != current_roles.get(role_key)
-                and selected_id not in {
-                    point.id for point in candidates_by_role[role_key]
-                }
-                for role_key, selected_id in selected_roles.items()
-            )
-            if len(selected_ids) != len(set(selected_ids)):
-                errors["base"] = "duplicate_energy_point"
-            elif invalid_selection:
-                errors["base"] = "invalid_energy_point"
+            selected_roles = _selected_energy_roles(user_input)
+            if error := _energy_roles_error(
+                points,
+                selected_roles,
+                current_roles,
+            ):
+                errors["base"] = error
             else:
                 new_options = dict(self.config_entry.options)
                 new_options[ENERGY_ROLES_OPTION] = selected_roles
@@ -289,48 +472,12 @@ class Smart1OptionsFlow(OptionsFlowWithReload):
                 ]
                 return self.async_create_entry(data=new_options)
 
-        schema = {}
-        for role in ENERGY_ROLES:
-            candidates = candidates_by_role[role.key]
-            candidate_ids = {point.id for point in candidates}
-            options = [SelectOptionDict(value="", label="—")]
-            options.extend(
-                SelectOptionDict(
-                    value=point.id,
-                    label=f"{point.name} ({point.hardware})",
-                )
-                for point in candidates
-            )
-            selected = current_roles.get(role.key, "")
-            if not selected and role.key not in configured_roles:
-                selected = recommendations.get(role.key, "")
-            if selected and selected not in candidate_ids:
-                saved_point = next(
-                    (point for point in points if point.id == selected),
-                    None,
-                )
-                saved_label = (
-                    f"{saved_point.name} ({saved_point.hardware})"
-                    if saved_point is not None
-                    else selected
-                )
-                options.append(
-                    SelectOptionDict(
-                        value=selected,
-                        label=f"⚠ {saved_label}",
-                    )
-                )
-            schema[
-                vol.Required(role.key, default=selected)
-            ] = SelectSelector(
-                SelectSelectorConfig(
-                    options=options,
-                    mode=SelectSelectorMode.DROPDOWN,
-                )
-            )
-
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(schema),
+            data_schema=_energy_roles_schema(
+                points,
+                current_roles,
+                configured_roles,
+            ),
             errors=errors,
         )

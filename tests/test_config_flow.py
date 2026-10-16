@@ -205,11 +205,18 @@ class _ConfigFlow:
             "errors": errors,
         }
 
-    def async_create_entry(self, *, title: str, data: dict) -> dict:
+    def async_create_entry(
+        self,
+        *,
+        title: str,
+        data: dict,
+        options: dict | None = None,
+    ) -> dict:
         return {
             "type": "create_entry",
             "title": title,
             "data": data,
+            "options": dict(options or {}),
             "unique_id": getattr(self, "unique_id", None),
         }
 
@@ -253,10 +260,14 @@ class _Smart1ApiError(Exception):
 class _FakeApi:
     plants_by_key: dict[str, list[dict[str, str]]] = {}
     errors_by_key: dict[str, BaseException] = {}
+    linear_devices_by_device: dict[str, list[object]] = {}
+    linear_errors_by_device: dict[str, BaseException] = {}
     calls: list[str] = []
+    linear_calls: list[tuple[str, str]] = []
 
     def __init__(self, session, api_key: str, device_id: str) -> None:
         self.api_key = api_key
+        self.device_id = device_id
 
     async def get_plants(self) -> list[dict[str, str]]:
         type(self).calls.append(self.api_key)
@@ -266,6 +277,15 @@ class _FakeApi:
             self.api_key,
             [],
         )]
+
+    async def get_linear_devices(self) -> list[object]:
+        type(self).linear_calls.append((self.api_key, self.device_id))
+        if error := type(self).linear_errors_by_device.get(self.device_id):
+            raise error
+        return list(type(self).linear_devices_by_device.get(
+            self.device_id,
+            [],
+        ))
 
 
 class _Role:
@@ -290,6 +310,43 @@ def _recommend_energy_roles(points):
         for role in ENERGY_ROLES
         if (candidates := _energy_candidates(points, role))
     }
+
+
+def _energy_point(
+    point_id: str,
+    name: str,
+    hardware: str,
+    *roles: str,
+):
+    return types.SimpleNamespace(
+        id=point_id,
+        name=name,
+        hardware=hardware,
+        roles=set(roles),
+    )
+
+
+def _standard_energy_points() -> list[object]:
+    return [
+        _energy_point(
+            "point-import",
+            "Grid import",
+            "grid",
+            "grid_import",
+        ),
+        _energy_point(
+            "point-export",
+            "Grid export",
+            "grid",
+            "grid_export",
+        ),
+        _energy_point(
+            "point-battery",
+            "Battery charge",
+            "battery",
+            "battery_charge",
+        ),
+    ]
 
 
 def _base_modules() -> dict[str, types.ModuleType]:
@@ -366,6 +423,10 @@ def _base_modules() -> dict[str, types.ModuleType]:
             energy_candidates=_energy_candidates,
             recommend_energy_roles=_recommend_energy_roles,
         ),
+        "custom_components.smart1_ems.point": _module(
+            "custom_components.smart1_ems.point",
+            Smart1Point=object,
+        ),
     }
 
 
@@ -401,23 +462,49 @@ def _new_flow(module, entries=None, *, context=None):
     return flow
 
 
+def _form_defaults(result: dict) -> dict[str, object]:
+    return {
+        field.key: field.default
+        for field in result["data_schema"].schema
+    }
+
+
 class Smart1ConfigFlowTest(unittest.TestCase):
     def setUp(self) -> None:
         _FakeApi.plants_by_key = {}
         _FakeApi.errors_by_key = {}
+        _FakeApi.linear_devices_by_device = {}
+        _FakeApi.linear_errors_by_device = {}
         _FakeApi.calls = []
+        _FakeApi.linear_calls = []
         self.module = _load_config_flow()
+        self.points = _standard_energy_points()
 
-    def test_single_plant_creates_entry_with_stable_unique_id(self) -> None:
+    def test_single_plant_prompts_for_roles_and_creates_entry(self) -> None:
         _FakeApi.plants_by_key["new-key"] = [
             {"DeviceId": " plant-1 ", "DeviceName": "Home"},
         ]
+        _FakeApi.linear_devices_by_device["plant-1"] = self.points
         flow = _new_flow(self.module)
 
-        result = asyncio.run(
+        form = asyncio.run(
             _run_step(flow.async_step_user({"api_key": "new-key"}))
         )
+        defaults = _form_defaults(form)
+        result = asyncio.run(
+            _run_step(flow.async_step_energy_roles(defaults))
+        )
 
+        self.assertEqual(form["type"], "form")
+        self.assertEqual(form["step_id"], "energy_roles")
+        self.assertEqual(
+            defaults,
+            {
+                "grid_import": "point-import",
+                "grid_export": "point-export",
+                "battery_charge": "point-battery",
+            },
+        )
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(result["title"], "Home")
         self.assertEqual(
@@ -428,13 +515,43 @@ class Smart1ConfigFlowTest(unittest.TestCase):
                 "statistics_namespace": "8aac131a20",
             },
         )
+        self.assertNotIn("energy_roles", result["data"])
+        self.assertEqual(
+            result["options"],
+            {
+                "energy_roles": {
+                    "grid_import": "point-import",
+                    "grid_export": "point-export",
+                    "battery_charge": "point-battery",
+                },
+                "energy_roles_configured": [
+                    "grid_import",
+                    "grid_export",
+                    "battery_charge",
+                ],
+            },
+        )
         self.assertEqual(result["unique_id"], "plant-1")
+        self.assertEqual(
+            _FakeApi.linear_calls,
+            [("new-key", "plant-1")],
+        )
 
     def test_multiple_plants_show_selection_and_create_selected_entry(self) -> None:
         _FakeApi.plants_by_key["multi-key"] = [
             {"DeviceId": "plant-1", "DeviceName": "Home"},
             {"DeviceId": "plant-2", "DeviceName": "Workshop"},
         ]
+        selected_points = [
+            _energy_point(
+                "workshop-import",
+                "Workshop grid import",
+                "grid",
+                "grid_import",
+            ),
+        ]
+        _FakeApi.linear_devices_by_device["plant-1"] = self.points
+        _FakeApi.linear_devices_by_device["plant-2"] = selected_points
         flow = _new_flow(self.module)
 
         first_result = asyncio.run(
@@ -443,13 +560,36 @@ class Smart1ConfigFlowTest(unittest.TestCase):
         selected_result = asyncio.run(
             _run_step(flow.async_step_plant({"device_id": "plant-2"}))
         )
+        result = asyncio.run(
+            _run_step(
+                flow.async_step_energy_roles(_form_defaults(selected_result))
+            )
+        )
 
         self.assertEqual(first_result["type"], "form")
         self.assertEqual(first_result["step_id"], "plant")
-        self.assertEqual(selected_result["type"], "create_entry")
-        self.assertEqual(selected_result["title"], "Workshop")
-        self.assertEqual(selected_result["data"]["device_id"], "plant-2")
-        self.assertEqual(selected_result["unique_id"], "plant-2")
+        self.assertEqual(selected_result["type"], "form")
+        self.assertEqual(selected_result["step_id"], "energy_roles")
+        self.assertEqual(
+            _form_defaults(selected_result),
+            {
+                "grid_import": "workshop-import",
+                "grid_export": "",
+                "battery_charge": "",
+            },
+        )
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["title"], "Workshop")
+        self.assertEqual(result["data"]["device_id"], "plant-2")
+        self.assertEqual(
+            result["options"]["energy_roles"],
+            {"grid_import": "workshop-import"},
+        )
+        self.assertEqual(result["unique_id"], "plant-2")
+        self.assertEqual(
+            _FakeApi.linear_calls,
+            [("multi-key", "plant-2")],
+        )
 
     def test_multiple_plants_allow_unconfigured_sibling(self) -> None:
         existing = _ConfigEntry(
@@ -461,13 +601,17 @@ class Smart1ConfigFlowTest(unittest.TestCase):
             {"DeviceId": "plant-1", "DeviceName": "Home"},
             {"DeviceId": "plant-2", "DeviceName": "Workshop"},
         ]
+        _FakeApi.linear_devices_by_device["plant-2"] = self.points
         flow = _new_flow(self.module, [existing])
 
         asyncio.run(
             _run_step(flow.async_step_user({"api_key": "multi-key"}))
         )
-        result = asyncio.run(
+        form = asyncio.run(
             _run_step(flow.async_step_plant({"device_id": "plant-2"}))
+        )
+        result = asyncio.run(
+            _run_step(flow.async_step_energy_roles(_form_defaults(form)))
         )
 
         self.assertEqual(result["type"], "create_entry")
@@ -563,6 +707,7 @@ class Smart1ConfigFlowTest(unittest.TestCase):
         )
         self.assertEqual(existing.data["api_key"], "old-key")
         self.assertEqual(flow.hass.config_entries.update_calls, [])
+        self.assertEqual(_FakeApi.linear_calls, [])
 
     def test_legacy_duplicate_device_id_aborts(self) -> None:
         existing = _ConfigEntry(
@@ -584,6 +729,283 @@ class Smart1ConfigFlowTest(unittest.TestCase):
             {"type": "abort", "reason": "already_configured"},
         )
         self.assertEqual(existing.data["api_key"], "old-key")
+        self.assertEqual(_FakeApi.linear_calls, [])
+
+    def test_initial_roles_can_all_be_explicitly_disabled(self) -> None:
+        _FakeApi.plants_by_key["new-key"] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+        ]
+        _FakeApi.linear_devices_by_device["plant-1"] = self.points
+        flow = _new_flow(self.module)
+
+        form = asyncio.run(
+            _run_step(flow.async_step_user({"api_key": "new-key"}))
+        )
+        result = asyncio.run(
+            _run_step(flow.async_step_energy_roles({
+                "grid_import": "",
+                "grid_export": "",
+                "battery_charge": "",
+            }))
+        )
+
+        self.assertEqual(form["step_id"], "energy_roles")
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(
+            result["options"],
+            {
+                "energy_roles": {},
+                "energy_roles_configured": [
+                    "grid_import",
+                    "grid_export",
+                    "battery_charge",
+                ],
+            },
+        )
+
+    def test_energy_roles_step_without_selected_plant_returns_to_user(
+        self,
+    ) -> None:
+        flow = _new_flow(self.module)
+
+        result = asyncio.run(
+            _run_step(flow.async_step_energy_roles())
+        )
+
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["step_id"], "user")
+        self.assertEqual(result["errors"], {})
+
+    def test_initial_duplicate_role_source_is_rejected_and_recoverable(
+        self,
+    ) -> None:
+        _FakeApi.plants_by_key["new-key"] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+        ]
+        _FakeApi.linear_devices_by_device["plant-1"] = self.points
+        flow = _new_flow(self.module)
+        form = asyncio.run(
+            _run_step(flow.async_step_user({"api_key": "new-key"}))
+        )
+
+        invalid = asyncio.run(
+            _run_step(flow.async_step_energy_roles({
+                "grid_import": "point-import",
+                "grid_export": "point-import",
+                "battery_charge": "",
+            }))
+        )
+        result = asyncio.run(
+            _run_step(flow.async_step_energy_roles(_form_defaults(form)))
+        )
+
+        self.assertEqual(invalid["type"], "form")
+        self.assertEqual(invalid["step_id"], "energy_roles")
+        self.assertEqual(
+            invalid["errors"],
+            {"base": "duplicate_energy_point"},
+        )
+        self.assertEqual(result["type"], "create_entry")
+
+    def test_initial_unknown_role_source_is_rejected_and_recoverable(
+        self,
+    ) -> None:
+        _FakeApi.plants_by_key["new-key"] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+        ]
+        _FakeApi.linear_devices_by_device["plant-1"] = self.points
+        flow = _new_flow(self.module)
+        form = asyncio.run(
+            _run_step(flow.async_step_user({"api_key": "new-key"}))
+        )
+
+        invalid = asyncio.run(
+            _run_step(flow.async_step_energy_roles({
+                "grid_import": "injected-id",
+                "grid_export": "",
+                "battery_charge": "",
+            }))
+        )
+        result = asyncio.run(
+            _run_step(flow.async_step_energy_roles(_form_defaults(form)))
+        )
+
+        self.assertEqual(invalid["type"], "form")
+        self.assertEqual(
+            invalid["errors"],
+            {"base": "invalid_energy_point"},
+        )
+        self.assertEqual(result["type"], "create_entry")
+
+    def test_single_plant_point_discovery_errors_are_recoverable(self) -> None:
+        cases = (
+            (_Smart1ApiError("401"), "invalid_auth"),
+            (_Smart1ApiError("403"), "invalid_auth"),
+            (_Smart1ApiError("500"), "cannot_connect"),
+            (_ClientError("offline"), "cannot_connect"),
+            (TimeoutError(), "cannot_connect"),
+        )
+        for error, expected_error in cases:
+            with self.subTest(expected_error=expected_error, error=type(error)):
+                _FakeApi.plants_by_key["new-key"] = [
+                    {"DeviceId": "plant-1", "DeviceName": "Home"},
+                ]
+                _FakeApi.linear_errors_by_device = {"plant-1": error}
+                flow = _new_flow(self.module)
+
+                failed = asyncio.run(
+                    _run_step(
+                        flow.async_step_user({"api_key": "new-key"})
+                    )
+                )
+                _FakeApi.linear_errors_by_device = {}
+                _FakeApi.linear_devices_by_device["plant-1"] = self.points
+                recovered = asyncio.run(
+                    _run_step(
+                        flow.async_step_user({"api_key": "new-key"})
+                    )
+                )
+
+                self.assertEqual(failed["type"], "form")
+                self.assertEqual(failed["step_id"], "user")
+                self.assertEqual(
+                    failed["errors"],
+                    {"base": expected_error},
+                )
+                self.assertEqual(recovered["step_id"], "energy_roles")
+
+    def test_point_discovery_error_does_not_expose_api_key(self) -> None:
+        secret = "secret-that-must-not-leak"
+        _FakeApi.plants_by_key[secret] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+        ]
+        _FakeApi.linear_errors_by_device["plant-1"] = _ClientError(
+            f"https://example.test/?apikey={secret}"
+        )
+        flow = _new_flow(self.module)
+
+        result = asyncio.run(
+            _run_step(flow.async_step_user({"api_key": secret}))
+        )
+
+        self.assertEqual(result["errors"], {"base": "cannot_connect"})
+        self.assertNotIn(secret, repr(result))
+
+    def test_multi_plant_point_discovery_error_returns_to_plant_step(
+        self,
+    ) -> None:
+        _FakeApi.plants_by_key["multi-key"] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+            {"DeviceId": "plant-2", "DeviceName": "Workshop"},
+        ]
+        _FakeApi.linear_errors_by_device["plant-2"] = _ClientError(
+            "offline"
+        )
+        flow = _new_flow(self.module)
+        asyncio.run(
+            _run_step(flow.async_step_user({"api_key": "multi-key"}))
+        )
+
+        failed = asyncio.run(
+            _run_step(flow.async_step_plant({"device_id": "plant-2"}))
+        )
+        _FakeApi.linear_errors_by_device = {}
+        _FakeApi.linear_devices_by_device["plant-2"] = self.points
+        recovered = asyncio.run(
+            _run_step(flow.async_step_plant({"device_id": "plant-2"}))
+        )
+
+        self.assertEqual(failed["step_id"], "plant")
+        self.assertEqual(failed["errors"], {"base": "cannot_connect"})
+        self.assertEqual(recovered["step_id"], "energy_roles")
+
+    def test_multi_plant_point_auth_error_returns_to_api_key_step(
+        self,
+    ) -> None:
+        _FakeApi.plants_by_key["expired-key"] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+            {"DeviceId": "plant-2", "DeviceName": "Workshop"},
+        ]
+        _FakeApi.linear_errors_by_device["plant-2"] = (
+            _Smart1ApiError("401")
+        )
+        flow = _new_flow(self.module)
+        asyncio.run(
+            _run_step(flow.async_step_user({"api_key": "expired-key"}))
+        )
+
+        result = asyncio.run(
+            _run_step(flow.async_step_plant({"device_id": "plant-2"}))
+        )
+
+        self.assertEqual(result["step_id"], "user")
+        self.assertEqual(result["errors"], {"base": "invalid_auth"})
+
+    def test_no_energy_candidates_can_be_saved_disabled(self) -> None:
+        _FakeApi.plants_by_key["new-key"] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+        ]
+        _FakeApi.linear_devices_by_device["plant-1"] = []
+        flow = _new_flow(self.module)
+
+        form = asyncio.run(
+            _run_step(flow.async_step_user({"api_key": "new-key"}))
+        )
+        defaults = _form_defaults(form)
+        result = asyncio.run(
+            _run_step(flow.async_step_energy_roles(defaults))
+        )
+
+        self.assertEqual(
+            defaults,
+            {
+                "grid_import": "",
+                "grid_export": "",
+                "battery_charge": "",
+            },
+        )
+        for selector in form["data_schema"].schema.values():
+            self.assertEqual(
+                selector.config.options["options"],
+                [{"value": "", "label": "—"}],
+            )
+        self.assertEqual(result["options"]["energy_roles"], {})
+
+    def test_duplicate_created_while_role_form_open_aborts(self) -> None:
+        _FakeApi.plants_by_key["new-key"] = [
+            {"DeviceId": "plant-1", "DeviceName": "Home"},
+        ]
+        _FakeApi.linear_devices_by_device["plant-1"] = self.points
+
+        for existing_unique_id in ("plant-1", None):
+            with self.subTest(existing_unique_id=existing_unique_id):
+                flow = _new_flow(self.module)
+                form = asyncio.run(
+                    _run_step(
+                        flow.async_step_user({"api_key": "new-key"})
+                    )
+                )
+                flow.hass.config_entries.entries.append(
+                    _ConfigEntry(
+                        entry_id="racing-entry",
+                        data={
+                            "api_key": "other-key",
+                            "device_id": "plant-1",
+                        },
+                        unique_id=existing_unique_id,
+                    )
+                )
+
+                result = asyncio.run(
+                    _run_step(
+                        flow.async_step_energy_roles(_form_defaults(form))
+                    )
+                )
+
+                self.assertEqual(
+                    result,
+                    {"type": "abort", "reason": "already_configured"},
+                )
 
     def test_reauth_updates_only_api_key_for_same_plant(self) -> None:
         entry = _ConfigEntry(
@@ -716,26 +1138,7 @@ class Smart1ConfigFlowTest(unittest.TestCase):
 class Smart1OptionsFlowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.module = _load_config_flow()
-        self.points = [
-            types.SimpleNamespace(
-                id="point-import",
-                name="Grid import",
-                hardware="grid",
-                roles={"grid_import"},
-            ),
-            types.SimpleNamespace(
-                id="point-export",
-                name="Grid export",
-                hardware="grid",
-                roles={"grid_export"},
-            ),
-            types.SimpleNamespace(
-                id="point-battery",
-                name="Battery charge",
-                hardware="battery",
-                roles={"battery_charge"},
-            ),
-        ]
+        self.points = _standard_energy_points()
 
     def _flow(self, options: dict | None = None):
         entry = _ConfigEntry(

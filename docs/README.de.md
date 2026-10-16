@@ -48,6 +48,8 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 ## Funktionen
 
 - Automatische Erkennung von Anlage und Messpunkten
+- Auswahl der Energy-Dashboard-Rollen bei der Ersteinrichtung mit erkannten
+  Empfehlungen; die Auswahl bleibt später über **Konfigurieren** änderbar
 - Live-Sensoren für Leistung, Energie, Temperaturen, Prozentwerte und Diagnosen
 - Optionale physische Wechselrichter-Geräte aus dem dokumentierten
   Wechselrichter-Endpunkt mit AC-/DC-Leistung und DC-Spannung je PV-String sowie
@@ -177,6 +179,9 @@ Alternativ kann das Repository manuell hinzugefügt werden:
    verdeckt; der Schlüssel wird im Home-Assistant-Konfigurationseintrag
    gespeichert.
 4. Falls mehrere Anlagen verfügbar sind, die gewünschte Anlage auswählen.
+5. Die vorgeschlagenen Leistungsmesspunkte für die erkannten
+   Energy-Dashboard-Rollen prüfen. Eine Rolle auf **—** belassen, wenn sie
+   deaktiviert bleiben soll.
 
 Jede Anlage kann nur einmal eingerichtet werden. Lehnt das Portal den
 gespeicherten Schlüssel später ab, öffnet Home Assistant einen Reparaturdialog.
@@ -191,10 +196,11 @@ Portals mehrere Minuten dauern.
 
 ## Energy Dashboard
 
-Unter **Einstellungen → Geräte & Dienste → smart1 EMS → Konfigurieren** wird für
-jede gewünschte Energierolle ein Leistungsmesspunkt ausgewählt. Die Integration
-schlägt erkannte Messpunkte vor. Die Auswahl bleibt bewusst explizit, weil eine
-smart1 Anlage mehrere Messpfade für dasselbe physische Gerät bereitstellen kann.
+Bei der Ersteinrichtung schlägt die Integration erkannte Leistungsmesspunkte für
+die verfügbaren Energierollen vor und wählt die Empfehlungen voraus. Die Auswahl
+bleibt bewusst explizit, weil eine smart1 Anlage mehrere Messpfade für dasselbe
+physische Gerät bereitstellen kann. Später lässt sie sich unter **Einstellungen →
+Geräte & Dienste → smart1 EMS → Konfigurieren** prüfen oder ändern.
 
 Danach können unter **Einstellungen → Dashboards → Energie** folgende
 Statistiken hinzugefügt werden:
