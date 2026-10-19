@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reuse Home Assistant's already loaded configured time zone and resolve
+  persisted history zones through its asynchronous helper, preventing a first
+  `ZoneInfo` construction from blocking the event loop during diagnostics or
+  historical imports
+
 ## [0.9.0] - 2026-10-16
 
 ### Added

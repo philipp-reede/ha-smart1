@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 from math import fsum
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from aiohttp import ClientError
 
@@ -60,6 +60,7 @@ from .recorder_helpers import (
     statistics_readback_period,
     validate_energy_statistics_imports,
 )
+from .time_zone import async_resolve_time_zone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1561,10 +1562,23 @@ class Smart1DerivedEnergyImporter:
             else:
                 source_time_zone = configured_source_time_zone
                 active_role_keys = set(self.role_points)
-            local_tz = ZoneInfo(source_time_zone)
+            local_tz = await async_resolve_time_zone(
+                source_time_zone,
+                configured_source_time_zone,
+            )
+            if local_tz is None:
+                _LOGGER.warning(
+                    "Unable to import smart1 derived history: invalid time "
+                    "zone"
+                )
+                self._last_result = "invalid_time_zone"
+                return
             today = datetime.now(local_tz).date()
             recorded_time_zones_by_role: dict[str, str] = {}
             records_tz_by_role: dict[str, ZoneInfo] = {}
+            resolved_time_zones: dict[str, ZoneInfo | None] = {
+                source_time_zone: local_tz
+            }
             for role_key, statistic_id in statistic_ids.items():
                 pending = pending_migrations_by_role.get(role_key)
                 recorded_time_zone = (
@@ -1578,12 +1592,16 @@ class Smart1DerivedEnergyImporter:
                     )
                 )
                 recorded_time_zones_by_role[role_key] = recorded_time_zone
-                try:
-                    records_tz_by_role[role_key] = ZoneInfo(
-                        recorded_time_zone
+                if recorded_time_zone not in resolved_time_zones:
+                    resolved_time_zones[recorded_time_zone] = (
+                        await async_resolve_time_zone(
+                            recorded_time_zone,
+                            configured_source_time_zone,
+                        )
                     )
-                except ZoneInfoNotFoundError:
-                    records_tz_by_role[role_key] = local_tz
+                records_tz_by_role[role_key] = (
+                    resolved_time_zones[recorded_time_zone] or local_tz
+                )
             required_schema_version = DERIVED_HISTORY_SCHEMA_VERSION
             # A later Home Assistant time-zone change must never downgrade a
             # statistic that already completed the boundary-safe schema.

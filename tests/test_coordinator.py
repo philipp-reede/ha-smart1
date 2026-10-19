@@ -60,9 +60,12 @@ util = sys.modules.setdefault(
     types.ModuleType("homeassistant.util"),
 )
 util.__path__ = []
-dt_util = types.ModuleType("homeassistant.util.dt")
+dt_util = sys.modules.setdefault(
+    "homeassistant.util.dt",
+    types.ModuleType("homeassistant.util.dt"),
+)
 dt_util.now = lambda: datetime(2026, 8, 4, tzinfo=timezone.utc)
-sys.modules["homeassistant.util.dt"] = dt_util
+util.dt = dt_util
 
 custom_components = sys.modules.setdefault(
     "custom_components",

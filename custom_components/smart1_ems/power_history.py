@@ -11,7 +11,7 @@ from hashlib import sha256
 import logging
 import math
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from aiohttp import ClientError
 
@@ -50,6 +50,7 @@ from .recorder_helpers import (
     statistics_readback_period,
     validate_power_statistics_imports,
 )
+from .time_zone import async_resolve_time_zone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1416,9 +1417,11 @@ class Smart1PowerHistoryImporter:
             # new, non-destructive series instead of remapping existing rows.
             self._last_result = "time_zone_reload_required"
             return
-        try:
-            local_tz = ZoneInfo(source_time_zone)
-        except ZoneInfoNotFoundError:
+        local_tz = await async_resolve_time_zone(
+            source_time_zone,
+            self._configured_source_time_zone,
+        )
+        if local_tz is None:
             _LOGGER.warning(
                 "Unable to import smart1 power history: invalid time zone"
             )

@@ -303,6 +303,10 @@
   therefore retain separate profiles and both UTC occurrences; a genuinely
   ambiguous profile remains an informed reconstruction rather than
   API-provided truth
+- History importers reuse Home Assistant's preloaded configured time zone and
+  resolve persisted migration zones asynchronously. Unknown active zones fail
+  closed before API or Recorder access, while invalid obsolete metadata falls
+  back to the active import zone without blocking the event loop
 - Offset-aware PV-string samples are ordered by their normalized instant, so
   the latest string measurements and inverter temperature remain correct
   across the repeated autumn daylight-saving-time hour

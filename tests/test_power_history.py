@@ -9,7 +9,7 @@ import sys
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 ROOT = Path(__file__).parents[1]
@@ -91,6 +91,22 @@ util = sys.modules.setdefault(
     types.ModuleType("homeassistant.util"),
 )
 util.__path__ = []
+dt_util = sys.modules.setdefault(
+    "homeassistant.util.dt",
+    types.ModuleType("homeassistant.util.dt"),
+)
+dt_util.get_default_time_zone = lambda: ZoneInfo("UTC")
+
+
+async def _async_get_time_zone(time_zone_name: str):
+    try:
+        return ZoneInfo(time_zone_name)
+    except ZoneInfoNotFoundError:
+        return None
+
+
+dt_util.async_get_time_zone = _async_get_time_zone
+util.dt = dt_util
 unit_conversion = sys.modules.setdefault(
     "homeassistant.util.unit_conversion",
     types.ModuleType("homeassistant.util.unit_conversion"),
@@ -694,6 +710,25 @@ class PowerHistoryImporterTest(unittest.IsolatedAsyncioTestCase):
         )
         self.recorder_get_instance.start()
         self.addCleanup(self.recorder_get_instance.stop)
+
+    async def test_invalid_configured_time_zone_fails_before_io(self) -> None:
+        api = FakeApi({"pv": 1000.0})
+        importer = power_history.Smart1PowerHistoryImporter(
+            FakeHass("Invalid/Zone"),
+            api,
+            pv_power_point=point("pv"),
+            role_points={},
+        )
+
+        await importer.async_import(
+            now=datetime(2026, 10, 19, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "invalid_time_zone",
+        )
+        self.assertEqual(api.calls, [])
 
     async def test_fetches_each_source_day_once_and_signs_composites(self) -> None:
         api = FakeApi(

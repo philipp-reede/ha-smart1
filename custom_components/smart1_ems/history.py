@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
 import logging
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from aiohttp import ClientError
 
@@ -48,6 +48,7 @@ from .recorder_helpers import (
     statistics_readback_period,
     validate_energy_statistics_imports,
 )
+from .time_zone import async_resolve_time_zone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1564,7 +1565,16 @@ class Smart1PvHistoryImporter:
                 if pending_time_zone_migration is not None
                 else configured_time_zone
             )
-            local_tz = ZoneInfo(source_time_zone)
+            local_tz = await async_resolve_time_zone(
+                source_time_zone,
+                configured_time_zone,
+            )
+            if local_tz is None:
+                _LOGGER.warning(
+                    "Unable to import smart1 PV history: invalid time zone"
+                )
+                self._last_result = "invalid_time_zone"
+                return
             today = datetime.now(local_tz).date()
             record_count = (
                 PV_STATISTICS_LOOKBACK
@@ -1602,10 +1612,15 @@ class Smart1PvHistoryImporter:
                     source_time_zone,
                 )
             )
-            try:
-                records_tz = ZoneInfo(recorded_time_zone)
-            except ZoneInfoNotFoundError:
+            if recorded_time_zone == source_time_zone:
                 records_tz = local_tz
+            else:
+                records_tz = await async_resolve_time_zone(
+                    recorded_time_zone,
+                    configured_time_zone,
+                )
+                if records_tz is None:
+                    records_tz = local_tz
             legacy_layout_canonicalization_required = bool(
                 records
                 and stored_schema_version
