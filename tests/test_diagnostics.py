@@ -8,6 +8,8 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).parents[1]
@@ -33,9 +35,13 @@ util = sys.modules.setdefault(
     types.ModuleType("homeassistant.util"),
 )
 util.__path__ = []
-dt_util = types.ModuleType("homeassistant.util.dt")
+dt_util = sys.modules.setdefault(
+    "homeassistant.util.dt",
+    types.ModuleType("homeassistant.util.dt"),
+)
 dt_util.now = lambda: datetime(2026, 8, 4, tzinfo=timezone.utc)
-sys.modules["homeassistant.util.dt"] = dt_util
+dt_util.get_default_time_zone = lambda: ZoneInfo("Europe/Berlin")
+util.dt = dt_util
 
 custom_components = sys.modules.setdefault(
     "custom_components",
@@ -294,10 +300,22 @@ class DiagnosticsTest(unittest.TestCase):
     def test_returns_classification_metadata_without_credentials_or_values(
         self,
     ) -> None:
-        result = asyncio.run(
-            diagnostics.async_get_config_entry_diagnostics(Hass(), Entry())
-        )
+        default_time_zone = ZoneInfo("Europe/Berlin")
+        default_time_zone_loader = Mock(return_value=default_time_zone)
+        with patch.object(
+            diagnostics.dt_util,
+            "get_default_time_zone",
+            default_time_zone_loader,
+        ):
+            result = asyncio.run(
+                diagnostics.async_get_config_entry_diagnostics(
+                    Hass(),
+                    Entry(),
+                )
+            )
         serialized = json.dumps(result)
+
+        default_time_zone_loader.assert_called_once_with()
 
         self.assertEqual(result["points"][0]["current_category"], "pv")
         self.assertEqual(

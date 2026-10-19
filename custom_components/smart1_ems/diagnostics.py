@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from aiohttp import ClientError
 
@@ -290,7 +289,7 @@ async def _pv_power_integration_probe(
     integration = integrate_power_rows(
         rows,
         point.id,
-        ZoneInfo(hass.config.time_zone),
+        dt_util.get_default_time_zone(),
     )
     base_result = {
         "period": "previous_complete_day",

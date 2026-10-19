@@ -8,7 +8,7 @@ import sys
 import types
 import unittest
 from unittest.mock import ANY, AsyncMock, Mock, call, patch
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 ROOT = Path(__file__).parents[1]
@@ -82,6 +82,22 @@ util = sys.modules.setdefault(
     types.ModuleType("homeassistant.util"),
 )
 util.__path__ = []
+dt_util = sys.modules.setdefault(
+    "homeassistant.util.dt",
+    types.ModuleType("homeassistant.util.dt"),
+)
+dt_util.get_default_time_zone = lambda: ZoneInfo("UTC")
+
+
+async def _async_get_time_zone(time_zone_name: str):
+    try:
+        return ZoneInfo(time_zone_name)
+    except ZoneInfoNotFoundError:
+        return None
+
+
+dt_util.async_get_time_zone = _async_get_time_zone
+util.dt = dt_util
 unit_conversion = types.ModuleType("homeassistant.util.unit_conversion")
 unit_conversion.EnergyConverter = types.SimpleNamespace(UNIT_CLASS="energy")
 sys.modules["homeassistant.util.unit_conversion"] = unit_conversion
@@ -103,6 +119,9 @@ derived_history = importlib.import_module(
 )
 recorder_helpers = importlib.import_module(
     "custom_components.smart1_ems.recorder_helpers"
+)
+time_zone_module = importlib.import_module(
+    "custom_components.smart1_ems.time_zone"
 )
 
 
@@ -522,6 +541,99 @@ class _HistoryState:
 
 
 class Smart1HistoryTest(unittest.TestCase):
+    def test_configured_time_zone_reuses_home_assistant_default(self) -> None:
+        configured_time_zone = ZoneInfo("Europe/Berlin")
+        async_loader = AsyncMock()
+
+        with (
+            patch.object(
+                time_zone_module.dt_util,
+                "get_default_time_zone",
+                return_value=configured_time_zone,
+            ),
+            patch.object(
+                time_zone_module.dt_util,
+                "async_get_time_zone",
+                async_loader,
+            ),
+        ):
+            result = asyncio.run(
+                time_zone_module.async_resolve_time_zone(
+                    "Europe/Berlin",
+                    "Europe/Berlin",
+                )
+            )
+
+        self.assertIs(result, configured_time_zone)
+        async_loader.assert_not_awaited()
+
+    def test_persisted_time_zone_uses_async_loader(self) -> None:
+        persisted_time_zone = ZoneInfo("Asia/Kathmandu")
+        async_loader = AsyncMock(return_value=persisted_time_zone)
+
+        with (
+            patch.object(
+                time_zone_module.dt_util,
+                "get_default_time_zone",
+                return_value=ZoneInfo("Europe/Berlin"),
+            ),
+            patch.object(
+                time_zone_module.dt_util,
+                "async_get_time_zone",
+                async_loader,
+            ),
+        ):
+            result = asyncio.run(
+                time_zone_module.async_resolve_time_zone(
+                    "Asia/Kathmandu",
+                    "Europe/Berlin",
+                )
+            )
+
+        self.assertIs(result, persisted_time_zone)
+        async_loader.assert_awaited_once_with("Asia/Kathmandu")
+
+    def test_unknown_time_zone_returns_none(self) -> None:
+        async_loader = AsyncMock(return_value=None)
+
+        with patch.object(
+            time_zone_module.dt_util,
+            "async_get_time_zone",
+            async_loader,
+        ):
+            result = asyncio.run(
+                time_zone_module.async_resolve_time_zone(
+                    "Invalid/Zone",
+                    "Europe/Berlin",
+                )
+            )
+
+        self.assertIsNone(result)
+        async_loader.assert_awaited_once_with("Invalid/Zone")
+
+    def test_non_zoneinfo_default_uses_async_loader(self) -> None:
+        resolved_time_zone = ZoneInfo("UTC")
+        async_loader = AsyncMock(return_value=resolved_time_zone)
+
+        with (
+            patch.object(
+                time_zone_module.dt_util,
+                "get_default_time_zone",
+                return_value=timezone.utc,
+            ),
+            patch.object(
+                time_zone_module.dt_util,
+                "async_get_time_zone",
+                async_loader,
+            ),
+        ):
+            result = asyncio.run(
+                time_zone_module.async_resolve_time_zone("UTC", "UTC")
+            )
+
+        self.assertIs(result, resolved_time_zone)
+        async_loader.assert_awaited_once_with("UTC")
+
     def test_initial_window_contains_365_days(self) -> None:
         local_tz = ZoneInfo("Europe/Berlin")
 
@@ -610,6 +722,182 @@ class Smart1HistoryTest(unittest.TestCase):
             importer.diagnostic_status["last_result"],
             "repair_pending",
         )
+
+    def test_pv_import_rejects_unknown_active_time_zone_before_io(
+        self,
+    ) -> None:
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Invalid/Zone")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+        )
+        importer._existing_statistics = AsyncMock()
+        importer._fetch_daily_energy = AsyncMock()
+
+        with patch.object(
+            history,
+            "async_resolve_time_zone",
+            new=AsyncMock(return_value=None),
+        ) as resolve_time_zone:
+            asyncio.run(importer.async_import())
+
+        resolve_time_zone.assert_awaited_once_with(
+            "Invalid/Zone",
+            "Invalid/Zone",
+        )
+        importer._existing_statistics.assert_not_awaited()
+        importer._fetch_daily_energy.assert_not_awaited()
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "invalid_time_zone",
+        )
+
+    def test_derived_import_rejects_unknown_active_time_zone_before_io(
+        self,
+    ) -> None:
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Invalid/Zone")
+        )
+        point = types.SimpleNamespace(id="grid", name="Bezug")
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            {"grid_import": point},
+        )
+        importer._existing_statistics = AsyncMock()
+        importer._fetch_hourly_energy = AsyncMock()
+
+        with patch.object(
+            derived_history,
+            "async_resolve_time_zone",
+            new=AsyncMock(return_value=None),
+        ) as resolve_time_zone:
+            asyncio.run(importer.async_import())
+
+        resolve_time_zone.assert_awaited_once_with(
+            "Invalid/Zone",
+            "Invalid/Zone",
+        )
+        importer._existing_statistics.assert_not_awaited()
+        importer._fetch_hourly_energy.assert_not_awaited()
+        self.assertEqual(
+            importer.diagnostic_status["last_result"],
+            "invalid_time_zone",
+        )
+
+    def test_pv_invalid_recorded_time_zone_falls_back_to_active_zone(
+        self,
+    ) -> None:
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        importer = history.Smart1PvHistoryImporter(
+            hass,
+            types.SimpleNamespace(),
+            history_state=state,
+        )
+        state.persisted_source_time_zones[importer.statistic_id] = (
+            "Invalid/Zone"
+        )
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_daily_energy = AsyncMock()
+        local_tz = ZoneInfo("Europe/Berlin")
+        resolver = AsyncMock(
+            side_effect=[local_tz, None]
+        )
+        profile_semantics = Mock(return_value=False)
+
+        with (
+            patch.object(
+                history,
+                "async_resolve_time_zone",
+                new=resolver,
+            ),
+            patch.object(
+                history,
+                "_has_hourly_profile_semantics",
+                new=profile_semantics,
+            ),
+        ):
+            asyncio.run(importer.async_import(1, repair=False))
+
+        self.assertEqual(
+            resolver.await_args_list,
+            [
+                call("Europe/Berlin", "Europe/Berlin"),
+                call("Invalid/Zone", "Europe/Berlin"),
+            ],
+        )
+        importer._existing_statistics.assert_awaited_once()
+        profile_semantics.assert_called_once_with([], local_tz)
+
+    def test_derived_invalid_recorded_zone_is_loaded_once_and_falls_back(
+        self,
+    ) -> None:
+        state = _HistoryState()
+        hass = types.SimpleNamespace(
+            config=types.SimpleNamespace(time_zone="Europe/Berlin")
+        )
+        role_points = {
+            "grid_import": types.SimpleNamespace(id="grid", name="Bezug"),
+            "wallbox_consumption": types.SimpleNamespace(
+                id="wallbox",
+                name="Wallbox",
+            ),
+        }
+        importer = derived_history.Smart1DerivedEnergyImporter(
+            hass,
+            types.SimpleNamespace(),
+            role_points,
+            history_state=state,
+        )
+        for role_key, point in role_points.items():
+            statistic_id = derived_history.statistic_id_for_role(
+                role_key,
+                point.id,
+            )
+            state.persisted_source_time_zones[statistic_id] = "Invalid/Zone"
+        importer._existing_statistics = AsyncMock(return_value=[])
+        importer._fetch_hourly_energy = AsyncMock()
+        local_tz = ZoneInfo("Europe/Berlin")
+        resolver = AsyncMock(
+            side_effect=[local_tz, None]
+        )
+        positive_partition = Mock(return_value=True)
+
+        with (
+            patch.object(
+                derived_history,
+                "async_resolve_time_zone",
+                new=resolver,
+            ),
+            patch.object(
+                derived_history,
+                "_has_positive_energy_across_date_partition",
+                new=positive_partition,
+            ),
+        ):
+            asyncio.run(importer.async_import(1, repair=True))
+
+        self.assertEqual(
+            resolver.await_args_list,
+            [
+                call("Europe/Berlin", "Europe/Berlin"),
+                call("Invalid/Zone", "Europe/Berlin"),
+            ],
+        )
+        self.assertEqual(importer._existing_statistics.await_count, 2)
+        self.assertEqual(positive_partition.call_count, 2)
+        self.assertTrue(
+            all(
+                args[1] is local_tz
+                for args, _kwargs in positive_partition.call_args_list
+            )
+        )
+        importer._fetch_hourly_energy.assert_not_awaited()
 
     def test_complete_pv_history_read_uses_unbounded_hourly_query(
         self,
