@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Use the default HACS catalogue as the standard installation path following
+  acceptance of the integration, while clarifying the transition for existing
+  custom-repository installations
+- Record successful testing with Home Assistant Core 2026.10.2 and document
+  the initial derived-energy role selection with a redacted screenshot
+
 ## [0.9.1] - 2026-10-19
 
 ### Fixed

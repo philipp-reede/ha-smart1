@@ -24,8 +24,9 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 > durch automatisierte Tests und an einer realen smart1 Anlage geprüft.
 
 > Das Projekt ist eine frühe öffentliche Beta-Version. Es wurde wiederholt mit
-> einer realen smart1 Anlage sowie Home Assistant Core 2026.7.4, 2026.8.3 und
-> 2026.9.3 geprüft, zuletzt unter Home Assistant OS 18.3.
+> einer realen smart1 Anlage sowie Home Assistant Core 2026.7.4, 2026.8.3,
+> 2026.9.3 und 2026.10.2 geprüft. Home Assistant OS 18.3 wurde mit Core
+> 2026.9.3 bestätigt.
 
 [English documentation](../README.md) ·
 [Installation](#installation-über-hacs) ·
@@ -93,6 +94,13 @@ Befehle oder andere Steuerungsmöglichkeiten bereit.
   <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/setup-api-key.jpg" width="720" alt="Einrichtung von smart1 EMS mit verdecktem API-Schlüssel">
 </p>
 
+<details>
+  <summary><strong>Vorgeschlagene Leistungsmesspunkte für abgeleitete Energierollen bei der Einrichtung</strong></summary>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/setup-energy-roles.png" width="500" alt="Ersteinrichtung von smart1 EMS mit vorgeschlagenen Messpunkten für Netzbezug und -einspeisung, Batterieladung und -entladung, Wallbox, Wärmepumpe und Zusatzheizung">
+  </p>
+</details>
+
 **Automatisch erkannte Geräte**
 
 <p align="center">
@@ -120,7 +128,7 @@ Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 | Zusatzheizung | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, Firmware `V47.22.18.24` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wallbox | KEBA P40 M-TEC | Software `1.4.5` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wärmepumpe | M-TEC AP440 | Nicht angegeben | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3` und `2026.9.3`; OS `18.3` und Supervisor `2026.09.2` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3` und `2026.10.2`; OS `18.3` und Supervisor `2026.09.2` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13 bis Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Einrichtungsprüfung mit Core 2026.10.2 vom 19.10.2026 |
 
 Diese Angaben dokumentieren bestätigte Testkombinationen und keine
 Mindestversionen. Bericht
@@ -135,14 +143,19 @@ beobachtete Auffälligkeiten. Die bisherigen Geräte- und Entitätszuordnungen
 blieben unverändert plausibel, alle sieben Rollen des Energy Dashboards waren
 belegt und sowohl der PV- als auch der abgeleitete Energie-Historienimport
 wurden vollständig abgeschlossen. Im
-Energy Dashboard traten keine Auffälligkeiten auf. Die bereinigte Diagnose
-meldete 77 Messpunkte, einen Wechselrichter mit zwei aktiven Strings und zwei
+Energy Dashboard traten keine Auffälligkeiten auf.
+Die bereinigte Diagnose meldete 77 Messpunkte, einen Wechselrichter mit zwei
+aktiven Strings und zwei
 vollständig beschriebenen Modulfeldern. Der PV-Plausibilitätstest erfasste alle
 288 Fünf-Minuten-Werte des Vortags ohne Lücke; die Abweichung zum exakten
 Tageswert betrug nur 0,78 %. Die Reauthentifizierung wurde bei diesem normalen
 Aktualisierungstest nicht ausgelöst. Der vollständige Testverlauf ist im
 [Kompatibilitätsbericht #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5828037865)
 dokumentiert.
+
+In einer separaten Folgeprüfung wurde die Ersteinrichtung einschließlich der
+Bestätigung aller sieben vorgeschlagenen abgeleiteten Energierollen mit Home
+Assistant Core `2026.10.2` erfolgreich abgeschlossen.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an
@@ -157,19 +170,20 @@ gemeldet werden.
 
 ## Installation über HACS
 
-Bis die Integration im Standardkatalog von HACS enthalten ist, wird sie als
-benutzerdefiniertes Repository hinzugefügt:
+smart1 EMS ist im Standardkatalog von HACS verfügbar:
 
 [![Home Assistant öffnen und dieses Repository in HACS anzeigen](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=philipp-reede&repository=ha-smart1&category=integration)
 
-Alternativ kann das Repository manuell hinzugefügt werden:
-
 1. HACS in Home Assistant öffnen.
-2. Im Drei-Punkte-Menü **Benutzerdefinierte Repositories** auswählen.
-3. `https://github.com/philipp-reede/ha-smart1` als Kategorie **Integration**
-   hinzufügen.
-4. **smart1 EMS** suchen und herunterladen.
-5. Home Assistant neu starten.
+2. Unter den Integrationen nach **smart1 EMS** suchen.
+3. **Herunterladen** auswählen.
+4. Home Assistant neu starten.
+
+Das frühere Hinzufügen als benutzerdefiniertes Repository ist nicht mehr
+erforderlich. Bestehende HACS-Installationen über ein benutzerdefiniertes
+Repository erhalten weiterhin Aktualisierungen und müssen nicht neu installiert
+werden. Nach der Aktualisierung seiner Repository-Daten erkennt HACS den Eintrag
+aus dem Standardkatalog.
 
 ## Einrichtung
 
@@ -179,9 +193,12 @@ Alternativ kann das Repository manuell hinzugefügt werden:
    verdeckt; der Schlüssel wird im Home-Assistant-Konfigurationseintrag
    gespeichert.
 4. Falls mehrere Anlagen verfügbar sind, die gewünschte Anlage auswählen.
-5. Die vorgeschlagenen Leistungsmesspunkte für die erkannten
-   Energy-Dashboard-Rollen prüfen. Eine Rolle auf **—** belassen, wenn sie
-   deaktiviert bleiben soll.
+5. Unter **Abgeleitete Energie konfigurieren** die vorgeschlagenen
+   Leistungsmesspunkte für die erkannten Energy-Dashboard-Rollen prüfen. Eine
+   Rolle auf **—** belassen, wenn sie deaktiviert bleiben soll. Aus den
+   gewählten Messpunkten wird die Energie anhand der 5-Minuten-Leistungshistorie
+   berechnet. Die Seite mit **OK** bestätigen, um die Einrichtung abzuschließen;
+   die Auswahl bleibt später über **Konfigurieren** änderbar.
 
 Jede Anlage kann nur einmal eingerichtet werden. Lehnt das Portal den
 gespeicherten Schlüssel später ab, öffnet Home Assistant einen Reparaturdialog.
@@ -349,8 +366,6 @@ Integrationsdiagnose Zugangsdaten, Kennungen und Messwerte gezielt entfernt.
 - Wechselrichter-Buskonfiguration und Herstellerprotokolle mit weiteren EMS-
   und Wechselrichterkombinationen prüfen
 - Den Zeitraum des historischen Imports bei Bedarf konfigurierbar machen
-- Die Aufnahme in den HACS-Standardkatalog abschließen und Rückmeldungen aus dem
-  Review bearbeiten
 
 ## Projekt unterstützen
 

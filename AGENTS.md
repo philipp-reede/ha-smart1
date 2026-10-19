@@ -3,7 +3,7 @@
 ## Project goal
 
 Build a read-only Home Assistant integration for the smart1 energy
-management system, intended for publication through HACS.
+management system, published through HACS.
 
 The integration uses the smart1 CSV cloud API. It must represent the EMS,
 not only the inverter. Relevant consumers include wallboxes, heat pumps,
@@ -18,7 +18,7 @@ heating elements and other devices known to smart1.
   2. Home Assistant device grouping
   3. Energy Dashboard support
   4. Historical energy data where the API actually provides it
-  5. HACS publication
+  5. Reliable HACS distribution
 
 ## Architecture
 
@@ -121,15 +121,13 @@ PV cumulative endpoint:
 
 ## Current priorities
 
-1. Monitor default HACS catalogue pull request `hacs/default#10379` and address
-   review feedback
-2. Collect structured compatibility reports from additional smart1 portals and
+1. Collect structured compatibility reports from additional smart1 portals and
    hardware combinations
-3. Confirm the preferred measurement path where installations expose duplicate
+2. Confirm the preferred measurement path where installations expose duplicate
    wallbox, heat-pump or heating-element points
-4. Validate multi-inverter layouts, module-field assignments and active
+3. Validate multi-inverter layouts, module-field assignments and active
    inverter-bus configurations with additional real installations
-5. Add a configurable history range only if real-world import duration or
+4. Add a configurable history range only if real-world import duration or
    reliability reports demonstrate a need
 
 ## Safety and secrets

@@ -3,6 +3,8 @@
 ## Working
 
 - Custom integration loads through Home Assistant
+- The integration is published in the default HACS catalogue through
+  [hacs/default#10379](https://github.com/hacs/default/pull/10379)
 - Config flow asks for the API key in a translated, masked password field
 - `/plants` is queried automatically
 - A single plant is selected automatically; when an API key exposes multiple
@@ -325,9 +327,10 @@
 - Other battery-related percentage points such as state of health and
   EnergyCloud enablement flags are not offered as battery state of charge
 - Entities use Home Assistant's device-aware naming convention
-- The repository contains HACS metadata, public installation documentation,
-  English and German custom-integration translations, and automated HACS and
-  Hassfest validation for the current 0.9.1 early-beta release
+- The repository is available from the default HACS catalogue and contains
+  public installation documentation, English and German custom-integration
+  translations, and automated HACS and Hassfest validation for the current
+  0.9.1 early-beta release
 - CI also imports every integration module against pinned Home Assistant Core
   2026.9.3 on Python 3.14, while setup tests cover startup history import and
   the separate scheduled repair and current-day refresh paths. GitHub's
@@ -346,6 +349,10 @@
   covered by automated tests. The known `via_device` removal scheduled for
   Home Assistant 2027.8 is covered through `via_device_id` on supported
   versions, with a compatibility path for Home Assistant 2026.7 and earlier
+- A subsequent real-world setup test with Home Assistant Core 2026.10.2
+  completed the new derived-energy role page successfully with all seven
+  detected recommendations selected. The documented screenshot records the
+  additional initial-setup step without exposing installation identifiers
 - The integration is designed for the documented smart1 portal API generally;
   real-world hardware validation currently covers M-TEC Energy Hero EMS,
   Energy Heater, Energy Butler inverter/storage, M-TEC AP440 heat pump and a
@@ -420,9 +427,6 @@
   time-zone/day-boundary partition when the bounded daily probes cannot recover
   its missing adjacent samples; until then the affected role deliberately
   remains pending
-- Monitor the pending default HACS catalogue review in
-  [hacs/default#10379](https://github.com/hacs/default/pull/10379) and address
-  review feedback
 
 ## Current code behavior
 
