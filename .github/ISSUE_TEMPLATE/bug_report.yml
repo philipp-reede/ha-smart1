@@ -34,6 +34,7 @@ body:
     attributes:
       label: Installation method / Installationsart
       options:
+        - HACS default catalogue / HACS-Standardkatalog
         - HACS custom repository / Benutzerdefiniertes HACS-Repository
         - Manual installation / Manuelle Installation
         - Other / Sonstige

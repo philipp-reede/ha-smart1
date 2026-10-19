@@ -23,8 +23,9 @@ battery, wallbox, heat pump and auxiliary heating.
 > automated tests and validated against a real smart1 installation.
 
 > This project is an early public beta. It has been validated repeatedly with
-> one real smart1 installation and Home Assistant Core 2026.7.4, 2026.8.3 and
-> 2026.9.3, most recently on Home Assistant OS 18.3.
+> one real smart1 installation and Home Assistant Core 2026.7.4, 2026.8.3,
+> 2026.9.3 and 2026.10.2. Home Assistant OS 18.3 was confirmed with Core
+> 2026.9.3.
 
 [Deutsche Anleitung](docs/README.de.md) ·
 [Installation](#installation-with-hacs) ·
@@ -94,6 +95,13 @@ switches or commands.
   <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/setup-api-key.jpg" width="720" alt="smart1 EMS setup with a masked API-key field">
 </p>
 
+<details>
+  <summary><strong>Suggested power points for derived-energy roles during setup</strong></summary>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/philipp-reede/ha-smart1/main/docs/images/setup-energy-roles.png" width="500" alt="Initial smart1 EMS setup showing suggested measurement points for grid import and export, battery charge and discharge, wallbox, heat pump and auxiliary-heater energy">
+  </p>
+</details>
+
 **Automatically discovered devices**
 
 <p align="center">
@@ -121,7 +129,7 @@ been limited to one installation:
 | Auxiliary heating | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, firmware `V47.22.18.24` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | EV charging | KEBA P40 M-TEC | Software `1.4.5` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Heat pump | M-TEC AP440 | Not reported | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3` and `2026.9.3`; OS `18.3` and Supervisor `2026.09.2` tested with Core `2026.9.3` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3` and `2026.10.2`; OS `18.3` and Supervisor `2026.09.2` tested with Core `2026.9.3` | Real-world tested | [#13 through Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Core 2026.10.2 setup test reported 2026-10-19 |
 
 These are confirmed test combinations, not minimum version requirements.
 Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
@@ -141,6 +149,10 @@ exact daily total by only 0.78%. Reauthentication was not triggered during this
 normal upgrade test. The full test history is documented in
 [compatibility report #13](https://github.com/philipp-reede/ha-smart1/issues/13#issuecomment-5828037865).
 
+In a separate follow-up test, the initial setup, including confirmation of all
+seven suggested derived-energy roles, was completed successfully with Home
+Assistant Core `2026.10.2`.
+
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a
 real installation.
@@ -153,19 +165,19 @@ for successful or partially successful tests.
 
 ## Installation with HACS
 
-Until the integration is included in the default HACS catalogue, add it as a
-custom repository:
+smart1 EMS is available in the default HACS catalogue:
 
 [![Open your Home Assistant instance and open this repository inside HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=philipp-reede&repository=ha-smart1&category=integration)
 
-Alternatively, add the repository manually:
-
 1. Open HACS in Home Assistant.
-2. Open the three-dot menu and select **Custom repositories**.
-3. Add `https://github.com/philipp-reede/ha-smart1` with category
-   **Integration**.
-4. Search for **smart1 EMS** and download it.
-5. Restart Home Assistant.
+2. Search for **smart1 EMS** under integrations.
+3. Select **Download**.
+4. Restart Home Assistant.
+
+The former custom-repository step is no longer required. Existing HACS
+installations that were added as a custom repository can continue to update
+normally and do not need to be reinstalled. HACS recognizes the default-catalogue
+entry after its repository data has refreshed.
 
 ## Manual installation
 
@@ -180,8 +192,11 @@ restart Home Assistant.
 3. Enter your personal API key from the smart1 portal. The field is masked and
    the key is stored in the Home Assistant config entry.
 4. If the key has access to multiple installations, select the desired plant.
-5. Review the suggested power points for the detected Energy Dashboard roles.
-   Leave a role set to **—** if it should remain disabled.
+5. In **Configure derived energy**, review the suggested power points for the
+   detected Energy Dashboard roles. Leave a role set to **—** if it should
+   remain disabled. The selected points are used to calculate energy from the
+   five-minute power history. Confirm the page to finish setup; the selections
+   can be changed later through **Configure**.
 
 Each plant can be configured only once. If the portal later rejects the stored
 key, Home Assistant opens a repair flow. The replacement key is saved only if
@@ -347,7 +362,6 @@ redact credentials, identifiers and measurements.
   additional EMS and inverter combinations.
 - Make the historical import range configurable if longer or shorter imports
   prove useful across installations.
-- Complete inclusion in the default HACS catalogue and address review feedback.
 
 Technical API findings and implementation details are documented in
 [`API_NOTES.md`](API_NOTES.md).
