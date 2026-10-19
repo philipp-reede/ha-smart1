@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-19
+
 ### Fixed
 
 - Reuse Home Assistant's already loaded configured time zone and resolve
