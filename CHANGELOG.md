@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-20
+
 ### Fixed
 
 - Split larger live-value polls into bounded sequential batches and retry only
