@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -53,6 +54,7 @@ class CsvResponse:
     async def text(self) -> str:
         return self._text
 
+
 class CsvSession:
     def __init__(self, text: str, status: int = 200) -> None:
         self._text = text
@@ -60,6 +62,17 @@ class CsvSession:
 
     def get(self, *args, **kwargs) -> CsvResponse:
         return CsvResponse(self._text, self._status)
+
+
+class SequencedSession:
+    def __init__(self, responses: list[tuple[str, int]]) -> None:
+        self._responses = list(responses)
+        self.urls: list[str] = []
+
+    def get(self, url: str, *args, **kwargs) -> CsvResponse:
+        self.urls.append(url)
+        text, status = self._responses.pop(0)
+        return CsvResponse(text, status)
 
 
 class FailingSession:
@@ -86,6 +99,47 @@ class RecordingSmart1Api(Smart1Api):
         self.requested_path = path
         self.missing_ok = missing_ok
         return self.rows
+
+
+class BatchRecordingSmart1Api(Smart1Api):
+    def __init__(self, *, fail_batch: int | None = None) -> None:
+        super().__init__(None, "redacted", "42")
+        self.calls: list[tuple[tuple[str, ...], date]] = []
+        self.events: list[tuple[str, tuple[str, ...]]] = []
+        self.fail_batch = fail_batch
+        self.overlap = False
+        self._active = False
+
+    async def get_linear_detailed_rows(
+        self,
+        linear_ids: list[str],
+        period: str = "day",
+        target_date: date | None = None,
+        *,
+        missing_ok: bool = False,
+    ) -> list[dict[str, str]]:
+        assert period == "day"
+        assert target_date is not None
+        assert missing_ok
+        batch_ids = tuple(linear_ids)
+        self.calls.append((batch_ids, target_date))
+        self.events.append(("start", batch_ids))
+        if self._active:
+            self.overlap = True
+        self._active = True
+        await asyncio.sleep(0)
+        self._active = False
+        self.events.append(("end", batch_ids))
+        if self.fail_batch == len(self.calls):
+            raise Smart1ApiError("500")
+        return [
+            {
+                "LinearId": linear_id,
+                "Timestamp": f"{target_date.isoformat()} 12:00:00",
+                "Value1": str(index),
+            }
+            for index, linear_id in enumerate(linear_ids, start=1)
+        ]
 
 
 class Smart1ApiTest(unittest.TestCase):
@@ -539,6 +593,166 @@ class Smart1ApiTest(unittest.TestCase):
             {"counter_1": 300.0, "counter_2": 300.0},
         )
 
+    def test_linear_live_values_are_deduplicated_and_batched(self) -> None:
+        api = BatchRecordingSmart1Api()
+        linear_ids = ["counter_1", "counter_2", "counter_3"]
+        target_date = date(2026, 10, 20)
+
+        with patch.object(api_module, "LIVE_LINEAR_BATCH_SIZE", 2):
+            values = asyncio.run(
+                api.get_latest_linear_values(
+                    [*linear_ids, linear_ids[0], linear_ids[-1]],
+                    target_date=target_date,
+                )
+            )
+
+        self.assertEqual(
+            [len(batch_ids) for batch_ids, _date in api.calls],
+            [2, 1],
+        )
+        self.assertEqual(
+            [
+                linear_id
+                for batch_ids, _date in api.calls
+                for linear_id in batch_ids
+            ],
+            linear_ids,
+        )
+        self.assertEqual(
+            {call_date for _ids, call_date in api.calls},
+            {target_date},
+        )
+        self.assertEqual(
+            api.events,
+            [
+                ("start", ("counter_1", "counter_2")),
+                ("end", ("counter_1", "counter_2")),
+                ("start", ("counter_3",)),
+                ("end", ("counter_3",)),
+            ],
+        )
+        self.assertFalse(api.overlap)
+        self.assertEqual(list(values), linear_ids)
+
+    def test_linear_live_batch_failure_does_not_return_partial_data(self) -> None:
+        api = BatchRecordingSmart1Api(fail_batch=2)
+        linear_ids = [f"counter_{index}" for index in range(5)]
+
+        with patch.object(api_module, "LIVE_LINEAR_BATCH_SIZE", 2):
+            with self.assertRaisesRegex(
+                Smart1ApiError,
+                "smart1 API error 500",
+            ):
+                asyncio.run(
+                    api.get_latest_linear_values(
+                        linear_ids,
+                        target_date=date(2026, 10, 20),
+                    )
+                )
+
+        self.assertEqual(len(api.calls), 2)
+
+    def test_linear_live_transient_error_is_retried(self) -> None:
+        for status in (429, 502, 503, 504):
+            with self.subTest(status=status):
+                session = SequencedSession(
+                    [
+                        ("", status),
+                        (
+                            "LinearId;Timestamp;Value1\n"
+                            "counter_1;2026-10-20 12:00:00;123\n",
+                            200,
+                        ),
+                    ]
+                )
+                api = Smart1Api(session, "redacted", "42")
+
+                with patch.object(
+                    api_module.asyncio,
+                    "sleep",
+                    new=AsyncMock(),
+                ) as sleep:
+                    values = asyncio.run(
+                        api.get_latest_linear_values(
+                            ["counter_1"],
+                            target_date=date(2026, 10, 20),
+                        )
+                    )
+
+                self.assertEqual(values, {"counter_1": 123.0})
+                self.assertEqual(len(session.urls), 2)
+                sleep.assert_awaited_once()
+
+    def test_embedded_transient_live_error_is_retried(self) -> None:
+        session = SequencedSession(
+            [
+                (
+                    "Errorcode;Errormessage\n"
+                    "503;private portal details\n",
+                    200,
+                ),
+                (
+                    "LinearId;Timestamp;Value1\n"
+                    "counter_1;2026-10-20 12:00:00;123\n",
+                    200,
+                ),
+            ]
+        )
+        api = Smart1Api(session, "redacted", "42")
+
+        with patch.object(
+            api_module.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            values = asyncio.run(
+                api.get_latest_linear_values(
+                    ["counter_1"],
+                    target_date=date(2026, 10, 20),
+                )
+            )
+
+        self.assertEqual(values, {"counter_1": 123.0})
+        self.assertEqual(len(session.urls), 2)
+        sleep.assert_awaited_once()
+
+    def test_linear_live_non_transient_error_is_not_retried(self) -> None:
+        session = SequencedSession([("", 500)])
+        api = Smart1Api(session, "redacted", "42")
+
+        with patch.object(
+            api_module.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            with self.assertRaisesRegex(
+                Smart1ApiError,
+                "smart1 API error 500",
+            ):
+                asyncio.run(
+                    api.get_latest_linear_values(
+                        ["counter_1"],
+                        target_date=date(2026, 10, 20),
+                    )
+                )
+
+        self.assertEqual(len(session.urls), 1)
+        sleep.assert_not_awaited()
+
+    def test_linear_live_not_found_is_an_empty_batch_without_retry(self) -> None:
+        session = SequencedSession([("", 404)])
+        api = Smart1Api(session, "redacted", "42")
+
+        values = asyncio.run(
+            api.get_latest_linear_values(
+                ["counter_1"],
+                target_date=date(2026, 10, 20),
+            )
+        )
+
+        self.assertEqual(values, {"counter_1": None})
+        self.assertEqual(len(session.urls), 1)
+
     def test_linear_live_timestamp_fallback_is_deterministic(self) -> None:
         api = RecordingSmart1Api(
             [
@@ -663,13 +877,50 @@ class Smart1ApiTest(unittest.TestCase):
             "42",
         )
 
-        with self.assertLogs(api_module._LOGGER, level="ERROR") as captured:
+        with self.assertNoLogs(api_module._LOGGER, level="ERROR"):
             with self.assertRaises(Smart1ApiError) as raised:
                 asyncio.run(api._get_csv("/test"))
 
         self.assertEqual(str(raised.exception), "smart1 API error 401")
         self.assertNotIn(api_key, str(raised.exception))
-        self.assertNotIn(api_key, "\n".join(captured.output))
+
+    def test_transient_live_logs_do_not_expose_request_identifiers(self) -> None:
+        api_key = "private-api-key"
+        plant_id = "private-plant"
+        linear_id = "private-linear"
+        session = SequencedSession([("", 503), ("", 503), ("", 503)])
+        api = Smart1Api(session, api_key, plant_id)
+
+        with patch.object(
+            api_module,
+            "LIVE_TRANSIENT_RETRY_DELAYS",
+            (0, 0),
+        ):
+            with self.assertLogs(
+                api_module._LOGGER,
+                level="DEBUG",
+            ) as captured:
+                with self.assertRaises(Smart1ApiError):
+                    asyncio.run(
+                        api.get_latest_linear_values(
+                            [linear_id],
+                            target_date=date(2026, 10, 20),
+                        )
+                    )
+
+        logs = "\n".join(captured.output)
+        self.assertEqual(len(session.urls), 3)
+        self.assertEqual(len(captured.records), 2)
+        self.assertTrue(
+            all(
+                record.levelno < api_module.logging.ERROR
+                for record in captured.records
+            )
+        )
+        self.assertNotIn(api_key, logs)
+        self.assertNotIn(plant_id, logs)
+        self.assertNotIn(linear_id, logs)
+        self.assertNotIn("/data/csv/", logs)
 
 
 if __name__ == "__main__":

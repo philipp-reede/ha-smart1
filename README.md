@@ -66,6 +66,8 @@ battery, wallbox, heat pump and auxiliary heating.
   documented manufacturer protocols
 - Automatic retry and recovery when optional inverter, module-field or bus
   topology is temporarily unavailable during setup
+- Bounded sequential live polling with short retries for transient portal
+  overload responses, avoiding oversized all-points requests on larger systems
 - Live power, energy, temperature, percentage and diagnostic sensors where the
   portal exposes suitable points
 - Battery state of charge detected from the structured smart1 `SOC` signal

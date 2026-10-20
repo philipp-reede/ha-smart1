@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
@@ -35,6 +36,13 @@ from .pv import parse_pv_cumulative_energy
 _LOGGER = logging.getLogger(__name__)
 
 AUTH_ERROR_CODES = frozenset({"401", "403"})
+TRANSIENT_HTTP_ERROR_CODES = frozenset({"429", "502", "503", "504"})
+
+# The detailed endpoint returns every five-minute row since midnight for every
+# requested point.  Keep live requests small enough that larger installations
+# do not ask the portal to build one very large response on every poll.
+LIVE_LINEAR_BATCH_SIZE = 25
+LIVE_TRANSIENT_RETRY_DELAYS = (1, 2)
 
 
 def _latest_row_timestamp(row: dict[str, str]) -> datetime | None:
@@ -55,11 +63,6 @@ def _latest_row_timestamp(row: dict[str, str]) -> datetime | None:
     if timestamp.tzinfo is not None:
         timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
     return timestamp
-
-
-def _redact_secret(value: str, secret: str) -> str:
-    """Redact a secret from text intended for logs."""
-    return value.replace(secret, "***") if secret else value
 
 
 def sanitize_api_error_code(code: object) -> str:
@@ -139,16 +142,12 @@ class Smart1Api:
         """Execute a CSV request and retain privacy-safe response metadata."""
 
         url = f"{BASE_URL}{path}?apikey={self.api_key}"
-        safe_url = _redact_secret(url, self.api_key)
-
-        _LOGGER.debug("GET %s", safe_url)
-
         try:
             async with self.session.get(url, timeout=30) as response:
                 text = await response.text()
 
                 if missing_ok and response.status == 404:
-                    _LOGGER.debug("No smart1 data for %s", safe_url)
+                    _LOGGER.debug("smart1 endpoint returned no data")
                     return Smart1CsvResult(
                         rows=[],
                         endpoint_result="not_found",
@@ -156,19 +155,13 @@ class Smart1Api:
                     )
 
                 if response.status >= 400:
-                    _LOGGER.error(
-                        "HTTP %s for %s",
-                        response.status,
-                        safe_url,
-                    )
                     # aiohttp's ClientResponseError includes the full request
                     # URL, which contains the API key. Raise only a sanitized
                     # error.
                     raise Smart1ApiError(response.status)
         except (aiohttp.ClientError, TimeoutError) as err:
             _LOGGER.debug(
-                "Request failed for %s (%s)",
-                safe_url,
+                "smart1 request failed (%s)",
                 type(err).__name__,
             )
             raise Smart1ApiError("unknown") from None
@@ -189,7 +182,7 @@ class Smart1Api:
         if rows and "Errorcode" in rows[0]:
             error_code = str(rows[0].get("Errorcode") or "unknown").strip()
             if missing_ok and error_code.startswith("404"):
-                _LOGGER.debug("No smart1 data for %s", safe_url)
+                _LOGGER.debug("smart1 endpoint returned no data")
                 return Smart1CsvResult(
                     rows=[],
                     endpoint_result="not_found",
@@ -398,12 +391,26 @@ class Smart1Api:
         if not linear_ids:
             return {}
 
-        rows = await self.get_linear_detailed_rows(
-            linear_ids,
-            target_date=target_date,
-        )
+        # Point discovery can contain duplicate IDs on unusual portals.  Apart
+        # from avoiding redundant work, de-duplicating here guarantees that an
+        # ID belongs to exactly one request batch.
+        requested_ids = list(dict.fromkeys(linear_ids))
+        request_date = target_date or date.today()
+        rows: list[dict[str, str]] = []
 
-        values = {linear_id: None for linear_id in linear_ids}
+        for offset in range(0, len(requested_ids), LIVE_LINEAR_BATCH_SIZE):
+            batch_ids = requested_ids[
+                offset : offset + LIVE_LINEAR_BATCH_SIZE
+            ]
+            batch_rows = await self._get_live_linear_detailed_rows(
+                batch_ids,
+                target_date=request_date,
+            )
+            rows.extend(batch_rows)
+
+        # Do not publish a partially refreshed map: all batches above must
+        # finish successfully before result construction starts.
+        values = {linear_id: None for linear_id in requested_ids}
         selected_timestamps: dict[str, datetime | None] = {}
 
         for row in rows:
@@ -451,6 +458,41 @@ class Smart1Api:
                 values[linear_id] = value
 
         return values
+
+    async def _get_live_linear_detailed_rows(
+        self,
+        linear_ids: list[str],
+        *,
+        target_date: date,
+    ) -> list[dict[str, str]]:
+        """Return one live batch with bounded transient-error retries."""
+        for attempt in range(len(LIVE_TRANSIENT_RETRY_DELAYS) + 1):
+            try:
+                return await self.get_linear_detailed_rows(
+                    linear_ids,
+                    target_date=target_date,
+                    # A batch can legitimately contain only points without a
+                    # current-day row even when another batch has data.  The
+                    # portal reports that condition as 404.
+                    missing_ok=True,
+                )
+            except Smart1ApiError as err:
+                if (
+                    err.code not in TRANSIENT_HTTP_ERROR_CODES
+                    or attempt >= len(LIVE_TRANSIENT_RETRY_DELAYS)
+                ):
+                    raise
+
+                delay = LIVE_TRANSIENT_RETRY_DELAYS[attempt]
+                _LOGGER.debug(
+                    "Transient smart1 live request failure (status %s); "
+                    "retrying in %s seconds",
+                    err.code,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        raise RuntimeError("unreachable")
 
     async def get_linear_detailed_rows(
         self,
