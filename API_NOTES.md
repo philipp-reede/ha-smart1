@@ -30,6 +30,10 @@ Endpoint:
 - Supported periods: `day`, `month`, `year`.
 - `linearIds` is an optional comma-separated list, but the documentation
   recommends always supplying it.
+- The documentation does not state a maximum list size. The integration keeps
+  live requests bounded to 25 IDs per sequential batch because the endpoint
+  returns all detailed rows since midnight. A refresh is published only after
+  every batch succeeds.
 - Response fields include `DeviceId`, `LinearId`, `Timestamp`, `Value1`, and
   `Value2`.
 - `Value1` contains the point value in the base unit indicated by its type.

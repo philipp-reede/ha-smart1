@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Split larger live-value polls into bounded sequential batches and retry only
+  transient `429`, `502`, `503` and `504` responses before failing the update.
+  Current-day batches without rows no longer block otherwise valid live data
+- Leave HTTP error reporting to Home Assistant's update coordinator instead of
+  duplicating complete request paths containing plant and measurement-point
+  identifiers in the integration log
+
 ### Documentation
 
 - Use the default HACS catalogue as the standard installation path following

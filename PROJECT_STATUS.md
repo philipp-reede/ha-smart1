@@ -35,8 +35,11 @@
   A replacement key is stored only when it still exposes the original plant;
   temporary portal and network failures continue through normal retries
 - Sensors and counters are discovered automatically
-- Live values are fetched through one filtered linear request and selected by
-  their parsed CSV timestamps, independent of portal row order
+- Live values are fetched through bounded sequential linear-request batches.
+  Duplicate IDs are removed in stable discovery order, transient portal
+  responses are retried briefly and results are published only after every
+  batch succeeds. Latest values are selected by parsed CSV timestamps,
+  independent of portal row order
 - An installation without active linear points performs a small required plant
   probe so rejected credentials or lost access to the configured plant still
   trigger Home Assistant reauthentication
