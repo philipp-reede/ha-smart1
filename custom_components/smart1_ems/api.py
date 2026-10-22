@@ -37,6 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 
 AUTH_ERROR_CODES = frozenset({"401", "403"})
 TRANSIENT_HTTP_ERROR_CODES = frozenset({"429", "502", "503", "504"})
+TRANSPORT_ERROR_KINDS = frozenset({"client_error", "timeout"})
 
 # The detailed endpoint returns every five-minute row since midnight for every
 # requested point.  Keep live requests small enough that larger installations
@@ -71,12 +72,60 @@ def sanitize_api_error_code(code: object) -> str:
     return match.group(1) if match else "unknown"
 
 
+def _aiohttp_error_types(*names: str) -> tuple[type[BaseException], ...]:
+    """Return available aiohttp exception classes for this runtime."""
+    return tuple(
+        exception_type
+        for name in names
+        if isinstance(
+            exception_type := getattr(aiohttp, name, None),
+            type,
+        )
+        and issubclass(exception_type, BaseException)
+    )
+
+
+def _is_retryable_client_error(error: aiohttp.ClientError) -> bool:
+    """Return whether an aiohttp client failure is plausibly temporary."""
+    retryable_types = _aiohttp_error_types(
+        "ClientConnectionError",
+        "ClientPayloadError",
+    )
+    if not retryable_types:
+        # Lightweight unit-test shims expose only the common base class.
+        return type(error) is aiohttp.ClientError
+
+    permanent_types = _aiohttp_error_types(
+        "ClientHttpProxyError",
+        "ClientConnectorCertificateError",
+        "ClientConnectorSSLError",
+        "ClientSSLError",
+        "InvalidURL",
+        "ServerFingerprintMismatch",
+        "TooManyRedirects",
+    )
+    return isinstance(error, retryable_types) and not (
+        permanent_types and isinstance(error, permanent_types)
+    )
+
+
 class Smart1ApiError(Exception):
     """Sanitized error returned by the smart1 API."""
 
     def __init__(self, code: object) -> None:
         self.code = sanitize_api_error_code(code)
         super().__init__(f"smart1 API error {self.code}")
+
+
+class Smart1TransportError(Smart1ApiError):
+    """Sanitized transport failure without request details."""
+
+    def __init__(self, kind: str, *, retryable: bool = True) -> None:
+        self.kind = (
+            kind if kind in TRANSPORT_ERROR_KINDS else "client_error"
+        )
+        self.retryable = retryable
+        super().__init__("unknown")
 
 
 def is_auth_error(error: BaseException) -> bool:
@@ -89,6 +138,11 @@ def is_auth_error(error: BaseException) -> bool:
 
 def describe_api_error(error: BaseException) -> str:
     """Return an error description that cannot expose request details."""
+    if isinstance(error, Smart1TransportError):
+        if error.kind == "timeout":
+            return "smart1 API request timed out"
+        return "smart1 API connection error"
+
     if isinstance(error, Smart1ApiError):
         return f"smart1 API error {sanitize_api_error_code(error.code)}"
 
@@ -159,12 +213,25 @@ class Smart1Api:
                     # URL, which contains the API key. Raise only a sanitized
                     # error.
                     raise Smart1ApiError(response.status)
-        except (aiohttp.ClientError, TimeoutError) as err:
+        except TimeoutError as err:
             _LOGGER.debug(
                 "smart1 request failed (%s)",
                 type(err).__name__,
             )
-            raise Smart1ApiError("unknown") from None
+            # Keep the public exception free of request details while retaining
+            # enough type information for the required live request to retry a
+            # transport failure. A portal-provided unknown Errorcode remains a
+            # plain Smart1ApiError and is therefore not treated as transient.
+            raise Smart1TransportError("timeout") from None
+        except aiohttp.ClientError as err:
+            _LOGGER.debug(
+                "smart1 request failed (%s)",
+                type(err).__name__,
+            )
+            raise Smart1TransportError(
+                "client_error",
+                retryable=_is_retryable_client_error(err),
+            ) from None
 
         if not text.strip():
             return Smart1CsvResult(
@@ -477,17 +544,35 @@ class Smart1Api:
                     missing_ok=True,
                 )
             except Smart1ApiError as err:
-                if (
-                    err.code not in TRANSIENT_HTTP_ERROR_CODES
-                    or attempt >= len(LIVE_TRANSIENT_RETRY_DELAYS)
-                ):
+                transport_kind = (
+                    err.kind
+                    if isinstance(err, Smart1TransportError)
+                    else None
+                )
+                transport_retryable = (
+                    isinstance(err, Smart1TransportError)
+                    and err.retryable
+                )
+                is_transient_api_error = (
+                    err.code in TRANSIENT_HTTP_ERROR_CODES
+                )
+                if transport_kind is not None and not transport_retryable:
+                    raise
+                if transport_kind is None and not is_transient_api_error:
+                    raise
+                if attempt >= len(LIVE_TRANSIENT_RETRY_DELAYS):
                     raise
 
                 delay = LIVE_TRANSIENT_RETRY_DELAYS[attempt]
+                failure = (
+                    f"transport {transport_kind}"
+                    if transport_kind is not None
+                    else f"status {err.code}"
+                )
                 _LOGGER.debug(
-                    "Transient smart1 live request failure (status %s); "
+                    "Transient smart1 live request failure (%s); "
                     "retrying in %s seconds",
-                    err.code,
+                    failure,
                     delay,
                 )
                 await asyncio.sleep(delay)

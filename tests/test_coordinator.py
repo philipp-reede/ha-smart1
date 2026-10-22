@@ -81,8 +81,10 @@ smart1_ems.__path__ = [str(ROOT / "custom_components" / "smart1_ems")]
 coordinator_module = importlib.import_module(
     "custom_components.smart1_ems.coordinator"
 )
+api_module = importlib.import_module("custom_components.smart1_ems.api")
 Smart1Coordinator = coordinator_module.Smart1Coordinator
 Smart1ApiError = coordinator_module.Smart1ApiError
+Smart1TransportError = api_module.Smart1TransportError
 
 
 class LiveOnlyApi:
@@ -178,6 +180,14 @@ class FailingApiErrorApi:
         raise Smart1ApiError(
             f"{self.error_code} response for apikey={self.api_key}"
         )
+
+
+class FailingTransportApi:
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+    async def get_latest_linear_values(self, *args, **kwargs):
+        raise Smart1TransportError(self.kind)
 
 
 class EmptyLinearIdsApi(LiveOnlyApi):
@@ -329,6 +339,30 @@ class Smart1CoordinatorTest(unittest.TestCase):
                     f"smart1 API error {error_code}",
                 )
                 self.assertNotIn(api_key, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_transport_failures_are_described_without_unknown_code(
+        self,
+    ) -> None:
+        expected_messages = {
+            "client_error": "smart1 API connection error",
+            "timeout": "smart1 API request timed out",
+        }
+
+        for kind, expected_message in expected_messages.items():
+            with self.subTest(kind=kind):
+                coordinator = Smart1Coordinator(
+                    None,
+                    FailingTransportApi(kind),
+                    [],
+                    ["point-1"],
+                )
+
+                with self.assertRaises(UpdateFailed) as raised:
+                    asyncio.run(coordinator._async_update_data())
+
+                self.assertEqual(str(raised.exception), expected_message)
                 self.assertIsNone(raised.exception.__cause__)
                 self.assertTrue(raised.exception.__suppress_context__)
 

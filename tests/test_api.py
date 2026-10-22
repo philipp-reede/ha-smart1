@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -65,13 +65,19 @@ class CsvSession:
 
 
 class SequencedSession:
-    def __init__(self, responses: list[tuple[str, int]]) -> None:
+    def __init__(
+        self,
+        responses: list[tuple[str, int] | BaseException],
+    ) -> None:
         self._responses = list(responses)
         self.urls: list[str] = []
 
     def get(self, url: str, *args, **kwargs) -> CsvResponse:
         self.urls.append(url)
-        text, status = self._responses.pop(0)
+        response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        text, status = response
         return CsvResponse(text, status)
 
 
@@ -172,8 +178,17 @@ class Smart1ApiTest(unittest.TestCase):
         with self.assertRaises(Smart1ApiError) as raised:
             asyncio.run(api._get_csv("/test"))
 
+        self.assertIsInstance(
+            raised.exception,
+            api_module.Smart1TransportError,
+        )
         self.assertEqual(str(raised.exception), "smart1 API error unknown")
+        self.assertEqual(
+            describe_api_error(raised.exception),
+            "smart1 API connection error",
+        )
         self.assertNotIn(api_key, str(raised.exception))
+        self.assertNotIn(api_key, describe_api_error(raised.exception))
 
     def test_csv_diagnostics_sanitize_embedded_api_error_details(self) -> None:
         api_key = "fake-api-key-must-not-leak"
@@ -683,6 +698,199 @@ class Smart1ApiTest(unittest.TestCase):
                 self.assertEqual(len(session.urls), 2)
                 sleep.assert_awaited_once()
 
+    def test_linear_live_transport_error_is_retried(self) -> None:
+        private_url = (
+            "https://example.test/live?apikey="
+            "fake-api-key-must-not-leak"
+        )
+        cases = (
+            api_module.aiohttp.ClientError,
+            TimeoutError,
+        )
+
+        for error_type in cases:
+            with self.subTest(error_type=error_type.__name__):
+                session = SequencedSession(
+                    [
+                        error_type(private_url),
+                        (
+                            "LinearId;Timestamp;Value1\n"
+                            "counter_1;2026-10-20 12:00:00;123\n",
+                            200,
+                        ),
+                    ]
+                )
+                api = Smart1Api(session, "redacted", "42")
+
+                with patch.object(
+                    api_module.asyncio,
+                    "sleep",
+                    new=AsyncMock(),
+                ) as sleep:
+                    values = asyncio.run(
+                        api.get_latest_linear_values(
+                            ["counter_1"],
+                            target_date=date(2026, 10, 20),
+                        )
+                    )
+
+                self.assertEqual(values, {"counter_1": 123.0})
+                self.assertEqual(len(session.urls), 2)
+                sleep.assert_awaited_once_with(1)
+
+    def test_connection_error_allowlist_is_retried(self) -> None:
+        connection_error_type = type(
+            "ClientConnectionError",
+            (api_module.aiohttp.ClientError,),
+            {},
+        )
+        session = SequencedSession(
+            [
+                connection_error_type("private connection details"),
+                (
+                    "LinearId;Timestamp;Value1\n"
+                    "counter_1;2026-10-20 12:00:00;123\n",
+                    200,
+                ),
+            ]
+        )
+        api = Smart1Api(session, "redacted", "42")
+
+        with patch.object(
+            api_module.aiohttp,
+            "ClientConnectionError",
+            connection_error_type,
+            create=True,
+        ):
+            with patch.object(
+                api_module.asyncio,
+                "sleep",
+                new=AsyncMock(),
+            ) as sleep:
+                values = asyncio.run(
+                    api.get_latest_linear_values(
+                        ["counter_1"],
+                        target_date=date(2026, 10, 20),
+                    )
+                )
+
+        self.assertEqual(values, {"counter_1": 123.0})
+        self.assertEqual(len(session.urls), 2)
+        sleep.assert_awaited_once_with(1)
+
+    def test_linear_live_transport_error_exhausts_retry_budget(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        private_url = f"https://example.test/live?apikey={api_key}"
+        cases = (
+            api_module.aiohttp.ClientError,
+            TimeoutError,
+        )
+
+        for error_type in cases:
+            with self.subTest(error_type=error_type.__name__):
+                expected_kind = (
+                    "timeout"
+                    if error_type is TimeoutError
+                    else "client_error"
+                )
+                expected_description = (
+                    "smart1 API request timed out"
+                    if expected_kind == "timeout"
+                    else "smart1 API connection error"
+                )
+                session = SequencedSession(
+                    [error_type(private_url) for _attempt in range(3)]
+                )
+                plant_id = "private-plant"
+                api = Smart1Api(session, api_key, plant_id)
+
+                with patch.object(
+                    api_module.asyncio,
+                    "sleep",
+                    new=AsyncMock(),
+                ) as sleep:
+                    with self.assertLogs(
+                        api_module._LOGGER,
+                        level="DEBUG",
+                    ) as captured:
+                        with self.assertRaises(
+                            api_module.Smart1TransportError
+                        ) as raised:
+                            asyncio.run(
+                                api.get_latest_linear_values(
+                                    ["counter_1"],
+                                    target_date=date(2026, 10, 20),
+                                )
+                            )
+
+                self.assertEqual(len(session.urls), 3)
+                self.assertEqual(
+                    sleep.await_args_list,
+                    [call(1), call(2)],
+                )
+                self.assertEqual(raised.exception.code, "unknown")
+                self.assertEqual(raised.exception.kind, expected_kind)
+                self.assertEqual(
+                    describe_api_error(raised.exception),
+                    expected_description,
+                )
+                self.assertNotIn(api_key, str(raised.exception))
+                self.assertNotIn(
+                    api_key,
+                    describe_api_error(raised.exception),
+                )
+                logs = "\n".join(captured.output)
+                self.assertNotIn(api_key, logs)
+                self.assertNotIn(plant_id, logs)
+                self.assertNotIn("counter_1", logs)
+                self.assertNotIn("/data/csv/", logs)
+
+    def test_later_batch_transport_exhaustion_returns_no_partial_map(
+        self,
+    ) -> None:
+        private_url = (
+            "https://example.test/live?apikey="
+            "fake-api-key-must-not-leak"
+        )
+        session = SequencedSession(
+            [
+                (
+                    "LinearId;Timestamp;Value1\n"
+                    "counter_1;2026-10-20 12:00:00;111\n",
+                    200,
+                ),
+                *[
+                    api_module.aiohttp.ClientError(private_url)
+                    for _attempt in range(3)
+                ],
+            ]
+        )
+        api = Smart1Api(session, "redacted", "42")
+
+        with patch.object(api_module, "LIVE_LINEAR_BATCH_SIZE", 1):
+            with patch.object(
+                api_module.asyncio,
+                "sleep",
+                new=AsyncMock(),
+            ) as sleep:
+                with self.assertRaises(api_module.Smart1TransportError):
+                    asyncio.run(
+                        api.get_latest_linear_values(
+                            ["counter_1", "counter_2", "counter_3"],
+                            target_date=date(2026, 10, 20),
+                        )
+                    )
+
+        self.assertEqual(len(session.urls), 4)
+        self.assertIn("/counter_1?", session.urls[0])
+        self.assertTrue(
+            all("/counter_2?" in url for url in session.urls[1:])
+        )
+        self.assertTrue(
+            all("/counter_3?" not in url for url in session.urls)
+        )
+        self.assertEqual(sleep.await_args_list, [call(1), call(2)])
+
     def test_embedded_transient_live_error_is_retried(self) -> None:
         session = SequencedSession(
             [
@@ -738,6 +946,148 @@ class Smart1ApiTest(unittest.TestCase):
 
         self.assertEqual(len(session.urls), 1)
         sleep.assert_not_awaited()
+
+    def test_embedded_unknown_live_error_is_not_retried(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        session = SequencedSession(
+            [
+                (
+                    "Errorcode;Errormessage\n"
+                    f"unknown;private details containing {api_key}\n",
+                    200,
+                ),
+                (
+                    "LinearId;Timestamp;Value1\n"
+                    "counter_1;2026-10-20 12:00:00;123\n",
+                    200,
+                ),
+            ]
+        )
+        api = Smart1Api(session, api_key, "42")
+
+        with patch.object(
+            api_module.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            with self.assertRaises(Smart1ApiError) as raised:
+                asyncio.run(
+                    api.get_latest_linear_values(
+                        ["counter_1"],
+                        target_date=date(2026, 10, 20),
+                    )
+                )
+
+        self.assertNotIsInstance(
+            raised.exception,
+            api_module.Smart1TransportError,
+        )
+        self.assertEqual(raised.exception.code, "unknown")
+        self.assertEqual(len(session.urls), 1)
+        sleep.assert_not_awaited()
+        self.assertNotIn(api_key, str(raised.exception))
+
+    def test_permanent_client_error_is_not_retried(self) -> None:
+        api_key = "fake-api-key-must-not-leak"
+        private_url = f"https://example.test/live?apikey={api_key}"
+        invalid_url_type = type(
+            "InvalidURL",
+            (api_module.aiohttp.ClientError,),
+            {},
+        )
+        connection_error_type = type(
+            "ClientConnectionError",
+            (api_module.aiohttp.ClientError,),
+            {},
+        )
+        session = SequencedSession([invalid_url_type(private_url)])
+        api = Smart1Api(session, api_key, "42")
+
+        with patch.object(
+            api_module.aiohttp,
+            "InvalidURL",
+            invalid_url_type,
+            create=True,
+        ):
+            with patch.object(
+                api_module.aiohttp,
+                "ClientConnectionError",
+                connection_error_type,
+                create=True,
+            ):
+                with patch.object(
+                    api_module.asyncio,
+                    "sleep",
+                    new=AsyncMock(),
+                ) as sleep:
+                    with self.assertRaises(
+                        api_module.Smart1TransportError
+                    ) as raised:
+                        asyncio.run(
+                            api.get_latest_linear_values(
+                                ["counter_1"],
+                                target_date=date(2026, 10, 20),
+                            )
+                        )
+
+        self.assertEqual(len(session.urls), 1)
+        sleep.assert_not_awaited()
+        self.assertEqual(raised.exception.kind, "client_error")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(
+            describe_api_error(raised.exception),
+            "smart1 API connection error",
+        )
+        self.assertNotIn(api_key, str(raised.exception))
+
+    def test_linear_live_request_cancellation_is_not_retried(self) -> None:
+        session = SequencedSession([asyncio.CancelledError()])
+        api = Smart1Api(session, "redacted", "42")
+
+        with patch.object(
+            api_module.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(
+                    api.get_latest_linear_values(
+                        ["counter_1"],
+                        target_date=date(2026, 10, 20),
+                    )
+                )
+
+        self.assertEqual(len(session.urls), 1)
+        sleep.assert_not_awaited()
+
+    def test_linear_live_backoff_cancellation_stops_retries(self) -> None:
+        session = SequencedSession(
+            [
+                api_module.aiohttp.ClientError("private transport details"),
+                (
+                    "LinearId;Timestamp;Value1\n"
+                    "counter_1;2026-10-20 12:00:00;123\n",
+                    200,
+                ),
+            ]
+        )
+        api = Smart1Api(session, "redacted", "42")
+
+        with patch.object(
+            api_module.asyncio,
+            "sleep",
+            new=AsyncMock(side_effect=asyncio.CancelledError()),
+        ) as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(
+                    api.get_latest_linear_values(
+                        ["counter_1"],
+                        target_date=date(2026, 10, 20),
+                    )
+                )
+
+        self.assertEqual(len(session.urls), 1)
+        sleep.assert_awaited_once_with(1)
 
     def test_linear_live_not_found_is_an_empty_batch_without_retry(self) -> None:
         session = SequencedSession([("", 404)])
