@@ -333,7 +333,7 @@
 - The repository is available from the default HACS catalogue and contains
   public installation documentation, English and German custom-integration
   translations, and automated HACS and Hassfest validation for the current
-  0.9.2 early-beta release
+  0.9.3 early-beta release
 - CI also imports every integration module against pinned Home Assistant Core
   2026.9.3 on Python 3.14, while setup tests cover startup history import and
   the separate scheduled repair and current-day refresh paths. GitHub's
