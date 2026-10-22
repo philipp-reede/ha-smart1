@@ -257,6 +257,13 @@ class _Smart1ApiError(Exception):
         super().__init__(f"smart1 API error {self.code}")
 
 
+class _Smart1TransportError(_Smart1ApiError):
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        self.retryable = True
+        super().__init__("unknown")
+
+
 class _FakeApi:
     plants_by_key: dict[str, list[dict[str, str]]] = {}
     errors_by_key: dict[str, BaseException] = {}
@@ -408,6 +415,7 @@ def _base_modules() -> dict[str, types.ModuleType]:
             "custom_components.smart1_ems.api",
             Smart1Api=_FakeApi,
             Smart1ApiError=_Smart1ApiError,
+            Smart1TransportError=_Smart1TransportError,
             is_auth_error=lambda error: (
                 isinstance(error, _Smart1ApiError)
                 and error.code in {"401", "403"}

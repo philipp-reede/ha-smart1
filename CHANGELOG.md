@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Retry temporary connection and timeout failures for only the affected live
+  polling batch, while keeping portal-provided unknown error codes
+  non-retryable and reporting transport failures without request details
+
 ## [0.9.2] - 2026-10-20
 
 ### Fixed

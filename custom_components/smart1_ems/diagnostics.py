@@ -11,7 +11,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .api import Smart1Api, Smart1ApiError, sanitize_api_error_code
+from .api import (
+    Smart1Api,
+    Smart1ApiError,
+    Smart1TransportError,
+    sanitize_api_error_code,
+)
 from .bus import Smart1BusSystem
 from .classifier import classify_point
 from .const import DOMAIN
@@ -199,6 +204,13 @@ async def _linear_cumulative_probe(
             target_date=target_date,
             missing_ok=True,
         )
+    except Smart1TransportError as err:
+        return {
+            "period": "previous_complete_day",
+            "requested_points": len(energy_points),
+            "result": "request_failed",
+            "error_type": err.kind,
+        }
     except Smart1ApiError as err:
         return {
             "period": "previous_complete_day",
@@ -211,7 +223,9 @@ async def _linear_cumulative_probe(
             "period": "previous_complete_day",
             "requested_points": len(energy_points),
             "result": "request_failed",
-            "error_type": type(err).__name__,
+            "error_type": (
+                "timeout" if isinstance(err, TimeoutError) else "client_error"
+            ),
         }
 
     points_with_rows = sorted(
@@ -271,6 +285,13 @@ async def _pv_power_integration_probe(
             target_date=target_date,
             missing_ok=True,
         )
+    except Smart1TransportError as err:
+        return {
+            "period": "previous_complete_day",
+            "point_number": point_number,
+            "result": "request_failed",
+            "error_type": err.kind,
+        }
     except Smart1ApiError as err:
         return {
             "period": "previous_complete_day",
@@ -283,7 +304,9 @@ async def _pv_power_integration_probe(
             "period": "previous_complete_day",
             "point_number": point_number,
             "result": "request_failed",
-            "error_type": type(err).__name__,
+            "error_type": (
+                "timeout" if isinstance(err, TimeoutError) else "client_error"
+            ),
         }
 
     integration = integrate_power_rows(

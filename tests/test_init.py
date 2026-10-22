@@ -37,6 +37,12 @@ class Smart1SetupTest(unittest.TestCase):
                 self.code = match.group(1) if match else "unknown"
                 super().__init__(f"smart1 API error {self.code}")
 
+        class Smart1TransportError(Smart1ApiError):
+            def __init__(self, kind: str) -> None:
+                self.kind = kind
+                self.retryable = True
+                super().__init__("unknown")
+
         class ConfigEntryNotReady(Exception):
             pass
 
@@ -44,6 +50,8 @@ class Smart1SetupTest(unittest.TestCase):
             pass
 
         def describe_api_error(error: BaseException) -> str:
+            if isinstance(error, Smart1TransportError):
+                return f"smart1 API transport {error.kind}"
             if isinstance(error, Smart1ApiError):
                 return f"smart1 API error {error.code}"
             return type(error).__name__
@@ -306,6 +314,7 @@ class Smart1SetupTest(unittest.TestCase):
                 "custom_components.smart1_ems.api",
                 Smart1Api=FakeApi,
                 Smart1ApiError=Smart1ApiError,
+                Smart1TransportError=Smart1TransportError,
                 describe_api_error=describe_api_error,
                 is_auth_error=is_auth_error,
                 sanitize_api_error_code=lambda code: "unknown",
@@ -463,7 +472,7 @@ class Smart1SetupTest(unittest.TestCase):
                 )
                 FakeApi.inverter_error = topology_error
                 FakeApi.module_field_error = topology_error
-                FakeApi.bus_error = topology_error
+                FakeApi.bus_error = Smart1TransportError("timeout")
                 hass.config_entries.async_reload.reset_mock()
                 try:
                     self.assertTrue(
@@ -483,6 +492,13 @@ class Smart1SetupTest(unittest.TestCase):
                 )
                 self.assertFalse(
                     retry_runtime["bus_discovery_authoritative"]
+                )
+                self.assertEqual(
+                    retry_runtime["bus_probe"],
+                    {
+                        "endpoint_result": "request_failed",
+                        "error_type": "timeout",
+                    },
                 )
                 retry_api = FakeApi.instance
                 topology_callbacks = [

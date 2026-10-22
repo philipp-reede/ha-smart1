@@ -297,6 +297,59 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(result["error_code"], "500")
         self.assertNotIn(api_key, json.dumps(result))
 
+    def test_transport_failures_use_sanitized_diagnostic_categories(
+        self,
+    ) -> None:
+        point = point_module.Smart1Point(
+            id="private-point-id",
+            name="PV Erzeugung",
+            type="Energy",
+            source="counter",
+            hardware="pv_global",
+            interface="pv",
+        )
+
+        class TimeoutApi:
+            async def get_linear_cumulative_rows(self, *args, **kwargs):
+                raise diagnostics.Smart1TransportError("timeout")
+
+        class ConnectionErrorApi:
+            async def get_linear_detailed_rows(self, *args, **kwargs):
+                raise diagnostics.Smart1TransportError("client_error")
+
+        cumulative = asyncio.run(
+            diagnostics._linear_cumulative_probe(
+                TimeoutApi(),
+                [(1, point)],
+            )
+        )
+        pv_integration = asyncio.run(
+            diagnostics._pv_power_integration_probe(
+                object(),
+                ConnectionErrorApi(),
+                [(1, point)],
+            )
+        )
+
+        self.assertEqual(
+            cumulative,
+            {
+                "period": "previous_complete_day",
+                "requested_points": 1,
+                "result": "request_failed",
+                "error_type": "timeout",
+            },
+        )
+        self.assertEqual(
+            pv_integration,
+            {
+                "period": "previous_complete_day",
+                "point_number": 1,
+                "result": "request_failed",
+                "error_type": "client_error",
+            },
+        )
+
     def test_returns_classification_metadata_without_credentials_or_values(
         self,
     ) -> None:

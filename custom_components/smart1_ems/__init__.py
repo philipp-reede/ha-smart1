@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 from .api import (
     Smart1Api,
     Smart1ApiError,
+    Smart1TransportError,
     describe_api_error,
     is_auth_error,
     sanitize_api_error_code,
@@ -452,6 +453,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         try:
             buses, bus_probe = await api.get_buses_with_probe(missing_ok=True)
+        except Smart1TransportError as err:
+            # Preserve the sanitized transport category for diagnostics.
+            _LOGGER.debug(
+                "Unable to discover smart1 inverter buses: %s",
+                describe_api_error(err),
+            )
+            buses = []
+            bus_probe = {
+                "endpoint_result": "request_failed",
+                "error_type": err.kind,
+            }
         except Smart1ApiError as err:
             # Inverter-bus metadata is optional and cannot block live values.
             _LOGGER.debug(
@@ -472,7 +484,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             buses = []
             bus_probe = {
                 "endpoint_result": "request_failed",
-                "error_type": describe_api_error(err),
+                "error_type": (
+                    "timeout"
+                    if isinstance(err, TimeoutError)
+                    else "client_error"
+                ),
             }
 
     discovery = Smart1Discovery()
