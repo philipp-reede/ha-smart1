@@ -335,9 +335,8 @@
 - The repository is available from the default HACS catalogue and contains
   public installation documentation, English and German custom-integration
   translations, and automated HACS and Hassfest validation for the current
-  0.9.3 early-beta release. The manifest declares the broad `energy` category
-  used for Marketplace discovery, while the cross-version installation link
-  continues to open HACS before Core 2026.11 and Marketplace from Core 2026.11
+  0.9.3 early-beta release. The cross-version installation link continues to
+  open HACS before Core 2026.11 and Marketplace from Core 2026.11
 - CI also imports every integration module against pinned Home Assistant Core
   2026.9.3 on Python 3.14, while setup tests cover startup history import and
   the separate scheduled repair and current-day refresh paths. GitHub's
@@ -419,6 +418,9 @@
 
 ## Remaining work
 
+- Add the broad `energy` Marketplace category after the required Hassfest
+  validator accepts the newly documented optional `categories` manifest key
+  for custom integrations
 - Validate both the automatic migration of an existing HACS installation and a
   clean Marketplace installation with Home Assistant Core 2026.11, then record
   the confirmed version in the compatibility matrix

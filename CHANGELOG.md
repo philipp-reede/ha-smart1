@@ -4,11 +4,6 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Changed
-
-- Classify smart1 EMS in the broad Home Assistant `energy` category so the
-  built-in Marketplace can place it in the appropriate browse section
-
 ### Documentation
 
 - Document installation through the built-in Marketplace on Home Assistant
@@ -17,7 +12,7 @@ All notable changes to this project are documented in this file.
 - Explain automatic migration from HACS, immediate setup after a fresh
   Marketplace installation and restart repairs after integration updates
 - Add Marketplace as an installation method in the bug-report form and track
-  the pending Core 2026.11 migration and clean-install tests
+  the pending Core 2026.11 migration, clean-install and category follow-ups
 
 ## [0.9.3] - 2026-10-22
 
