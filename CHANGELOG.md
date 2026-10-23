@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Document installation through the built-in Marketplace on Home Assistant
+  Core 2026.11 and later while retaining the cross-version HACS link and the
+  instructions for older Core versions
+- Explain automatic migration from HACS, immediate setup after a fresh
+  Marketplace installation and restart repairs after integration updates
+- Add Marketplace as an installation method in the bug-report form and track
+  the pending Core 2026.11 migration, clean-install and category follow-ups
+
 ## [0.9.3] - 2026-10-22
 
 ### Fixed
