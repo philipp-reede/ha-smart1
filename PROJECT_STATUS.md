@@ -335,7 +335,7 @@
 - The repository is available from the default HACS catalogue and contains
   public installation documentation, English and German custom-integration
   translations, and automated HACS and Hassfest validation for the current
-  0.9.3 early-beta release. The manifest declares the broad `energy` category
+  0.9.4 early-beta release. The manifest declares the broad `energy` category
   used for Marketplace discovery, while the cross-version installation link
   continues to open HACS before Core 2026.11 and Marketplace from Core 2026.11
 - CI imports every integration module against pinned Home Assistant Core
