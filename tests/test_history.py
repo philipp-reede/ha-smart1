@@ -15454,10 +15454,18 @@ class Smart1HistoryTest(unittest.TestCase):
         imported_by_start = {item["start"]: item for item in imported}
         # Every source-zone hour belonging to the day immediately before the
         # supported portal window is retained.  The eastward zone change
-        # moves those four seam samples onto the same target-day anchor.
-        self.assertEqual(imported_by_start[preserved_start]["state"], 4.0)
+        # moves those seam samples onto the same target-day anchor.  Their
+        # count depends on whether the rolling boundary is in summer or
+        # winter time in the source zone.
+        self.assertEqual(
+            imported_by_start[preserved_start]["state"],
+            float(len(seam_hours)),
+        )
         self.assertEqual(imported_by_start[new_boundary]["state"], 2.0)
-        self.assertEqual(sum(item["state"] for item in imported), 6.0)
+        self.assertEqual(
+            sum(item["state"] for item in imported),
+            float(len(seam_hours)) + 2.0,
+        )
         self.assertTrue(
             all(
                 left["sum"] <= right["sum"]
