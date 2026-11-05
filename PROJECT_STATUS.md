@@ -361,10 +361,16 @@
   completed the new derived-energy role page successfully with all seven
   detected recommendations selected. The documented screenshot records the
   additional initial-setup step without exposing installation identifiers
+- Home Assistant Core 2026.11 was validated through both supported transition
+  paths. The production system continued to run smart1 EMS 0.9.3 after its Core
+  upgrade and then updated successfully to 0.9.4. On a separate test system,
+  0.9.4 installed successfully from the built-in Marketplace after the previous
+  `custom_components/smart1_ems` directory was removed
 - The integration is designed for the documented smart1 portal API generally;
   real-world hardware validation currently covers M-TEC Energy Hero EMS,
   Energy Heater, Energy Butler inverter/storage, M-TEC AP440 heat pump and a
-  KEBA wallbox
+  KEBA P40 M-TEC wallbox. The wallbox operated without observed functional
+  limitations across every tested software release from 1.4.5 through 1.5.2
 
 ## Known limitations
 
@@ -420,9 +426,6 @@
 
 ## Remaining work
 
-- Validate both the automatic migration of an existing HACS installation and a
-  clean Marketplace installation with Home Assistant Core 2026.11, then record
-  the confirmed version in the compatibility matrix
 - Validate discovery and device assignment with additional smart1 portals and
   hardware combinations
 - The preferred source needs confirmation where the installation exposes
