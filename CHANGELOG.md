@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-05
+
 ### Changed
 
 - Classify smart1 EMS in the broad Home Assistant `energy` category so the
