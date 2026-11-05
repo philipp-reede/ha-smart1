@@ -29,7 +29,7 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 > 2026.9.3 bestätigt.
 
 [English documentation](../README.md) ·
-[Installation](#installation-über-hacs) ·
+[Installation](#installation-über-marketplace-oder-hacs) ·
 [Screenshots](#screenshots) ·
 [Energy Dashboard](#energy-dashboard) ·
 [Fehler melden](#fehler-melden) ·
@@ -168,11 +168,29 @@ können über den
 [Kompatibilitätsbericht](https://github.com/philipp-reede/ha-smart1/issues/new?template=compatibility_report.yml)
 gemeldet werden.
 
-## Installation über HACS
+## Installation über Marketplace oder HACS
 
-smart1 EMS ist im Standardkatalog von HACS verfügbar:
+smart1 EMS ist im Community-Katalog verfügbar, den Home Assistant ab Core
+2026.11 im integrierten Marketplace und auf älteren Core-Versionen über HACS
+bereitstellt:
 
-[![Home Assistant öffnen und dieses Repository in HACS anzeigen](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=philipp-reede&repository=ha-smart1&category=integration)
+[![Home Assistant öffnen und dieses Repository im Marketplace oder in HACS anzeigen](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=philipp-reede&repository=ha-smart1&category=integration)
+
+### Home Assistant Core 2026.11 und neuer
+
+1. **Einstellungen → Marketplace** öffnen und den Hinweis zu
+   Community-Inhalten bestätigen, falls Home Assistant ihn anzeigt.
+2. Nach **smart1 EMS** suchen, die Repository-Seite öffnen und
+   **Installieren** auswählen.
+3. Die angezeigte Version prüfen und erneut **Installieren** auswählen.
+4. Mit der anschließend geöffneten Integrationseinrichtung fortfahren.
+
+Durch den Konfigurationsdialog kann eine neue Marketplace-Installation ohne
+Neustart geladen werden. Nach dem Aktualisieren oder Entfernen einer bereits
+geladenen Integration zeigt Home Assistant bei Bedarf eine Reparatur zum
+Neustart an.
+
+### Home Assistant Core 2026.10 und älter
 
 1. HACS in Home Assistant öffnen.
 2. Unter den Integrationen nach **smart1 EMS** suchen.
@@ -180,10 +198,13 @@ smart1 EMS ist im Standardkatalog von HACS verfügbar:
 4. Home Assistant neu starten.
 
 Das frühere Hinzufügen als benutzerdefiniertes Repository ist nicht mehr
-erforderlich. Bestehende HACS-Installationen über ein benutzerdefiniertes
-Repository erhalten weiterhin Aktualisierungen und müssen nicht neu installiert
-werden. Nach der Aktualisierung seiner Repository-Daten erkennt HACS den Eintrag
-aus dem Standardkatalog.
+erforderlich. Beim Upgrade eines Systems mit HACS auf Home Assistant 2026.11
+übernimmt der Marketplace installierte Repositories, benutzerdefinierte
+Repositories und Update-Entitäten automatisch. Bestehende Installationen
+erhalten weiterhin Aktualisierungen und müssen nicht neu installiert werden.
+Der Button oben verwendet absichtlich weiterhin den versionsübergreifenden
+`hacs_repository`-Link: Vor Core 2026.11 öffnet er HACS, ab Core 2026.11 den
+Marketplace.
 
 ## Einrichtung
 

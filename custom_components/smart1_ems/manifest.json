@@ -1,6 +1,7 @@
 {
   "domain": "smart1_ems",
   "name": "smart1 EMS",
+  "categories": ["energy"],
   "codeowners": ["@philipp-reede"],
   "config_flow": true,
   "dependencies": ["recorder"],
