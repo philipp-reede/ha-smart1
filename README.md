@@ -129,7 +129,7 @@ been limited to one installation:
 | EMS and portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, software `1.28.57` and `1.28.59` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Inverter and battery storage | M-TEC Energy Butler 20 kW 3G40 | Firmware `V04.02.00.02-V23.54.05.00` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Auxiliary heating | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, firmware `V47.22.18.24` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| EV charging | KEBA P40 M-TEC | Software `1.4.5` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| EV charging | KEBA P40 M-TEC | Software `1.4.5` through release `1.5.2`; all intervening releases tested without observed functional limitations | Real-world tested | [#13 for 1.4.5](https://github.com/philipp-reede/ha-smart1/issues/13); versions through 1.5.2 reported 2026-11-05 |
 | Heat pump | M-TEC AP440 | Not reported | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3`, `2026.10.2` and `2026.11`; OS `18.3` and Supervisor `2026.09.2` tested with Core `2026.9.3` | Real-world tested | [#13 through Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Core 2026.10.2 setup test reported 2026-10-19; Core 2026.11 migration and Marketplace installation tests reported 2026-11-05 |
 
@@ -160,6 +160,10 @@ production system, smart1 EMS `v0.9.3` continued to work after the Core upgrade
 and then updated successfully to `v0.9.4`. On a separate test system,
 `v0.9.4` installed successfully through the built-in Marketplace after the
 previous `custom_components/smart1_ems` directory had been removed.
+
+The KEBA P40 M-TEC wallbox was also updated from software `1.4.5` through
+release `1.5.2`. Every intervening release operated without observed
+functional limitations.
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a

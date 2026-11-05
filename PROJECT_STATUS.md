@@ -369,7 +369,8 @@
 - The integration is designed for the documented smart1 portal API generally;
   real-world hardware validation currently covers M-TEC Energy Hero EMS,
   Energy Heater, Energy Butler inverter/storage, M-TEC AP440 heat pump and a
-  KEBA wallbox
+  KEBA P40 M-TEC wallbox. The wallbox operated without observed functional
+  limitations across every tested software release from 1.4.5 through 1.5.2
 
 ## Known limitations
 

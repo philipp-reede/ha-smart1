@@ -126,7 +126,7 @@ Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 | EMS und Portal | M-TEC Energy Hero PV V2 EMS | Hardware `RevA.2024`, Software `1.28.57` und `1.28.59` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wechselrichter und Speicher | M-TEC Energy Butler 20 kW 3G40 | Firmware `V04.02.00.02-V23.54.05.00` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Zusatzheizung | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, Firmware `V47.22.18.24` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| Wallbox | KEBA P40 M-TEC | Software `1.4.5` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
+| Wallbox | KEBA P40 M-TEC | Software `1.4.5` bis Release `1.5.2`; alle Zwischenstände ohne beobachtete Funktionseinschränkungen getestet | Praxistest erfolgreich | [#13 für 1.4.5](https://github.com/philipp-reede/ha-smart1/issues/13); Versionen bis 1.5.2 am 05.11.2026 gemeldet |
 | Wärmepumpe | M-TEC AP440 | Nicht angegeben | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3`, `2026.10.2` und `2026.11`; OS `18.3` und Supervisor `2026.09.2` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13 bis Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Einrichtungsprüfung mit Core 2026.10.2 vom 19.10.2026; Migration und Marketplace-Installation mit Core 2026.11 am 05.11.2026 erfolgreich geprüft |
 
@@ -163,6 +163,10 @@ weiter und ließ sich anschließend erfolgreich auf `v0.9.4` aktualisieren. Auf
 einem separaten Testsystem wurde das bisherige Verzeichnis
 `custom_components/smart1_ems` entfernt und `v0.9.4` danach erfolgreich über
 den integrierten Marketplace installiert.
+
+Auch die KEBA P40 M-TEC Wallbox wurde von Software `1.4.5` bis Release `1.5.2`
+aktualisiert. Sämtliche Zwischenstände liefen ohne beobachtete
+Funktionseinschränkungen.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an
