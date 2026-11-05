@@ -24,8 +24,8 @@ battery, wallbox, heat pump and auxiliary heating.
 
 > This project is an early public beta. It has been validated repeatedly with
 > one real smart1 installation and Home Assistant Core 2026.7.4, 2026.8.3,
-> 2026.9.3 and 2026.10.2. Home Assistant OS 18.3 was confirmed with Core
-> 2026.9.3.
+> 2026.9.3, 2026.10.2 and 2026.11. Home Assistant OS 18.3 was confirmed with
+> Core 2026.9.3.
 
 [Deutsche Anleitung](docs/README.de.md) ·
 [Installation](#installation-with-marketplace-or-hacs) ·
@@ -131,7 +131,7 @@ been limited to one installation:
 | Auxiliary heating | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, firmware `V47.22.18.24` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | EV charging | KEBA P40 M-TEC | Software `1.4.5` | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Heat pump | M-TEC AP440 | Not reported | Real-world tested | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3` and `2026.10.2`; OS `18.3` and Supervisor `2026.09.2` tested with Core `2026.9.3` | Real-world tested | [#13 through Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Core 2026.10.2 setup test reported 2026-10-19 |
+| Home Assistant host | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3`, `2026.10.2` and `2026.11`; OS `18.3` and Supervisor `2026.09.2` tested with Core `2026.9.3` | Real-world tested | [#13 through Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Core 2026.10.2 setup test reported 2026-10-19; Core 2026.11 migration and Marketplace installation tests reported 2026-11-05 |
 
 These are confirmed test combinations, not minimum version requirements.
 Report [#13](https://github.com/philipp-reede/ha-smart1/issues/13) used
@@ -154,6 +154,12 @@ normal upgrade test. The full test history is documented in
 In a separate follow-up test, the initial setup, including confirmation of all
 seven suggested derived-energy roles, was completed successfully with Home
 Assistant Core `2026.10.2`.
+
+Two Home Assistant Core `2026.11` follow-up tests also succeeded. On the
+production system, smart1 EMS `v0.9.3` continued to work after the Core upgrade
+and then updated successfully to `v0.9.4`. On a separate test system,
+`v0.9.4` installed successfully through the built-in Marketplace after the
+previous `custom_components/smart1_ems` directory had been removed.
 
 Active inverter-bus configurations, installations with multiple inverters and
 other smart1 portal or hardware combinations have not yet been confirmed on a

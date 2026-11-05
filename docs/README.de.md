@@ -25,8 +25,8 @@ Wallbox, Wärmepumpe und Zusatzheizung ab.
 
 > Das Projekt ist eine frühe öffentliche Beta-Version. Es wurde wiederholt mit
 > einer realen smart1 Anlage sowie Home Assistant Core 2026.7.4, 2026.8.3,
-> 2026.9.3 und 2026.10.2 geprüft. Home Assistant OS 18.3 wurde mit Core
-> 2026.9.3 bestätigt.
+> 2026.9.3, 2026.10.2 und 2026.11 geprüft. Home Assistant OS 18.3 wurde mit
+> Core 2026.9.3 bestätigt.
 
 [English documentation](../README.md) ·
 [Installation](#installation-über-marketplace-oder-hacs) ·
@@ -128,7 +128,7 @@ Praktisch getestet werden konnte sie bisher nur mit einer Anlage:
 | Zusatzheizung | M-TEC Energy Heater 9 kW 3P 1G | Hardware `V12.12`, Firmware `V47.22.18.24` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wallbox | KEBA P40 M-TEC | Software `1.4.5` | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
 | Wärmepumpe | M-TEC AP440 | Nicht angegeben | Praxistest erfolgreich | [#13](https://github.com/philipp-reede/ha-smart1/issues/13) |
-| Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3` und `2026.10.2`; OS `18.3` und Supervisor `2026.09.2` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13 bis Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Einrichtungsprüfung mit Core 2026.10.2 vom 19.10.2026 |
+| Home-Assistant-System | Home Assistant OS | Core `2026.7.4`, `2026.8.3`, `2026.9.3`, `2026.10.2` und `2026.11`; OS `18.3` und Supervisor `2026.09.2` mit Core `2026.9.3` getestet | Praxistest erfolgreich | [#13 bis Core 2026.9.3](https://github.com/philipp-reede/ha-smart1/issues/13); Einrichtungsprüfung mit Core 2026.10.2 vom 19.10.2026; Migration und Marketplace-Installation mit Core 2026.11 am 05.11.2026 erfolgreich geprüft |
 
 Diese Angaben dokumentieren bestätigte Testkombinationen und keine
 Mindestversionen. Bericht
@@ -156,6 +156,13 @@ dokumentiert.
 In einer separaten Folgeprüfung wurde die Ersteinrichtung einschließlich der
 Bestätigung aller sieben vorgeschlagenen abgeleiteten Energierollen mit Home
 Assistant Core `2026.10.2` erfolgreich abgeschlossen.
+
+Auch zwei Folgeprüfungen mit Home Assistant Core `2026.11` waren erfolgreich.
+Auf dem Produktivsystem funktionierte smart1 EMS `v0.9.3` nach dem Core-Upgrade
+weiter und ließ sich anschließend erfolgreich auf `v0.9.4` aktualisieren. Auf
+einem separaten Testsystem wurde das bisherige Verzeichnis
+`custom_components/smart1_ems` entfernt und `v0.9.4` danach erfolgreich über
+den integrierten Marketplace installiert.
 
 Aktive Wechselrichter-Buskonfigurationen, Anlagen mit mehreren Wechselrichtern
 und andere smart1 Portale oder Hardwarekombinationen konnten noch nicht an

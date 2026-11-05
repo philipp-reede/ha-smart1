@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Record successful Home Assistant Core 2026.11 testing for both an existing
+  production installation migrating from smart1 EMS 0.9.3 to 0.9.4 and a
+  separate 0.9.4 installation through the built-in Marketplace
+
 ## [0.9.4] - 2026-11-05
 
 ### Changed
